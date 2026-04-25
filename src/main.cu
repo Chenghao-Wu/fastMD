@@ -12,6 +12,7 @@
 #include "analysis/correlator.cuh"
 #include "io/dump.cuh"
 #include "io/config.hpp"
+#include "io/lammps_data.hpp"
 #include <cstdio>
 
 int main(int argc, char** argv) {
@@ -22,11 +23,31 @@ int main(int argc, char** argv) {
 
     TopologyData topo;
     SimParams params = parse_config(argv[1], topo);
+    if (!topo.data_file.empty()) {
+        parse_lammps_data(topo.data_file, topo);
+        printf("Loaded %zu bonds, %zu angles from %s\n",
+               topo.bonds.size(), topo.angles.size(), topo.data_file.c_str());
+    }
     printf("Loaded %d atoms, box=%.2f, rc=%.2f, dt=%.4f, nsteps=%d\n",
            params.natoms, params.box_L, params.rc, params.dt, params.nsteps);
 
     System sys;
     sys.allocate(params);
+    if (topo.bonds.size() > 0) {
+        sys.nbonds = static_cast<int>(topo.bonds.size());
+        CUDA_CHECK(cudaMalloc(&sys.bonds, sys.nbonds * sizeof(int2)));
+        CUDA_CHECK(cudaMalloc(&sys.bond_param_idx, sys.nbonds * sizeof(int)));
+        CUDA_CHECK(cudaMemcpy(sys.bonds, topo.bonds.data(),
+                              sys.nbonds * sizeof(int2), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(sys.bond_param_idx, topo.bond_types.data(),
+                              sys.nbonds * sizeof(int), cudaMemcpyHostToDevice));
+    }
+    if (topo.angles.size() > 0) {
+        sys.nangles = static_cast<int>(topo.angles.size());
+        CUDA_CHECK(cudaMalloc(&sys.angles, sys.nangles * sizeof(int4)));
+        CUDA_CHECK(cudaMemcpy(sys.angles, topo.angles.data(),
+                              sys.nangles * sizeof(int4), cudaMemcpyHostToDevice));
+    }
 
     int np = sys.natoms_padded;
     std::vector<float4> pos_pad(np, make_float4(0,0,0, pack_type_id(-1)));
@@ -43,6 +64,20 @@ int main(int argc, char** argv) {
 
     FENEParams* d_fene_params = nullptr;
     AngleParams* d_angle_params = nullptr;
+    if (topo.bond_params.size() > 0) {
+        CUDA_CHECK(cudaMalloc(&d_fene_params,
+                              topo.bond_params.size() * sizeof(FENEParams)));
+        CUDA_CHECK(cudaMemcpy(d_fene_params, topo.bond_params.data(),
+                              topo.bond_params.size() * sizeof(FENEParams),
+                              cudaMemcpyHostToDevice));
+    }
+    if (topo.angle_params.size() > 0) {
+        CUDA_CHECK(cudaMalloc(&d_angle_params,
+                              topo.angle_params.size() * sizeof(AngleParams)));
+        CUDA_CHECK(cudaMemcpy(d_angle_params, topo.angle_params.data(),
+                              topo.angle_params.size() * sizeof(AngleParams),
+                              cudaMemcpyHostToDevice));
+    }
 
     MortonSorter morton;
     morton.allocate(np);
