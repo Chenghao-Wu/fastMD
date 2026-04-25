@@ -1,0 +1,22 @@
+{
+  "fastmd_binary": "/home/zhenghaowu/fastMD/build/ultimateCGMD",
+  "lammps_binary": "/home/zhenghaowu/lammps/build/lmp",
+  "data_file": "/home/zhenghaowu/fastMD/input_000.data",
+  "natoms": 30000,
+  "box_L": 34.99514024,
+  "ntypes": 1,
+  "temperature": 1.0,
+  "dt": 0.001,
+  "rc": 2.5,
+  "skin": 0.3,
+  "gamma": 1.0,
+  "seed": 42,
+  "nsteps_validation": 1000,
+  "nsteps_benchmark": 1000000,
+  "thermo_freq_validation": 100,
+  "thermo_freq_benchmark": 1000,
+  "dump_freq": 0,
+  "lj_params": [[0, 0, 1.0, 1.0]],
+  "bond_params": [[0, 30.0, 1.5, 1.0, 1.0]],
+  "angle_params": [[0, 5.0, 180.0]]
+}
