@@ -64,6 +64,11 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaStreamCreate(&stream_bonded));
     CUDA_CHECK(cudaStreamCreate(&stream_io));
 
+    cudaEvent_t force_done_lj, force_done_bonded, pos_ready;
+    CUDA_CHECK(cudaEventCreate(&force_done_lj));
+    CUDA_CHECK(cudaEventCreate(&force_done_bonded));
+    CUDA_CHECK(cudaEventCreate(&pos_ready));
+
     morton.sort_and_permute(sys.pos, sys.vel, params.natoms, params.inv_L);
     CUDA_CHECK(cudaMemcpy(sys.pos_ref, sys.pos, np * sizeof(float4),
                            cudaMemcpyDeviceToDevice));
@@ -105,6 +110,10 @@ int main(int argc, char** argv) {
                              params.rc + params.skin, params.box_L, params.inv_L);
         }
 
+        CUDA_CHECK(cudaEventRecord(pos_ready, 0));
+        CUDA_CHECK(cudaStreamWaitEvent(stream_lj, pos_ready, 0));
+        CUDA_CHECK(cudaStreamWaitEvent(stream_bonded, pos_ready, 0));
+
         sys.zero_forces();
         sys.zero_virial();
 
@@ -124,7 +133,11 @@ int main(int argc, char** argv) {
                                  sys.nangles, params.box_L, params.inv_L,
                                  stream_bonded);
         }
-        CUDA_CHECK(cudaDeviceSynchronize());
+
+        CUDA_CHECK(cudaEventRecord(force_done_lj, stream_lj));
+        CUDA_CHECK(cudaEventRecord(force_done_bonded, stream_bonded));
+        CUDA_CHECK(cudaStreamWaitEvent(0, force_done_lj, 0));
+        CUDA_CHECK(cudaStreamWaitEvent(0, force_done_bonded, 0));
 
         launch_integrator_post_force(sys.vel, sys.force, params.natoms, half_dt);
         CUDA_CHECK(cudaDeviceSynchronize());
@@ -183,6 +196,9 @@ int main(int argc, char** argv) {
     tile_list.free();
     morton.free();
     sys.free();
+    CUDA_CHECK(cudaEventDestroy(force_done_lj));
+    CUDA_CHECK(cudaEventDestroy(force_done_bonded));
+    CUDA_CHECK(cudaEventDestroy(pos_ready));
     CUDA_CHECK(cudaStreamDestroy(stream_lj));
     CUDA_CHECK(cudaStreamDestroy(stream_bonded));
     CUDA_CHECK(cudaStreamDestroy(stream_io));
