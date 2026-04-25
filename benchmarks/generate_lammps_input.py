@@ -55,7 +55,7 @@ def write_lammps_input(cfg: dict, out_path: str, nsteps: int, thermo_freq: int):
         f"pair_coeff {lj[0]+1} {lj[1]+1} {lj[2]} {lj[3]}",
         "",
         "bond_style fene",
-        f"bond_coeff {bond[0]+1} {bond[1]} {bond[2]}",
+        f"bond_coeff {bond[0]+1} {bond[1]} {bond[2]} {bond[3]} {bond[4]}",
         "",
         "angle_style harmonic",
         f"angle_coeff {angle[0]+1} {angle[1]} {angle[2]}",
