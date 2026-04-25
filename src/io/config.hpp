@@ -1,5 +1,7 @@
 #pragma once
 #include "../core/types.cuh"
+#include "../force/fene.cuh"
+#include "../force/angle.cuh"
 #include <string>
 #include <vector>
 
@@ -10,6 +12,9 @@ struct TopologyData {
     std::vector<int>    bond_types;
     std::vector<int4>   angles;
     std::vector<float2> lj_params;
+    std::vector<FENEParams> bond_params;
+    std::vector<AngleParams> angle_params;
+    std::string data_file;
 };
 
 SimParams parse_config(const std::string& filename, TopologyData& topo);
