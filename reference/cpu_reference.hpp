@@ -52,4 +52,38 @@ inline std::vector<int> morton_sort_ref(const std::vector<float4>& pos,
     return perm;
 }
 
+struct TilePairRef {
+    int tile_a, tile_b;
+};
+
+inline std::vector<TilePairRef> brute_force_tile_list(
+    const std::vector<float4>& pos, int ntiles, float rc_skin,
+    float L, float inv_L)
+{
+    std::vector<TilePairRef> pairs;
+    int tile_size = 32;
+    for (int ta = 0; ta < ntiles; ta++) {
+        for (int tb = ta; tb < ntiles; tb++) {
+            bool found = false;
+            for (int ia = ta * tile_size; ia < (ta+1) * tile_size && ia < (int)pos.size(); ia++) {
+                for (int ib = tb * tile_size; ib < (tb+1) * tile_size && ib < (int)pos.size(); ib++) {
+                    float d2 = dist2_pbc(pos[ia].x, pos[ia].y, pos[ia].z,
+                                          pos[ib].x, pos[ib].y, pos[ib].z,
+                                          L, inv_L);
+                    if (d2 < rc_skin * rc_skin) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (found) break;
+            }
+            if (found) {
+                pairs.push_back({ta, tb});
+                if (ta != tb) pairs.push_back({tb, ta});
+            }
+        }
+    }
+    return pairs;
+}
+
 } // namespace ref

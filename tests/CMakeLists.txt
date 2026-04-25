@@ -19,3 +19,8 @@ endfunction()
 add_cuda_test(test_pbc)
 add_cuda_test(test_morton)
 target_sources(test_morton PRIVATE ${CMAKE_SOURCE_DIR}/src/core/morton.cu)
+
+add_cuda_test(test_tile_list)
+target_sources(test_tile_list PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/neighbor/tile_list.cu
+    ${CMAKE_SOURCE_DIR}/src/core/morton.cu)
