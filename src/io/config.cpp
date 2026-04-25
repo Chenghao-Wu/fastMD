@@ -38,6 +38,7 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
         else if (key == "thermo_freq") iss >> params.thermo_freq;
         else if (key == "seed")   iss >> params.seed;
         else if (key == "coords_file") iss >> coords_file;
+        else if (key == "lammps_data_file") iss >> topo.data_file;
         else if (key == "lj") {
             int ti, tj; float eps, sig;
             iss >> ti >> tj >> eps >> sig;
@@ -66,6 +67,20 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
     for (auto& [ti, tj, eps, sig] : lj_entries) {
         topo.lj_params[ti * params.ntypes + tj] = make_float2(eps, sig);
         topo.lj_params[tj * params.ntypes + ti] = make_float2(eps, sig);
+    }
+
+    topo.bond_params.resize(bond_types_params.size());
+    for (size_t i = 0; i < bond_types_params.size(); ++i) {
+        topo.bond_params[i] = {bond_types_params[i].k,
+                               bond_types_params[i].R0,
+                               bond_types_params[i].eps,
+                               bond_types_params[i].sig};
+    }
+
+    topo.angle_params.resize(angle_types_params.size());
+    for (size_t i = 0; i < angle_types_params.size(); ++i) {
+        topo.angle_params[i] = {angle_types_params[i].k_theta,
+                                angle_types_params[i].theta0 * 3.14159265358979323846f / 180.0f};
     }
 
     if (!coords_file.empty()) {
