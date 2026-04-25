@@ -24,6 +24,7 @@ add_library(core STATIC
     src/integrate/langevin.cu
     src/analysis/thermo.cu
     src/analysis/correlator.cu
+    src/io/dump.cu
 )
 target_include_directories(core PUBLIC ${CMAKE_SOURCE_DIR}/src)
 set_target_properties(core PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
