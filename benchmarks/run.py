@@ -60,17 +60,20 @@ def parse_lammps_thermo(log: str):
     pes = []
     in_data = False
     for line in log.splitlines():
-        if line.startswith("Step"):
+        stripped = line.strip()
+        if stripped.startswith("Step") and "Temp" in stripped:
             in_data = True
             continue
         if in_data:
-            parts = line.split()
+            parts = stripped.split()
             if len(parts) >= 3:
                 try:
                     temps.append(float(parts[1]))
                     pes.append(float(parts[2]))
                 except ValueError:
                     in_data = False
+            else:
+                in_data = False
     return temps, pes
 
 
