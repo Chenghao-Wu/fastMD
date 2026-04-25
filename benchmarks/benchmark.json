@@ -1,7 +1,8 @@
 {
   "fastmd_binary": "/home/zhenghaowu/fastMD/build/ultimateCGMD",
   "lammps_binary": "/home/zhenghaowu/lammps/build/lmp",
-  "data_file": "/home/zhenghaowu/fastMD/input_000.data",
+  "data_file": "/home/zhenghaowu/fastMD/input_000_minimized.data",
+  "validation_window": 5,
   "natoms": 30000,
   "box_L": 34.99514024,
   "ntypes": 1,
