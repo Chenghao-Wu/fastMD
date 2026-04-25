@@ -104,7 +104,8 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaEventCreate(&force_done_bonded));
     CUDA_CHECK(cudaEventCreate(&pos_ready));
 
-    morton.sort_and_permute(sys.pos, sys.vel, params.natoms, params.inv_L);
+    if (sys.nbonds == 0 && sys.nangles == 0)
+        morton.sort_and_permute(sys.pos, sys.vel, params.natoms, params.inv_L);
     CUDA_CHECK(cudaMemcpy(sys.pos_ref, sys.pos, np * sizeof(float4),
                            cudaMemcpyDeviceToDevice));
     CUDA_CHECK(cudaMemset(sys.d_max_dr2_int, 0, sizeof(int)));
@@ -138,7 +139,8 @@ int main(int argc, char** argv) {
                                      params.box_L, params.inv_L, half_dt);
 
         if (check_and_reset_trigger(sys.d_max_dr2_int, params.skin)) {
-            morton.sort_and_permute(sys.pos, sys.vel, params.natoms, params.inv_L);
+            if (sys.nbonds == 0 && sys.nangles == 0)
+                morton.sort_and_permute(sys.pos, sys.vel, params.natoms, params.inv_L);
             CUDA_CHECK(cudaMemcpy(sys.pos_ref, sys.pos, np * sizeof(float4),
                                    cudaMemcpyDeviceToDevice));
             tile_list.build(sys.pos, params.natoms, sys.ntiles,

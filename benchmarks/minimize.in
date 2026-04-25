@@ -1,0 +1,23 @@
+units lj
+atom_style molecular
+newton off
+
+read_data /home/zhenghaowu/fastMD/input_000.data
+
+pair_style lj/cut 2.5
+pair_coeff 1 1 1.0 1.0
+
+bond_style fene
+bond_coeff 1 30.0 1.5 1.0 1.0
+
+angle_style harmonic
+angle_coeff 1 5.0 180.0
+
+neighbor 2.8 bin
+neigh_modify delay 0 every 1 check yes
+
+timestep 0.001
+
+minimize 1.0e-4 1.0e-6 1000 10000
+
+write_data /home/zhenghaowu/fastMD/input_000_minimized.data
