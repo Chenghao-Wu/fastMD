@@ -4,7 +4,7 @@
 
 TEST(LammpsDataParser, MiniFile) {
     TopologyData topo;
-    parse_lammps_data("tests/fixtures/mini.data", topo);
+    parse_lammps_data("../tests/fixtures/mini.data", topo);
 
     ASSERT_EQ(topo.positions.size(), 4u);
     EXPECT_FLOAT_EQ(topo.positions[0].x, 1.0f);

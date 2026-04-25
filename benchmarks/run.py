@@ -66,13 +66,14 @@ def parse_lammps_thermo(log: str):
             continue
         if in_data:
             parts = stripped.split()
-            if len(parts) >= 3:
+            if len(parts) >= 5:
                 try:
+                    int(parts[0])  # first column must be step number
                     temps.append(float(parts[1]))
                     pes.append(float(parts[2]))
                 except ValueError:
                     in_data = False
-            else:
+            elif len(parts) == 0:
                 in_data = False
     return temps, pes
 
