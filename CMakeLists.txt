@@ -13,4 +13,11 @@ add_compile_options(
     $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
 )
 
+# Core library
+add_library(core STATIC
+    src/core/system.cu
+)
+target_include_directories(core PUBLIC ${CMAKE_SOURCE_DIR}/src)
+set_target_properties(core PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
 add_subdirectory(tests)
