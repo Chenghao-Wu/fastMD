@@ -22,6 +22,7 @@ add_library(core STATIC
     src/force/fene.cu
     src/force/angle.cu
     src/integrate/langevin.cu
+    src/analysis/thermo.cu
 )
 target_include_directories(core PUBLIC ${CMAKE_SOURCE_DIR}/src)
 set_target_properties(core PROPERTIES CUDA_SEPARABLE_COMPILATION ON)

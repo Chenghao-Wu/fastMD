@@ -44,3 +44,6 @@ target_sources(test_fene PRIVATE ${CMAKE_SOURCE_DIR}/src/force/fene.cu)
 
 add_cuda_test(test_angle)
 target_sources(test_angle PRIVATE ${CMAKE_SOURCE_DIR}/src/force/angle.cu)
+
+add_cuda_test(test_thermo)
+target_sources(test_thermo PRIVATE ${CMAKE_SOURCE_DIR}/src/analysis/thermo.cu)
