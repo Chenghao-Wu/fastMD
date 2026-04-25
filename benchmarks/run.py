@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 import json
-import subprocess
 import sys
 import time
 from pathlib import Path
+
+from report import write_report
 
 
 def load_config(path: str) -> dict:
@@ -91,54 +92,6 @@ def validate(temps_f, pes_f, temps_l, pes_l, cfg: dict):
 
     passed = rel_temp_diff < 0.05 and rel_pe_diff < 1e-2
     return passed, rel_temp_diff, rel_pe_diff
-
-
-def write_report(
-    cfg: dict,
-    fastmd_time: float,
-    lammps_time: float,
-    ns_per_day_f: float,
-    ns_per_day_l: float,
-    speedup: float,
-    validation: dict,
-    out_path: str = "benchmark_report.json",
-):
-    import subprocess
-    from datetime import datetime, timezone
-
-    def get_gpu_name() -> str:
-        try:
-            out = subprocess.run(
-                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-                capture_output=True, text=True, check=True,
-            )
-            return out.stdout.strip().split("\n")[0]
-        except Exception:
-            return "unknown"
-
-    report = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "gpu": get_gpu_name(),
-        "system": cfg["data_file"],
-        "n_atoms": cfg["natoms"],
-        "nsteps": cfg["nsteps_benchmark"],
-        "fastMD": {
-            "wall_time_s": round(fastmd_time, 2),
-            "ns_per_day": round(ns_per_day_f, 2),
-        },
-        "lammps": {
-            "wall_time_s": round(lammps_time, 2),
-            "ns_per_day": round(ns_per_day_l, 2),
-        },
-        "speedup": round(speedup, 2),
-        "validation": {
-            "passed": validation["passed"],
-            "rel_temp_diff": validation["rel_temp_diff"],
-            "rel_pe_diff": validation["rel_pe_diff"],
-        },
-    }
-    Path(out_path).write_text(json.dumps(report, indent=2) + "\n")
-    print(f"Report written to {out_path}")
 
 
 def main():
