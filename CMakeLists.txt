@@ -18,6 +18,7 @@ add_library(core STATIC
     src/core/system.cu
     src/core/morton.cu
     src/neighbor/tile_list.cu
+    src/force/lj.cu
 )
 target_include_directories(core PUBLIC ${CMAKE_SOURCE_DIR}/src)
 set_target_properties(core PROPERTIES CUDA_SEPARABLE_COMPILATION ON)

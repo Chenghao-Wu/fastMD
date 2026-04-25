@@ -24,3 +24,9 @@ add_cuda_test(test_tile_list)
 target_sources(test_tile_list PRIVATE
     ${CMAKE_SOURCE_DIR}/src/neighbor/tile_list.cu
     ${CMAKE_SOURCE_DIR}/src/core/morton.cu)
+
+add_cuda_test(test_lj)
+target_sources(test_lj PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/force/lj.cu
+    ${CMAKE_SOURCE_DIR}/src/neighbor/tile_list.cu
+    ${CMAKE_SOURCE_DIR}/src/core/morton.cu)
