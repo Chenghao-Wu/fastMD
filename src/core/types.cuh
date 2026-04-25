@@ -2,6 +2,7 @@
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 
 #define CUDA_CHECK(call)                                                       \
     do {                                                                        \
@@ -19,12 +20,24 @@ __host__ __device__ inline int div_ceil(int a, int b) {
     return (a + b - 1) / b;
 }
 
-__device__ inline float pack_type_id(int type_id) {
+__host__ __device__ inline float pack_type_id(int type_id) {
+#ifdef __CUDA_ARCH__
     return __int_as_float(type_id);
+#else
+    float f;
+    std::memcpy(&f, &type_id, sizeof(float));
+    return f;
+#endif
 }
 
-__device__ inline int unpack_type_id(float w) {
+__host__ __device__ inline int unpack_type_id(float w) {
+#ifdef __CUDA_ARCH__
     return __float_as_int(w);
+#else
+    int i;
+    std::memcpy(&i, &w, sizeof(int));
+    return i;
+#endif
 }
 
 struct SimParams {

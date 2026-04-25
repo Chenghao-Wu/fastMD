@@ -16,6 +16,7 @@ add_compile_options(
 # Core library
 add_library(core STATIC
     src/core/system.cu
+    src/core/morton.cu
 )
 target_include_directories(core PUBLIC ${CMAKE_SOURCE_DIR}/src)
 set_target_properties(core PROPERTIES CUDA_SEPARABLE_COMPILATION ON)

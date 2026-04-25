@@ -17,3 +17,5 @@ function(add_cuda_test name)
 endfunction()
 
 add_cuda_test(test_pbc)
+add_cuda_test(test_morton)
+target_sources(test_morton PRIVATE ${CMAKE_SOURCE_DIR}/src/core/morton.cu)
