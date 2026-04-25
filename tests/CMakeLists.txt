@@ -38,3 +38,6 @@ target_sources(test_integrator PRIVATE
     ${CMAKE_SOURCE_DIR}/src/neighbor/tile_list.cu
     ${CMAKE_SOURCE_DIR}/src/core/morton.cu)
 target_link_libraries(test_integrator CUDA::curand)
+
+add_cuda_test(test_fene)
+target_sources(test_fene PRIVATE ${CMAKE_SOURCE_DIR}/src/force/fene.cu)

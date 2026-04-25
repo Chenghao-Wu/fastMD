@@ -141,4 +141,76 @@ inline LJResult brute_force_lj(const std::vector<float4>& pos,
     return res;
 }
 
+struct BondResult {
+    std::vector<float> fx, fy, fz;
+    std::vector<float> pe;
+    float virial[6];
+};
+
+inline BondResult brute_force_fene(
+    const std::vector<float4>& pos,
+    const std::vector<int2>& bonds,
+    const std::vector<int>& bond_types,
+    const std::vector<float>& bond_k,
+    const std::vector<float>& bond_R0,
+    const std::vector<float>& bond_eps,
+    const std::vector<float>& bond_sig,
+    float L, float inv_L)
+{
+    int N = pos.size();
+    BondResult res;
+    res.fx.resize(N, 0); res.fy.resize(N, 0); res.fz.resize(N, 0);
+    res.pe.resize(N, 0);
+    memset(res.virial, 0, sizeof(res.virial));
+
+    for (size_t b = 0; b < bonds.size(); b++) {
+        int i = bonds[b].x, j = bonds[b].y;
+        int t = bond_types[b];
+        float k = bond_k[t], R0 = bond_R0[t];
+        float eps = bond_eps[t], sig = bond_sig[t];
+
+        float dx = min_image(pos[i].x - pos[j].x, L, inv_L);
+        float dy = min_image(pos[i].y - pos[j].y, L, inv_L);
+        float dz = min_image(pos[i].z - pos[j].z, L, inv_L);
+        float r2 = dx*dx + dy*dy + dz*dz;
+        float R02 = R0 * R0;
+
+        float fene_ff = -k * R02 / (R02 - r2);
+
+        float sig2 = sig * sig;
+        float r_cut2 = sig2 * 1.2599210498948732f;
+        float wca_ff = 0.0f;
+        float wca_pe = 0.0f;
+        if (r2 < r_cut2) {
+            float r2inv = 1.0f / r2;
+            float sr2 = sig2 * r2inv;
+            float sr6 = sr2 * sr2 * sr2;
+            float sr12 = sr6 * sr6;
+            wca_ff = 24.0f * eps * r2inv * (2.0f * sr12 - sr6);
+            wca_pe = 4.0f * eps * (sr12 - sr6) + eps;
+        }
+
+        float total_ff = fene_ff + wca_ff;
+        float fix = total_ff * dx;
+        float fiy = total_ff * dy;
+        float fiz = total_ff * dz;
+
+        res.fx[i] += fix;  res.fy[i] += fiy;  res.fz[i] += fiz;
+        res.fx[j] -= fix;  res.fy[j] -= fiy;  res.fz[j] -= fiz;
+
+        float fene_pe = -0.5f * k * R02 * logf(1.0f - r2 / R02);
+        float pair_pe = fene_pe + wca_pe;
+        res.pe[i] += 0.5f * pair_pe;
+        res.pe[j] += 0.5f * pair_pe;
+
+        res.virial[0] += fix * dx;
+        res.virial[1] += fix * dy;
+        res.virial[2] += fix * dz;
+        res.virial[3] += fiy * dy;
+        res.virial[4] += fiy * dz;
+        res.virial[5] += fiz * dz;
+    }
+    return res;
+}
+
 } // namespace ref
