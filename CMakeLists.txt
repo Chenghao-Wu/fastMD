@@ -29,4 +29,10 @@ add_library(core STATIC
 target_include_directories(core PUBLIC ${CMAKE_SOURCE_DIR}/src)
 set_target_properties(core PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
+# Main executable
+add_executable(ultimateCGMD src/main.cu src/io/config.cpp)
+target_include_directories(ultimateCGMD PRIVATE src)
+target_link_libraries(ultimateCGMD core CUDA::cudart CUDA::curand)
+set_target_properties(ultimateCGMD PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
 add_subdirectory(tests)
