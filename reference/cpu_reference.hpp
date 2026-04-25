@@ -213,4 +213,77 @@ inline BondResult brute_force_fene(
     return res;
 }
 
+struct AngleResult {
+    std::vector<float> fx, fy, fz;
+    std::vector<float> pe;
+    float virial[6];
+};
+
+inline AngleResult brute_force_angle(
+    const std::vector<float4>& pos,
+    const std::vector<int4>& angles,
+    const std::vector<float>& angle_k,
+    const std::vector<float>& angle_theta0,
+    float L, float inv_L)
+{
+    int N = pos.size();
+    AngleResult res;
+    res.fx.resize(N, 0); res.fy.resize(N, 0); res.fz.resize(N, 0);
+    res.pe.resize(N, 0);
+    memset(res.virial, 0, sizeof(res.virial));
+
+    for (size_t a = 0; a < angles.size(); a++) {
+        int i = angles[a].x, j = angles[a].y, k = angles[a].z;
+        int t = angles[a].w;
+        float ka = angle_k[t], theta0 = angle_theta0[t];
+
+        float dxij = min_image(pos[i].x - pos[j].x, L, inv_L);
+        float dyij = min_image(pos[i].y - pos[j].y, L, inv_L);
+        float dzij = min_image(pos[i].z - pos[j].z, L, inv_L);
+        float dxkj = min_image(pos[k].x - pos[j].x, L, inv_L);
+        float dykj = min_image(pos[k].y - pos[j].y, L, inv_L);
+        float dzkj = min_image(pos[k].z - pos[j].z, L, inv_L);
+
+        float rij2 = dxij*dxij + dyij*dyij + dzij*dzij;
+        float rkj2 = dxkj*dxkj + dykj*dykj + dzkj*dzkj;
+        float rij = sqrtf(rij2);
+        float rkj = sqrtf(rkj2);
+
+        float cos_theta = (dxij*dxkj + dyij*dykj + dzij*dzkj) / (rij * rkj);
+        cos_theta = fminf(fmaxf(cos_theta, -1.0f), 1.0f);
+        float theta = acosf(cos_theta);
+        float dtheta = theta - theta0;
+        float sin_theta = sqrtf(1.0f - cos_theta * cos_theta);
+        if (sin_theta < 1e-6f) sin_theta = 1e-6f;
+
+        float prefactor = -ka * dtheta / sin_theta;
+
+        float fi_x = prefactor * (dxkj / (rij * rkj) - cos_theta * dxij / rij2);
+        float fi_y = prefactor * (dykj / (rij * rkj) - cos_theta * dyij / rij2);
+        float fi_z = prefactor * (dzkj / (rij * rkj) - cos_theta * dzij / rij2);
+        float fk_x = prefactor * (dxij / (rij * rkj) - cos_theta * dxkj / rkj2);
+        float fk_y = prefactor * (dyij / (rij * rkj) - cos_theta * dykj / rkj2);
+        float fk_z = prefactor * (dzij / (rij * rkj) - cos_theta * dzkj / rkj2);
+
+        res.fx[i] += fi_x; res.fy[i] += fi_y; res.fz[i] += fi_z;
+        res.fx[k] += fk_x; res.fy[k] += fk_y; res.fz[k] += fk_z;
+        res.fx[j] -= (fi_x + fk_x);
+        res.fy[j] -= (fi_y + fk_y);
+        res.fz[j] -= (fi_z + fk_z);
+
+        float pe = 0.5f * ka * dtheta * dtheta;
+        res.pe[i] += pe / 3.0f;
+        res.pe[j] += pe / 3.0f;
+        res.pe[k] += pe / 3.0f;
+
+        res.virial[0] += fi_x * dxij + fk_x * dxkj;
+        res.virial[1] += fi_x * dyij + fk_x * dykj;
+        res.virial[2] += fi_x * dzij + fk_x * dzkj;
+        res.virial[3] += fi_y * dyij + fk_y * dykj;
+        res.virial[4] += fi_y * dzij + fk_y * dzkj;
+        res.virial[5] += fi_z * dzij + fk_z * dzkj;
+    }
+    return res;
+}
+
 } // namespace ref

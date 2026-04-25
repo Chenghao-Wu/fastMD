@@ -20,6 +20,7 @@ add_library(core STATIC
     src/neighbor/tile_list.cu
     src/force/lj.cu
     src/force/fene.cu
+    src/force/angle.cu
     src/integrate/langevin.cu
 )
 target_include_directories(core PUBLIC ${CMAKE_SOURCE_DIR}/src)

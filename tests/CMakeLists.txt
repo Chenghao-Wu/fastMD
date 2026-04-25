@@ -41,3 +41,6 @@ target_link_libraries(test_integrator CUDA::curand)
 
 add_cuda_test(test_fene)
 target_sources(test_fene PRIVATE ${CMAKE_SOURCE_DIR}/src/force/fene.cu)
+
+add_cuda_test(test_angle)
+target_sources(test_angle PRIVATE ${CMAKE_SOURCE_DIR}/src/force/angle.cu)
