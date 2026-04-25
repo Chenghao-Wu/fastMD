@@ -15,3 +15,5 @@ function(add_cuda_test name)
     set_target_properties(${name} PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
+
+add_cuda_test(test_pbc)

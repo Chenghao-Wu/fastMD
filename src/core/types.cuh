@@ -19,11 +19,11 @@ __host__ __device__ inline int div_ceil(int a, int b) {
     return (a + b - 1) / b;
 }
 
-__host__ __device__ inline float pack_type_id(int type_id) {
+__device__ inline float pack_type_id(int type_id) {
     return __int_as_float(type_id);
 }
 
-__host__ __device__ inline int unpack_type_id(float w) {
+__device__ inline int unpack_type_id(float w) {
     return __float_as_int(w);
 }
 
