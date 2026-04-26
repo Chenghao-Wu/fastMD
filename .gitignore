@@ -1,2 +1,25 @@
 build/
 .worktrees/
+
+# Python
+__pycache__/
+*.pyc
+
+# Profiling
+*.nsys-rep
+*.sqlite
+
+# Simulation output
+*.data
+log.*
+traj.bin
+stress_acf.dat
+benchmark_report.json
+
+# Generated configs
+fastmd_benchmark.conf
+lammps_benchmark.in
+profile_fastmd.conf
+
+# CTest
+Testing/
