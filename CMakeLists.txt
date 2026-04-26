@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(ultimateCGMD LANGUAGES CXX CUDA)
+project(fastMD LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
@@ -32,9 +32,9 @@ target_include_directories(core PUBLIC ${CMAKE_SOURCE_DIR}/src)
 set_target_properties(core PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
 # Main executable
-add_executable(ultimateCGMD src/main.cu src/io/config.cpp)
-target_include_directories(ultimateCGMD PRIVATE src)
-target_link_libraries(ultimateCGMD core CUDA::cudart CUDA::curand)
-set_target_properties(ultimateCGMD PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+add_executable(fastMD src/main.cu src/io/config.cpp)
+target_include_directories(fastMD PRIVATE src)
+target_link_libraries(fastMD core CUDA::cudart CUDA::curand)
+set_target_properties(fastMD PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
 add_subdirectory(tests)
