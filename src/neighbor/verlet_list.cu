@@ -6,6 +6,7 @@ void VerletList::allocate(int natoms, float rc_skin, float box_L) {
     ny = nx;
     nz = nx;
     ncells = nx * ny * nz;
+    dedup_needed = (nx < 3 || ny < 3 || nz < 3);
     cell_size = box_L / nx;
 
     CUDA_CHECK(cudaMalloc(&neighbors,     max_neighbors * natoms * sizeof(int)));
@@ -104,7 +105,7 @@ __global__ void build_verlet_list(
     int* __restrict__ num_neighbors,
     int natoms, int nx, int ny, int nz,
     float rc_skin2, float L, float inv_L,
-    int max_neighbors)
+    int max_neighbors, int dedup_needed)
 {
     int cell_id = blockIdx.x;
     int ncells_total = nx * ny * nz;
@@ -124,70 +125,123 @@ __global__ void build_verlet_list(
         float4 pos_i = pos[i];
         int count = 0;
 
-        // Dedup visited cells for grids small enough that ±1 wrapping
-        // causes the same neighbouring cell to be visited via multiple
-        // direction combinations.
-        int visited[27];
-        int n_visited = 0;
+        if (dedup_needed) {
+            int visited[27];
+            int n_visited = 0;
 
-        for (int dz = -1; dz <= 1; dz++) {
-            int ncz = cz + dz;
-            if (ncz < 0) ncz += nz;
-            else if (ncz >= nz) ncz -= nz;
+            for (int dz = -1; dz <= 1; dz++) {
+                int ncz = cz + dz;
+                if (ncz < 0) ncz += nz;
+                else if (ncz >= nz) ncz -= nz;
 
-            for (int dy = -1; dy <= 1; dy++) {
-                int ncy = cy + dy;
-                if (ncy < 0) ncy += ny;
-                else if (ncy >= ny) ncy -= ny;
+                for (int dy = -1; dy <= 1; dy++) {
+                    int ncy = cy + dy;
+                    if (ncy < 0) ncy += ny;
+                    else if (ncy >= ny) ncy -= ny;
 
-                for (int dx = -1; dx <= 1; dx++) {
-                    int ncx = cx + dx;
-                    if (ncx < 0) ncx += nx;
-                    else if (ncx >= nx) ncx -= nx;
+                    for (int dx = -1; dx <= 1; dx++) {
+                        int ncx = cx + dx;
+                        if (ncx < 0) ncx += nx;
+                        else if (ncx >= nx) ncx -= nx;
 
-                    int ncell = (ncz * ny + ncy) * nx + ncx;
+                        int ncell = (ncz * ny + ncy) * nx + ncx;
 
-                    bool already = false;
-                    #pragma unroll
-                    for (int v = 0; v < n_visited; v++) {
-                        if (visited[v] == ncell) {
-                            already = true;
-                            break;
+                        bool already = false;
+                        #pragma unroll
+                        for (int v = 0; v < n_visited; v++) {
+                            if (visited[v] == ncell) {
+                                already = true;
+                                break;
+                            }
                         }
-                    }
-                    if (already) continue;
-                    visited[n_visited++] = ncell;
+                        if (already) continue;
+                        visited[n_visited++] = ncell;
 
-                    int ns = cell_starts[ncell];
-                    int ne = cell_ends[ncell];
+                        int ns = cell_starts[ncell];
+                        int ne = cell_ends[ncell];
 
-                    for (int b = ns; b < ne; b++) {
-                        int j = sorted_atoms[b];
-                        if (i == j) continue;
+                        for (int b = ns; b < ne; b++) {
+                            int j = sorted_atoms[b];
+                            if (i == j) continue;
 
-                        float4 pos_j = pos[j];
-                        float dx_p = min_image(pos_i.x - pos_j.x, L, inv_L);
-                        float dy_p = min_image(pos_i.y - pos_j.y, L, inv_L);
-                        float dz_p = min_image(pos_i.z - pos_j.z, L, inv_L);
-                        float r2 = dx_p*dx_p + dy_p*dy_p + dz_p*dz_p;
+                            float4 pos_j = pos[j];
+                            float dx_p = min_image(pos_i.x - pos_j.x, L, inv_L);
+                            float dy_p = min_image(pos_i.y - pos_j.y, L, inv_L);
+                            float dz_p = min_image(pos_i.z - pos_j.z, L, inv_L);
+                            float r2 = dx_p*dx_p + dy_p*dy_p + dz_p*dz_p;
 
-                        if (r2 < rc_skin2) {
-                            bool excluded = false;
-                            if (exclusion_offsets) {
-                                int e_start = exclusion_offsets[i];
-                                int e_end = exclusion_offsets[i + 1];
-                                for (int e = e_start; e < e_end; e++) {
-                                    if (exclusion_list[e] == j) {
-                                        excluded = true;
-                                        break;
+                            if (r2 < rc_skin2) {
+                                bool excluded = false;
+                                if (exclusion_offsets) {
+                                    int e_start = exclusion_offsets[i];
+                                    int e_end = exclusion_offsets[i + 1];
+                                    for (int e = e_start; e < e_end; e++) {
+                                        if (exclusion_list[e] == j) {
+                                            excluded = true;
+                                            break;
+                                        }
                                     }
                                 }
-                            }
-                            if (!excluded) {
-                                if (count < max_neighbors) {
-                                    neighbors[count * natoms + i] = j;
+                                if (!excluded) {
+                                    if (count < max_neighbors) {
+                                        neighbors[count * natoms + i] = j;
+                                    }
+                                    count++;
                                 }
-                                count++;
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            for (int dz = -1; dz <= 1; dz++) {
+                int ncz = cz + dz;
+                if (ncz < 0) ncz += nz;
+                else if (ncz >= nz) ncz -= nz;
+
+                for (int dy = -1; dy <= 1; dy++) {
+                    int ncy = cy + dy;
+                    if (ncy < 0) ncy += ny;
+                    else if (ncy >= ny) ncy -= ny;
+
+                    for (int dx = -1; dx <= 1; dx++) {
+                        int ncx = cx + dx;
+                        if (ncx < 0) ncx += nx;
+                        else if (ncx >= nx) ncx -= nx;
+
+                        int ncell = (ncz * ny + ncy) * nx + ncx;
+
+                        int ns = cell_starts[ncell];
+                        int ne = cell_ends[ncell];
+
+                        for (int b = ns; b < ne; b++) {
+                            int j = sorted_atoms[b];
+                            if (i == j) continue;
+
+                            float4 pos_j = pos[j];
+                            float dx_p = min_image(pos_i.x - pos_j.x, L, inv_L);
+                            float dy_p = min_image(pos_i.y - pos_j.y, L, inv_L);
+                            float dz_p = min_image(pos_i.z - pos_j.z, L, inv_L);
+                            float r2 = dx_p*dx_p + dy_p*dy_p + dz_p*dz_p;
+
+                            if (r2 < rc_skin2) {
+                                bool excluded = false;
+                                if (exclusion_offsets) {
+                                    int e_start = exclusion_offsets[i];
+                                    int e_end = exclusion_offsets[i + 1];
+                                    for (int e = e_start; e < e_end; e++) {
+                                        if (exclusion_list[e] == j) {
+                                            excluded = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (!excluded) {
+                                    if (count < max_neighbors) {
+                                        neighbors[count * natoms + i] = j;
+                                    }
+                                    count++;
+                                }
                             }
                         }
                     }
@@ -228,5 +282,5 @@ void VerletList::build(const float4* pos, int natoms, float box_L, float inv_L,
         neighbors, num_neighbors,
         natoms, nx, ny, nz,
         rc_skin2, box_L, inv_L,
-        max_neighbors);
+        max_neighbors, dedup_needed ? 1 : 0);
 }

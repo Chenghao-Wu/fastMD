@@ -14,6 +14,7 @@ struct VerletList {
     int   max_neighbors;
     int   ncells;
     int   nx, ny, nz;
+    bool  dedup_needed;
     float cell_size;
     void* d_cub_temp;
     size_t cub_temp_bytes;
