@@ -2,7 +2,7 @@
 #include "test_utils.cuh"
 #include "integrate/langevin.cuh"
 #include "force/lj.cuh"
-#include "neighbor/tile_list.cuh"
+#include "neighbor/verlet_list.cuh"
 #include "neighbor/skin_trigger.cuh"
 
 TEST(Integrator, NVEEnergyConservation) {
@@ -53,8 +53,8 @@ TEST(Integrator, NVEEnergyConservation) {
     std::vector<float2> h_lj = {{1.0f, 1.0f}};
     float2* d_lj = to_device(h_lj);
 
-    TileList tl;
-    tl.allocate(ntiles, ntiles * ntiles);
+    VerletList verlet;
+    verlet.allocate(N, rc + skin, L);
 
     LangevinState lang;
     lang.init(np, 0.0f, dt, 1.0f, 12345);
@@ -62,13 +62,13 @@ TEST(Integrator, NVEEnergyConservation) {
     CUDA_CHECK(cudaMemcpy(d_pos_ref, d_pos, np * sizeof(float4),
                            cudaMemcpyDeviceToDevice));
     CUDA_CHECK(cudaMemset(d_max_dr2, 0, sizeof(int)));
-    tl.build(d_pos, N, ntiles, rc + skin, L, inv_L);
+    verlet.build(d_pos, N, L, inv_L, nullptr, nullptr, rc + skin);
 
     CUDA_CHECK(cudaMemset(d_force, 0, np * sizeof(float4)));
     CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(float)));
     launch_lj_kernel(d_pos, d_force, d_virial, d_lj,
-                      tl.offsets, tl.tile_neighbors,
-                      ntiles, N, ntypes, rc2, L, inv_L);
+                      verlet.neighbors, verlet.num_neighbors,
+                      N, ntypes, rc2, L, inv_L);
 
     auto compute_total_energy = [&]() -> float {
         auto h_f = to_host(d_force, N);
@@ -91,14 +91,14 @@ TEST(Integrator, NVEEnergyConservation) {
         if (check_and_reset_trigger(d_max_dr2, skin)) {
             CUDA_CHECK(cudaMemcpy(d_pos_ref, d_pos, np * sizeof(float4),
                                    cudaMemcpyDeviceToDevice));
-            tl.build(d_pos, N, ntiles, rc + skin, L, inv_L);
+            verlet.build(d_pos, N, L, inv_L, nullptr, nullptr, rc + skin);
         }
 
         CUDA_CHECK(cudaMemset(d_force, 0, np * sizeof(float4)));
         CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(float)));
         launch_lj_kernel(d_pos, d_force, d_virial, d_lj,
-                          tl.offsets, tl.tile_neighbors,
-                          ntiles, N, ntypes, rc2, L, inv_L);
+                          verlet.neighbors, verlet.num_neighbors,
+                          N, ntypes, rc2, L, inv_L);
 
         launch_integrator_post_force(d_vel, d_force, N, lang.half_dt);
         CUDA_CHECK(cudaDeviceSynchronize());
@@ -110,7 +110,7 @@ TEST(Integrator, NVEEnergyConservation) {
     EXPECT_LT(drift, 0.01f) << "E0=" << E0 << " E_final=" << E_final;
 
     lang.free();
-    tl.free();
+    verlet.free();
     free_device(d_pos);
     free_device(d_vel);
     free_device(d_force);

@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include "test_utils.cuh"
 #include "force/lj.cuh"
-#include "neighbor/tile_list.cuh"
+#include "neighbor/verlet_list.cuh"
 #include "../reference/cpu_reference.hpp"
 
 TEST(LJ, SmallSystemMatchesCPU) {
@@ -44,13 +44,13 @@ TEST(LJ, SmallSystemMatchesCPU) {
 
     float2* d_lj = to_device(h_lj);
 
-    TileList tl;
-    tl.allocate(ntiles, ntiles * ntiles);
-    tl.build(d_pos, N, ntiles, rc + skin, L, inv_L);
+    VerletList verlet;
+    verlet.allocate(N, rc + skin, L);
+    verlet.build(d_pos, N, L, inv_L, nullptr, nullptr, rc + skin);
 
     launch_lj_kernel(d_pos, d_force, d_virial, d_lj,
-                      tl.offsets, tl.tile_neighbors,
-                      ntiles, N, ntypes, rc2, L, inv_L);
+                      verlet.neighbors, verlet.num_neighbors,
+                      N, ntypes, rc2, L, inv_L);
     CUDA_CHECK(cudaDeviceSynchronize());
 
     auto h_force = to_host(d_force, N);
@@ -69,7 +69,7 @@ TEST(LJ, SmallSystemMatchesCPU) {
         EXPECT_LT(rel, 1e-2f) << "virial component " << k;
     }
 
-    tl.free();
+    verlet.free();
     free_device(d_pos);
     free_device(d_force);
     free_device(d_virial);
