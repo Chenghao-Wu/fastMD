@@ -2,7 +2,7 @@
 #include "core/system.cuh"
 #include "core/morton.cuh"
 #include "core/pbc.cuh"
-#include "neighbor/tile_list.cuh"
+#include "neighbor/verlet_list.cuh"
 #include "neighbor/skin_trigger.cuh"
 #include "force/lj.cuh"
 #include "force/fene.cuh"
@@ -41,6 +41,19 @@ int main(int argc, char** argv) {
                               sys.nbonds * sizeof(int2), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(sys.bond_param_idx, topo.bond_types.data(),
                               sys.nbonds * sizeof(int), cudaMemcpyHostToDevice));
+
+        build_exclusions(topo, topo);
+        sys.nexclusions = static_cast<int>(topo.exclusion_list.size());
+        if (sys.nexclusions > 0) {
+            CUDA_CHECK(cudaMalloc(&sys.exclusion_offsets,
+                                  (params.natoms + 1) * sizeof(int)));
+            CUDA_CHECK(cudaMalloc(&sys.exclusion_list,
+                                  sys.nexclusions * sizeof(int)));
+            CUDA_CHECK(cudaMemcpy(sys.exclusion_offsets, topo.exclusion_offsets.data(),
+                                  (params.natoms + 1) * sizeof(int), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(sys.exclusion_list, topo.exclusion_list.data(),
+                                  sys.nexclusions * sizeof(int), cudaMemcpyHostToDevice));
+        }
     }
     if (topo.angles.size() > 0) {
         sys.nangles = static_cast<int>(topo.angles.size());
@@ -82,8 +95,8 @@ int main(int argc, char** argv) {
     MortonSorter morton;
     morton.allocate(np);
 
-    TileList tile_list;
-    tile_list.allocate(sys.ntiles, sys.ntiles * sys.ntiles);
+    VerletList verlet;
+    verlet.allocate(params.natoms, params.rc + params.skin, params.box_L);
 
     LangevinState langevin;
     langevin.init(np, params.gamma, params.dt, params.temperature, params.seed);
@@ -109,14 +122,15 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaMemcpy(sys.pos_ref, sys.pos, np * sizeof(float4),
                            cudaMemcpyDeviceToDevice));
     CUDA_CHECK(cudaMemset(sys.d_max_dr2_int, 0, sizeof(int)));
-    tile_list.build(sys.pos, params.natoms, sys.ntiles,
-                     params.rc + params.skin, params.box_L, params.inv_L);
+    verlet.build(sys.pos, params.natoms, params.box_L, params.inv_L,
+                 sys.exclusion_offsets, sys.exclusion_list,
+                 params.rc + params.skin);
 
     sys.zero_forces();
     sys.zero_virial();
     launch_lj_kernel(sys.pos, sys.force, sys.virial, sys.lj_params,
-                      tile_list.offsets, tile_list.tile_neighbors,
-                      sys.ntiles, params.natoms, params.ntypes,
+                      verlet.neighbors, verlet.num_neighbors,
+                      params.natoms, params.ntypes,
                       params.rc2, params.box_L, params.inv_L);
     if (sys.nbonds > 0) {
         launch_fene_kernel(sys.pos, sys.force, sys.virial,
@@ -143,8 +157,9 @@ int main(int argc, char** argv) {
                 morton.sort_and_permute(sys.pos, sys.vel, params.natoms, params.inv_L);
             CUDA_CHECK(cudaMemcpy(sys.pos_ref, sys.pos, np * sizeof(float4),
                                    cudaMemcpyDeviceToDevice));
-            tile_list.build(sys.pos, params.natoms, sys.ntiles,
-                             params.rc + params.skin, params.box_L, params.inv_L);
+            verlet.build(sys.pos, params.natoms, params.box_L, params.inv_L,
+                         sys.exclusion_offsets, sys.exclusion_list,
+                         params.rc + params.skin);
         }
 
         CUDA_CHECK(cudaEventRecord(pos_ready, 0));
@@ -155,9 +170,11 @@ int main(int argc, char** argv) {
         sys.zero_virial();
 
         launch_lj_kernel(sys.pos, sys.force, sys.virial, sys.lj_params,
-                          tile_list.offsets, tile_list.tile_neighbors,
-                          sys.ntiles, params.natoms, params.ntypes,
+                          verlet.neighbors, verlet.num_neighbors,
+                          params.natoms, params.ntypes,
                           params.rc2, params.box_L, params.inv_L, stream_lj);
+        CUDA_CHECK(cudaEventRecord(force_done_lj, stream_lj));
+        CUDA_CHECK(cudaStreamWaitEvent(stream_bonded, force_done_lj, 0));
         if (sys.nbonds > 0) {
             launch_fene_kernel(sys.pos, sys.force, sys.virial,
                                 sys.bonds, sys.bond_param_idx, d_fene_params,
@@ -171,7 +188,6 @@ int main(int argc, char** argv) {
                                  stream_bonded);
         }
 
-        CUDA_CHECK(cudaEventRecord(force_done_lj, stream_lj));
         CUDA_CHECK(cudaEventRecord(force_done_bonded, stream_bonded));
         CUDA_CHECK(cudaStreamWaitEvent(0, force_done_lj, 0));
         CUDA_CHECK(cudaStreamWaitEvent(0, force_done_bonded, 0));
@@ -230,7 +246,7 @@ int main(int argc, char** argv) {
     dumper.close();
     correlator.free();
     langevin.free();
-    tile_list.free();
+    verlet.free();
     morton.free();
     sys.free();
     CUDA_CHECK(cudaEventDestroy(force_done_lj));

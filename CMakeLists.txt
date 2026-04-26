@@ -18,6 +18,7 @@ add_library(core STATIC
     src/core/system.cu
     src/core/morton.cu
     src/neighbor/tile_list.cu
+    src/neighbor/verlet_list.cu
     src/force/lj.cu
     src/force/fene.cu
     src/force/angle.cu
