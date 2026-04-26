@@ -126,7 +126,6 @@ int main(int argc, char** argv) {
                  sys.exclusion_offsets, sys.exclusion_list,
                  params.rc + params.skin);
 
-    sys.zero_forces();
     sys.zero_virial();
     launch_lj_kernel(sys.pos, sys.force, sys.virial, sys.lj_params,
                       verlet.neighbors, verlet.num_neighbors,
@@ -166,7 +165,6 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaStreamWaitEvent(stream_lj, pos_ready, 0));
         CUDA_CHECK(cudaStreamWaitEvent(stream_bonded, pos_ready, 0));
 
-        sys.zero_forces();
         sys.zero_virial();
 
         launch_lj_kernel(sys.pos, sys.force, sys.virial, sys.lj_params,
