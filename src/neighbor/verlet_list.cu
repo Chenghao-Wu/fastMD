@@ -26,6 +26,11 @@ void VerletList::allocate(int natoms, float rc_skin, float box_L) {
     cub::DeviceRadixSort::SortPairs(nullptr, cub_temp_bytes,
         (int*)nullptr, (int*)nullptr, (int*)nullptr, (int*)nullptr, natoms);
     CUDA_CHECK(cudaMalloc(&d_cub_temp, cub_temp_bytes));
+
+    // Compute max cell occupancy for shared-memory sizing
+    max_cell_atoms = 0;
+    CUDA_CHECK(cudaHostAlloc(&h_cell_max, sizeof(int), cudaHostAllocMapped));
+    *h_cell_max = 0;
 }
 
 void VerletList::free() {
@@ -38,6 +43,7 @@ void VerletList::free() {
     CUDA_CHECK(cudaFree(cell_starts));
     CUDA_CHECK(cudaFree(cell_ends));
     CUDA_CHECK(cudaFree(d_cub_temp));
+    CUDA_CHECK(cudaFreeHost(h_cell_max));
 }
 
 // ---------------------------------------------------------------------------
@@ -55,9 +61,9 @@ __global__ void assign_cells(const float4* __restrict__ pos,
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= natoms) return;
     float4 r = pos[i];
-    int cx = int(floorf(r.x * inv_cell_size));
-    int cy = int(floorf(r.y * inv_cell_size));
-    int cz = int(floorf(r.z * inv_cell_size));
+    int cx = __float2int_rd(r.x * inv_cell_size);
+    int cy = __float2int_rd(r.y * inv_cell_size);
+    int cz = __float2int_rd(r.z * inv_cell_size);
     cx = ((cx % nx) + nx) % nx;
     cy = ((cy % ny) + ny) % ny;
     cz = ((cz % nz) + nz) % nz;
@@ -94,6 +100,8 @@ __global__ void find_cell_starts(const int* __restrict__ sorted_cell_ids,
     }
 }
 
+#define MAX_SHARED_ATOMS 96
+
 __global__ void build_verlet_list(
     const float4* __restrict__ pos,
     const int* __restrict__ sorted_atoms,
@@ -105,27 +113,44 @@ __global__ void build_verlet_list(
     int* __restrict__ num_neighbors,
     int natoms, int nx, int ny, int nz,
     float rc_skin2, float L, float inv_L,
-    int max_neighbors, int dedup_needed)
+    int max_neighbors, int dedup_needed,
+    int* max_cell_out)
 {
+    extern __shared__ float4 s_cell_pos[];
+    int* s_cell_idx = (int*)(s_cell_pos + MAX_SHARED_ATOMS);
+
     int cell_id = blockIdx.x;
     int ncells_total = nx * ny * nz;
     if (cell_id >= ncells_total) return;
 
     int start = cell_starts[cell_id];
     int end   = cell_ends[cell_id];
-    if (start >= end) return;
+    int nhome = end - start;
+    if (nhome == 0) return;
 
     int cz = cell_id / (nx * ny);
     int rem = cell_id % (nx * ny);
     int cy = rem / nx;
     int cx = rem % nx;
 
-    for (int a = threadIdx.x; a < (end - start); a += blockDim.x) {
-        int i = sorted_atoms[start + a];
-        float4 pos_i = pos[i];
-        int count = 0;
+    // All threads participate in every iteration so __syncthreads is safe
+    int niter = (nhome + blockDim.x - 1) / blockDim.x;
+
+    for (int iter = 0; iter < niter; iter++) {
+        int a = iter * blockDim.x + threadIdx.x;
+        bool active = (a < nhome);
+        int i, count;
+        float4 pos_i;
+
+        if (active) {
+            i = sorted_atoms[start + a];
+            pos_i = __ldg(&pos[i]);
+        }
+        count = 0;
 
         if (dedup_needed) {
+            if (!active) continue;
+
             int visited[27];
             int n_visited = 0;
 
@@ -164,7 +189,7 @@ __global__ void build_verlet_list(
                             int j = sorted_atoms[b];
                             if (i == j) continue;
 
-                            float4 pos_j = pos[j];
+                            float4 pos_j = __ldg(&pos[j]);
                             float dx_p = min_image(pos_i.x - pos_j.x, L, inv_L);
                             float dy_p = min_image(pos_i.y - pos_j.y, L, inv_L);
                             float dz_p = min_image(pos_i.z - pos_j.z, L, inv_L);
@@ -213,34 +238,83 @@ __global__ void build_verlet_list(
 
                         int ns = cell_starts[ncell];
                         int ne = cell_ends[ncell];
+                        int ncount = ne - ns;
 
-                        for (int b = ns; b < ne; b++) {
-                            int j = sorted_atoms[b];
-                            if (i == j) continue;
+                        if (ncount == 0) continue;
 
-                            float4 pos_j = pos[j];
-                            float dx_p = min_image(pos_i.x - pos_j.x, L, inv_L);
-                            float dy_p = min_image(pos_i.y - pos_j.y, L, inv_L);
-                            float dz_p = min_image(pos_i.z - pos_j.z, L, inv_L);
-                            float r2 = dx_p*dx_p + dy_p*dy_p + dz_p*dz_p;
+                        if (ncount <= MAX_SHARED_ATOMS) {
+                            // All threads load cooperatively — no divergent barrier
+                            for (int t = threadIdx.x; t < ncount; t += blockDim.x) {
+                                int j = sorted_atoms[ns + t];
+                                s_cell_idx[t] = j;
+                                s_cell_pos[t] = __ldg(&pos[j]);
+                            }
+                            __syncthreads();
 
-                            if (r2 < rc_skin2) {
-                                bool excluded = false;
-                                if (exclusion_offsets) {
-                                    int e_start = exclusion_offsets[i];
-                                    int e_end = exclusion_offsets[i + 1];
-                                    for (int e = e_start; e < e_end; e++) {
-                                        if (exclusion_list[e] == j) {
-                                            excluded = true;
-                                            break;
+                            if (active) {
+                                for (int t = 0; t < ncount; t++) {
+                                    int j = s_cell_idx[t];
+                                    if (i == j) continue;
+
+                                    float4 pos_j = s_cell_pos[t];
+                                    float dx_p = min_image(pos_i.x - pos_j.x, L, inv_L);
+                                    float dy_p = min_image(pos_i.y - pos_j.y, L, inv_L);
+                                    float dz_p = min_image(pos_i.z - pos_j.z, L, inv_L);
+                                    float r2 = dx_p*dx_p + dy_p*dy_p + dz_p*dz_p;
+
+                                    if (r2 < rc_skin2) {
+                                        bool excluded = false;
+                                        if (exclusion_offsets) {
+                                            int e_start = exclusion_offsets[i];
+                                            int e_end = exclusion_offsets[i + 1];
+                                            for (int e = e_start; e < e_end; e++) {
+                                                if (exclusion_list[e] == j) {
+                                                    excluded = true;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        if (!excluded) {
+                                            if (count < max_neighbors) {
+                                                neighbors[count * natoms + i] = j;
+                                            }
+                                            count++;
                                         }
                                     }
                                 }
-                                if (!excluded) {
-                                    if (count < max_neighbors) {
-                                        neighbors[count * natoms + i] = j;
+                            }
+                            __syncthreads();
+                        } else {
+                            if (!active) continue;
+
+                            for (int b = ns; b < ne; b++) {
+                                int j = __ldg(&sorted_atoms[b]);
+                                if (i == j) continue;
+
+                                float4 pos_j = __ldg(&pos[j]);
+                                float dx_p = min_image(pos_i.x - pos_j.x, L, inv_L);
+                                float dy_p = min_image(pos_i.y - pos_j.y, L, inv_L);
+                                float dz_p = min_image(pos_i.z - pos_j.z, L, inv_L);
+                                float r2 = dx_p*dx_p + dy_p*dy_p + dz_p*dz_p;
+
+                                if (r2 < rc_skin2) {
+                                    bool excluded = false;
+                                    if (exclusion_offsets) {
+                                        int e_start = exclusion_offsets[i];
+                                        int e_end = exclusion_offsets[i + 1];
+                                        for (int e = e_start; e < e_end; e++) {
+                                            if (exclusion_list[e] == j) {
+                                                excluded = true;
+                                                break;
+                                            }
+                                        }
                                     }
-                                    count++;
+                                    if (!excluded) {
+                                        if (count < max_neighbors) {
+                                            neighbors[count * natoms + i] = j;
+                                        }
+                                        count++;
+                                    }
                                 }
                             }
                         }
@@ -248,7 +322,12 @@ __global__ void build_verlet_list(
                 }
             }
         }
-        num_neighbors[i] = count;
+        if (active) num_neighbors[i] = count;
+    }
+
+    // Track max cell occupancy for diagnostics
+    if (threadIdx.x == 0) {
+        atomicMax(max_cell_out, nhome);
     }
 }
 
@@ -274,13 +353,17 @@ void VerletList::build(const float4* pos, int natoms, float box_L, float inv_L,
     find_cell_starts<<<blocks, 256, 0, stream>>>(
         cell_ids_out, cell_starts, cell_ends, natoms);
 
-    // Stage 4: build Verlet list
+    // Stage 4: build Verlet list with shared memory tiling
+    // Shared memory: MAX_SHARED_ATOMS * (sizeof(float4) + sizeof(int)) = 96 * 20 = 1920 bytes
+    int smem = MAX_SHARED_ATOMS * (sizeof(float4) + sizeof(int));
+    *h_cell_max = 0;
     CUDA_CHECK(cudaMemsetAsync(num_neighbors, 0, natoms * sizeof(int), stream));
-    build_verlet_list<<<ncells, 256, 0, stream>>>(
+    build_verlet_list<<<ncells, 256, smem, stream>>>(
         pos, sorted_atoms, cell_starts, cell_ends,
         exclusion_offsets, exclusion_list,
         neighbors, num_neighbors,
         natoms, nx, ny, nz,
         rc_skin2, box_L, inv_L,
-        max_neighbors, dedup_needed ? 1 : 0);
+        max_neighbors, dedup_needed ? 1 : 0,
+        h_cell_max);
 }

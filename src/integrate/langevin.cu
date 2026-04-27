@@ -69,7 +69,7 @@ __global__ void integrator_pre_force_kernel(
 
     r = wrap_position(r, L, inv_L);
 
-    update_max_displacement(r, pos_ref[i], d_max_dr2_int);
+    update_max_displacement(r, pos_ref[i], d_max_dr2_int, L, inv_L);
 
     pos[i] = r;
     vel[i] = v;

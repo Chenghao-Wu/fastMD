@@ -22,11 +22,11 @@ __global__ void lj_verlet_kernel(
         float4 pos_i = pos[i];
         int type_i = __float_as_int(pos_i.w);
 
-        int nneigh = num_neighbors[i];
+        int nneigh = __ldg(&num_neighbors[i]);
         #pragma unroll 8
         for (int k = 0; k < nneigh; k++) {
             int j = neighbors[k * natoms + i];
-            float4 pos_j = pos[j];
+            float4 pos_j = __ldg(&pos[j]);
             int type_j = __float_as_int(pos_j.w);
 
             float dx = min_image(pos_i.x - pos_j.x, L, inv_L);
@@ -38,7 +38,7 @@ __global__ void lj_verlet_kernel(
                 float2 params = __ldg(&lj_params[type_i * ntypes + type_j]);
                 float eps = params.x, sig = params.y;
                 float sig2 = sig * sig;
-                float r2inv = 1.0f / r2;
+                float r2inv = __fdividef(1.0f, r2);
                 float sr2 = sig2 * r2inv;
                 float sr6 = sr2 * sr2 * sr2;
                 float sr12 = sr6 * sr6;
