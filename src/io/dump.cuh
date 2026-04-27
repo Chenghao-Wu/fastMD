@@ -4,6 +4,7 @@
 
 struct BinaryDumper {
     float3* h_buf[2];
+    float3* d_temp;
     int current_buf;
     int natoms;
     FILE* fp;
