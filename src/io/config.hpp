@@ -15,6 +15,9 @@ struct TopologyData {
     std::vector<FENEParams> bond_params;
     std::vector<AngleParams> angle_params;
     std::string data_file;
+
+    std::vector<int> exclusion_offsets;
+    std::vector<int> exclusion_list;
 };
 
 SimParams parse_config(const std::string& filename, TopologyData& topo);

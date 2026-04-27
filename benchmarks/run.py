@@ -86,7 +86,8 @@ def validate(temps_f, pes_f, temps_l, pes_l, cfg: dict):
     avg_t_f = sum(temps_f[-n:]) / n
     avg_t_l = sum(temps_l[-n:]) / n
     avg_pe_f = sum(pes_f[-n:]) / n
-    avg_pe_l = sum(pes_l[-n:]) / n
+    # LAMMPS normalizes extensive quantities by natoms by default
+    avg_pe_l = sum(pes_l[-n:]) / n * cfg["natoms"]
 
     rel_temp_diff = abs(avg_t_f - avg_t_l) / cfg["temperature"]
     rel_pe_diff = abs(avg_pe_f - avg_pe_l) / abs(avg_pe_l) if avg_pe_l != 0 else abs(avg_pe_f - avg_pe_l)

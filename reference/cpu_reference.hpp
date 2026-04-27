@@ -94,7 +94,9 @@ struct LJResult {
 
 inline LJResult brute_force_lj(const std::vector<float4>& pos,
                                  const std::vector<float2>& lj_params,
-                                 int ntypes, float rc, float L, float inv_L) {
+                                 int ntypes, float rc, float L, float inv_L,
+                                 const std::vector<int>* exclusion_offsets = nullptr,
+                                 const std::vector<int>* exclusion_list = nullptr) {
     int N = pos.size();
     float rc2 = rc * rc;
     LJResult res;
@@ -108,6 +110,15 @@ inline LJResult brute_force_lj(const std::vector<float4>& pos,
         int ti = unpack_type_id(pos[i].w);
         for (int j = 0; j < N; j++) {
             if (i == j) continue;
+            if (exclusion_offsets && exclusion_list) {
+                int start = (*exclusion_offsets)[i];
+                int end = (*exclusion_offsets)[i + 1];
+                bool skip = false;
+                for (int e = start; e < end; e++) {
+                    if ((*exclusion_list)[e] == j) { skip = true; break; }
+                }
+                if (skip) continue;
+            }
             int tj = unpack_type_id(pos[j].w);
             float dx = min_image(pos[i].x - pos[j].x, L, inv_L);
             float dy = min_image(pos[i].y - pos[j].y, L, inv_L);
@@ -256,7 +267,7 @@ inline AngleResult brute_force_angle(
         float sin_theta = sqrtf(1.0f - cos_theta * cos_theta);
         if (sin_theta < 1e-6f) sin_theta = 1e-6f;
 
-        float prefactor = -ka * dtheta / sin_theta;
+        float prefactor = 2.0f * ka * dtheta / sin_theta;
 
         float fi_x = prefactor * (dxkj / (rij * rkj) - cos_theta * dxij / rij2);
         float fi_y = prefactor * (dykj / (rij * rkj) - cos_theta * dyij / rij2);
@@ -271,7 +282,7 @@ inline AngleResult brute_force_angle(
         res.fy[j] -= (fi_y + fk_y);
         res.fz[j] -= (fi_z + fk_z);
 
-        float pe = 0.5f * ka * dtheta * dtheta;
+        float pe = ka * dtheta * dtheta;
         res.pe[i] += pe / 3.0f;
         res.pe[j] += pe / 3.0f;
         res.pe[k] += pe / 3.0f;

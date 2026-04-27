@@ -13,6 +13,10 @@ struct System {
     int     nbonds;
     int     nangles;
 
+    int*    exclusion_offsets;
+    int*    exclusion_list;
+    int     nexclusions;
+
     float2* lj_params;
     float*  virial;
 
