@@ -32,6 +32,10 @@ void System::allocate(const SimParams& params) {
     angles = nullptr;
     nbonds = 0;
     nangles = 0;
+
+    exclusion_offsets = nullptr;
+    exclusion_list = nullptr;
+    nexclusions = 0;
 }
 
 void System::free() {
@@ -46,6 +50,8 @@ void System::free() {
     if (bonds) CUDA_CHECK(cudaFree(bonds));
     if (bond_param_idx) CUDA_CHECK(cudaFree(bond_param_idx));
     if (angles) CUDA_CHECK(cudaFree(angles));
+    if (exclusion_offsets) CUDA_CHECK(cudaFree(exclusion_offsets));
+    if (exclusion_list) CUDA_CHECK(cudaFree(exclusion_list));
 }
 
 void System::zero_forces() {

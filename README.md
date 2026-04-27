@@ -1,6 +1,14 @@
 # fastMD
 
+Why this package?
+
+We can accelerate MD simulation via models (multiscale simulations), why not accelerate it via optimizing kernels?
+
+Here it is:
+
 GPU-accelerated molecular dynamics simulator written in CUDA.
+
+Compared with LAMMPS for 30K bead-spring polymer systems, fastMD gains 20 times acceleration on RTX4090D.
 
 ## Quick Start
 
