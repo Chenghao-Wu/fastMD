@@ -1,6 +1,18 @@
 #include "thermo.cuh"
 #include <cub/cub.cuh>
 
+void ThermoBuffers::allocate() {
+    CUDA_CHECK(cudaMalloc(&d_kin_stress, 6 * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_pe, sizeof(float)));
+    allocated = true;
+}
+
+void ThermoBuffers::free() {
+    CUDA_CHECK(cudaFree(d_kin_stress));
+    CUDA_CHECK(cudaFree(d_pe));
+    allocated = false;
+}
+
 __global__ void kinetic_stress_kernel(const float4* __restrict__ vel,
                                         float* __restrict__ kin_stress,
                                         int natoms) {
@@ -50,23 +62,20 @@ __global__ void sum_pe_kernel(const float4* __restrict__ force,
 
 void compute_thermo(const float4* vel, const float4* force,
                      const float* virial, int natoms, float box_L,
-                     ThermoOutput* h_output, cudaStream_t stream) {
-    float* d_kin_stress;
-    float* d_pe;
-    CUDA_CHECK(cudaMalloc(&d_kin_stress, 6 * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_pe, sizeof(float)));
-    CUDA_CHECK(cudaMemsetAsync(d_kin_stress, 0, 6 * sizeof(float), stream));
-    CUDA_CHECK(cudaMemsetAsync(d_pe, 0, sizeof(float), stream));
+                     ThermoOutput* h_output, ThermoBuffers& bufs,
+                     cudaStream_t stream) {
+    CUDA_CHECK(cudaMemsetAsync(bufs.d_kin_stress, 0, 6 * sizeof(float), stream));
+    CUDA_CHECK(cudaMemsetAsync(bufs.d_pe, 0, sizeof(float), stream));
 
     int blocks = div_ceil(natoms, 256);
-    kinetic_stress_kernel<<<blocks, 256, 0, stream>>>(vel, d_kin_stress, natoms);
-    sum_pe_kernel<<<blocks, 256, 0, stream>>>(force, d_pe, natoms);
+    kinetic_stress_kernel<<<blocks, 256, 0, stream>>>(vel, bufs.d_kin_stress, natoms);
+    sum_pe_kernel<<<blocks, 256, 0, stream>>>(force, bufs.d_pe, natoms);
 
     float h_kin_stress[6];
     float h_pe;
-    CUDA_CHECK(cudaMemcpyAsync(h_kin_stress, d_kin_stress, 6 * sizeof(float),
+    CUDA_CHECK(cudaMemcpyAsync(h_kin_stress, bufs.d_kin_stress, 6 * sizeof(float),
                                 cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaMemcpyAsync(&h_pe, d_pe, sizeof(float),
+    CUDA_CHECK(cudaMemcpyAsync(&h_pe, bufs.d_pe, sizeof(float),
                                 cudaMemcpyDeviceToHost, stream));
 
     float h_virial[6];
@@ -86,7 +95,4 @@ void compute_thermo(const float4* vel, const float4* force,
     for (int c = 0; c < 6; c++) {
         h_output->stress[c] = (h_kin_stress[c] + h_virial[c]) * inv_vol;
     }
-
-    CUDA_CHECK(cudaFree(d_pe));
-    CUDA_CHECK(cudaFree(d_kin_stress));
 }
