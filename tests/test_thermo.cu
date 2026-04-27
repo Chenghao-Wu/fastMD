@@ -21,12 +21,15 @@ TEST(Thermo, KineticEnergyAndTemperature) {
     CUDA_CHECK(cudaMalloc(&d_virial, 6 * sizeof(float)));
     CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(float)));
 
+    ThermoBuffers bufs;
+    bufs.allocate();
     ThermoOutput output;
-    compute_thermo(d_vel, d_force, d_virial, N, L, &output);
+    compute_thermo(d_vel, d_force, d_virial, N, L, &output, bufs);
 
     EXPECT_NEAR(output.kinetic_energy, 48.0f, 0.01f);
     EXPECT_NEAR(output.temperature, 1.0f/3.0f, 0.001f);
 
+    bufs.free();
     free_device(d_vel);
     free_device(d_force);
     free_device(d_virial);

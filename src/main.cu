@@ -104,6 +104,9 @@ int main(int argc, char** argv) {
     MultipleTauCorrelator correlator;
     correlator.allocate();
 
+    ThermoBuffers thermo_bufs;
+    thermo_bufs.allocate();
+
     BinaryDumper dumper;
     dumper.open("traj.bin", params.natoms, params.ntypes);
 
@@ -196,7 +199,7 @@ int main(int argc, char** argv) {
         if (step % params.thermo_freq == 0) {
             ThermoOutput thermo;
             compute_thermo(sys.vel, sys.force, sys.virial,
-                            params.natoms, params.box_L, &thermo);
+                            params.natoms, params.box_L, &thermo, thermo_bufs);
             printf("Step %d: T=%.4f KE=%.4f PE=%.4f Pxx=%.4f\n",
                    step, thermo.temperature, thermo.kinetic_energy,
                    thermo.potential_energy, thermo.stress[0]);
@@ -242,6 +245,7 @@ int main(int argc, char** argv) {
     }
 
     dumper.close();
+    thermo_bufs.free();
     correlator.free();
     langevin.free();
     verlet.free();
