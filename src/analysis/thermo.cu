@@ -86,9 +86,10 @@ void compute_thermo(const float4* vel, const float4* force,
 
     float ke = 0.5f * (h_kin_stress[0] + h_kin_stress[3] + h_kin_stress[5]);
 
-    h_output->kinetic_energy = ke;
-    h_output->potential_energy = h_pe;
-    h_output->temperature = 2.0f * ke / (3.0f * natoms);
+    float inv_n = 1.0f / natoms;
+    h_output->kinetic_energy = ke * inv_n;
+    h_output->potential_energy = h_pe * inv_n;
+    h_output->temperature = 2.0f * h_output->kinetic_energy / 3.0f;
 
     float vol = box_L * box_L * box_L;
     float inv_vol = 1.0f / vol;
