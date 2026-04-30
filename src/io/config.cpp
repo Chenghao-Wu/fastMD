@@ -26,7 +26,6 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
         iss >> key;
 
         if (key == "natoms")      iss >> params.natoms;
-        else if (key == "box_L")  iss >> params.box_L;
         else if (key == "ntypes") iss >> params.ntypes;
         else if (key == "rc")     iss >> params.rc;
         else if (key == "skin")   iss >> params.skin;
@@ -75,11 +74,6 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
         }
     }
 
-    params.inv_L = 1.0f / params.box_L;
-    params.half_L = params.box_L / 2.0f;
-    params.rc2 = params.rc * params.rc;
-    params.ntiles = div_ceil(params.natoms, TILE_SIZE);
-
     topo.lj_params.resize(params.ntypes * params.ntypes, make_float2(0,0));
     for (auto& [ti, tj, eps, sig] : lj_entries) {
         topo.lj_params[ti * params.ntypes + tj] = make_float2(eps, sig);
@@ -116,4 +110,11 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
     }
 
     return params;
+}
+
+void finalize_params(SimParams& params) {
+    params.inv_L = 1.0f / params.box_L;
+    params.half_L = params.box_L / 2.0f;
+    params.rc2 = params.rc * params.rc;
+    params.ntiles = div_ceil(params.natoms, TILE_SIZE);
 }
