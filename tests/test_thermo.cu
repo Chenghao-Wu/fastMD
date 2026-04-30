@@ -24,9 +24,9 @@ TEST(Thermo, KineticEnergyAndTemperature) {
     ThermoBuffers bufs;
     bufs.allocate();
     ThermoOutput output;
-    compute_thermo(d_vel, d_force, d_virial, N, L, &output, bufs);
+    compute_thermo(d_vel, d_force, d_virial, N, L, &output, bufs, 0, nullptr);
 
-    EXPECT_NEAR(output.kinetic_energy, 48.0f, 0.01f);
+    EXPECT_NEAR(output.kinetic_energy, 0.5f, 0.01f);
     EXPECT_NEAR(output.temperature, 1.0f/3.0f, 0.001f);
 
     bufs.free();

@@ -5,12 +5,24 @@ void ThermoBuffers::allocate() {
     CUDA_CHECK(cudaMalloc(&d_kin_stress, 6 * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_pe, sizeof(float)));
     allocated = true;
+    fp = nullptr;
 }
 
 void ThermoBuffers::free() {
     CUDA_CHECK(cudaFree(d_kin_stress));
     CUDA_CHECK(cudaFree(d_pe));
     allocated = false;
+    if (fp) fclose(fp);
+}
+
+void ThermoBuffers::open_file(const char* path) {
+    fp = fopen(path, "w");
+    fprintf(fp, "# step  KE  PE  T  Pxx  Pyy  Pzz  Pxy  Pxz  Pyz\n");
+    fflush(fp);
+}
+
+void ThermoBuffers::close_file() {
+    if (fp) fclose(fp);
 }
 
 __global__ void kinetic_stress_kernel(const float4* __restrict__ vel,
@@ -63,6 +75,7 @@ __global__ void sum_pe_kernel(const float4* __restrict__ force,
 void compute_thermo(const float4* vel, const float4* force,
                      const float* virial, int natoms, float box_L,
                      ThermoOutput* h_output, ThermoBuffers& bufs,
+                     int step, FILE* fp,
                      cudaStream_t stream) {
     CUDA_CHECK(cudaMemsetAsync(bufs.d_kin_stress, 0, 6 * sizeof(float), stream));
     CUDA_CHECK(cudaMemsetAsync(bufs.d_pe, 0, sizeof(float), stream));
@@ -95,5 +108,16 @@ void compute_thermo(const float4* vel, const float4* force,
     float inv_vol = 1.0f / vol;
     for (int c = 0; c < 6; c++) {
         h_output->stress[c] = (h_kin_stress[c] + h_virial[c]) * inv_vol;
+    }
+
+    if (fp) {
+        fprintf(fp, "%d  %.4f  %.4f  %.4f  %.4f  %.4f  %.4f  %.4f  %.4f  %.4f\n",
+                step,
+                h_output->kinetic_energy,
+                h_output->potential_energy,
+                h_output->temperature,
+                h_output->stress[0], h_output->stress[1], h_output->stress[2],
+                h_output->stress[3], h_output->stress[4], h_output->stress[5]);
+        fflush(fp);
     }
 }
