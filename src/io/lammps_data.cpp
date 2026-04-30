@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <algorithm>
 #include <vector>
+#include <cmath>
 
 static bool is_section_header(const std::string& line) {
     if (line.empty()) return false;
@@ -18,6 +19,37 @@ void parse_lammps_data(const std::string& path, TopologyData& topo) {
     std::ifstream file(path);
     if (!file.is_open()) {
         throw std::runtime_error("Cannot open LAMMPS data file: " + path);
+    }
+
+    // Parse box dimensions from header
+    float box_Lx = 0, box_Ly = 0, box_Lz = 0;
+    int box_count = 0;
+    {
+        std::string line;
+        while (std::getline(file, line) && box_count < 3) {
+            size_t start = line.find_first_not_of(" \t\r\n");
+            if (start == std::string::npos) continue;
+            if (line[start] == '#') continue;
+            if (is_section_header(line.substr(start))) break;
+
+            float lo, hi;
+            char dim_label[4];
+            if (sscanf(line.c_str() + start, "%f %f %3s", &lo, &hi, dim_label) == 3) {
+                std::string label(dim_label);
+                if (label == "xlo") { box_Lx = hi - lo; box_count++; }
+                else if (label == "ylo") { box_Ly = hi - lo; box_count++; }
+                else if (label == "zlo") { box_Lz = hi - lo; box_count++; }
+            }
+        }
+        if (box_count != 3) {
+            throw std::runtime_error("LAMMPS data file missing box dimensions");
+        }
+        if (std::fabs(box_Lx - box_Ly) > 1e-6f || std::fabs(box_Lx - box_Lz) > 1e-6f) {
+            throw std::runtime_error("Non-cubic box not supported");
+        }
+        topo.box_L = box_Lx;
+        file.clear();
+        file.seekg(0);
     }
 
     enum class Section { None, Atoms, Velocities, Bonds, Angles };
