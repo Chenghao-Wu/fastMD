@@ -11,6 +11,15 @@ TEST(LammpsDataParser, MiniFile) {
     EXPECT_FLOAT_EQ(topo.positions[3].z, 6.0f);
     EXPECT_EQ(unpack_type_id(topo.positions[0].w), 0);
 
+    ASSERT_EQ(topo.mol_ids.size(), 4u);
+    EXPECT_EQ(topo.mol_ids[0], 1);
+    EXPECT_EQ(topo.mol_ids[1], 1);
+    EXPECT_EQ(topo.mol_ids[2], 1);
+    EXPECT_EQ(topo.mol_ids[3], 1);
+
+    ASSERT_EQ(topo.images.size(), 12u);  // 4 atoms * 3
+    for (int v : topo.images) EXPECT_EQ(v, 0);
+
     ASSERT_EQ(topo.bonds.size(), 2u);
     EXPECT_EQ(topo.bonds[0].x, 0);
     EXPECT_EQ(topo.bonds[0].y, 1);

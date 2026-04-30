@@ -70,7 +70,14 @@ void parse_lammps_data(const std::string& path, TopologyData& topo) {
             if (iss.fail()) continue;
             size_t idx = topo.positions.size();
             id_to_idx[id] = idx;
+            topo.mol_ids.push_back(mol);
             topo.positions.push_back(make_float4(x, y, z, pack_type_id(type - 1)));
+
+            int ix = 0, iy = 0, iz = 0;
+            iss >> ix >> iy >> iz;
+            topo.images.push_back(ix);
+            topo.images.push_back(iy);
+            topo.images.push_back(iz);
         } else if (current == Section::Velocities) {
             int id;
             float vx, vy, vz;
