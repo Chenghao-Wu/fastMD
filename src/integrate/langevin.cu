@@ -35,6 +35,7 @@ __global__ void integrator_pre_force_kernel(
     const float4* __restrict__ force,
     float4* __restrict__ pos_ref,
     int* __restrict__ d_max_dr2_int,
+    int* __restrict__ image,
     curandStatePhilox4_32_10_t* __restrict__ rng_states,
     int natoms, float L, float inv_L,
     float half_dt, float c1, float c2, float kT)
@@ -67,7 +68,18 @@ __global__ void integrator_pre_force_kernel(
     r.y += half_dt * v.y;
     r.z += half_dt * v.z;
 
-    r = wrap_position(r, L, inv_L);
+    int ix = (int)floorf(r.x * inv_L);
+    int iy = (int)floorf(r.y * inv_L);
+    int iz = (int)floorf(r.z * inv_L);
+    r.x -= ix * L;
+    r.y -= iy * L;
+    r.z -= iz * L;
+    if (image != nullptr) {
+        int i3 = i * 3;
+        image[i3 + 0] += ix;
+        image[i3 + 1] += iy;
+        image[i3 + 2] += iz;
+    }
 
     update_max_displacement(r, pos_ref[i], d_max_dr2_int, L, inv_L);
 
@@ -77,12 +89,13 @@ __global__ void integrator_pre_force_kernel(
 
 void launch_integrator_pre_force(float4* pos, float4* vel, const float4* force,
                                   float4* pos_ref, int* d_max_dr2_int,
+                                  int* image,
                                   const LangevinState& lang,
                                   int natoms, float L, float inv_L,
                                   float half_dt, cudaStream_t stream) {
     int blocks = div_ceil(natoms, 256);
     integrator_pre_force_kernel<<<blocks, 256, 0, stream>>>(
-        pos, vel, force, pos_ref, d_max_dr2_int,
+        pos, vel, force, pos_ref, d_max_dr2_int, image,
         lang.rng_states, natoms, L, inv_L,
         half_dt, lang.c1, lang.c2, lang.kT);
 }

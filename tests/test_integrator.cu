@@ -85,7 +85,7 @@ TEST(Integrator, NVEEnergyConservation) {
 
     for (int step = 0; step < nsteps; step++) {
         launch_integrator_pre_force(d_pos, d_vel, d_force, d_pos_ref,
-                                     d_max_dr2, lang, N, L, inv_L,
+                                     d_max_dr2, nullptr, lang, N, L, inv_L,
                                      lang.half_dt);
 
         if (check_and_reset_trigger(d_max_dr2, skin)) {

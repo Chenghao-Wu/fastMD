@@ -151,6 +151,7 @@ int main(int argc, char** argv) {
     for (int step = 1; step <= params.nsteps; step++) {
         launch_integrator_pre_force(sys.pos, sys.vel, sys.force,
                                      sys.pos_ref, sys.d_max_dr2_int,
+                                     sys.d_image,
                                      langevin, params.natoms,
                                      params.box_L, params.inv_L, half_dt);
 

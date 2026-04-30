@@ -16,6 +16,7 @@ struct LangevinState {
 
 void launch_integrator_pre_force(float4* pos, float4* vel, const float4* force,
                                   float4* pos_ref, int* d_max_dr2_int,
+                                  int* image,
                                   const LangevinState& lang,
                                   int natoms, float L, float inv_L,
                                   float half_dt,
