@@ -14,7 +14,8 @@ void write_lammps_data(const std::string& path,
                        const int*    d_bond_types,
                        const int4*   d_angles,
                        int natoms, int nbonds, int nangles,
-                       int ntypes, float box_L,
+                       int ntypes, int nbond_types, int nangle_types,
+                       float box_L,
                        int64_t step,
                        cudaStream_t stream = 0);
 

@@ -192,7 +192,8 @@ void write_lammps_data(const std::string& path,
                        const int*    d_bond_types,
                        const int4*   d_angles,
                        int natoms, int nbonds, int nangles,
-                       int ntypes, float box_L,
+                       int ntypes, int nbond_types, int nangle_types,
+                       float box_L,
                        int64_t step,
                        cudaStream_t stream) {
 
@@ -242,12 +243,17 @@ void write_lammps_data(const std::string& path,
     fprintf(fp, "# Restart from step %ld\n", step);
     fprintf(fp, "%d atoms\n", natoms);
     fprintf(fp, "%d atom types\n", ntypes);
-    if (nbonds > 0) fprintf(fp, "%d bonds\n", nbonds);
-    if (nangles > 0) fprintf(fp, "%d angles\n", nangles);
+    if (nbonds > 0) { fprintf(fp, "%d bonds\n", nbonds); fprintf(fp, "%d bond types\n", nbond_types); }
+    if (nangles > 0) { fprintf(fp, "%d angles\n", nangles); fprintf(fp, "%d angle types\n", nangle_types); }
     fprintf(fp, "\n");
     fprintf(fp, "0.000000 %.6f xlo xhi\n", box_L);
     fprintf(fp, "0.000000 %.6f ylo yhi\n", box_L);
     fprintf(fp, "0.000000 %.6f zlo zhi\n");
+    fprintf(fp, "\n");
+
+    fprintf(fp, "Masses\n\n");
+    for (int i = 0; i < ntypes; i++)
+        fprintf(fp, "%d 1.0\n", i + 1);
     fprintf(fp, "\n");
 
     fprintf(fp, "Atoms\n\n");

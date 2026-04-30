@@ -369,7 +369,8 @@ int main(int argc, char** argv) {
             write_lammps_data(fname, sys.pos, sys.vel, sys.d_image, sys.d_mol_id,
                               sys.bonds, sys.bond_param_idx, sys.angles,
                               params.natoms, sys.nbonds, sys.nangles,
-                              params.ntypes, params.box_L, step);
+                              params.ntypes, (int)topo.bond_params.size(), (int)topo.angle_params.size(),
+                              params.box_L, step);
         }
     }
 
@@ -378,7 +379,8 @@ int main(int argc, char** argv) {
         write_lammps_data(fname, sys.pos, sys.vel, sys.d_image, sys.d_mol_id,
                           sys.bonds, sys.bond_param_idx, sys.angles,
                           params.natoms, sys.nbonds, sys.nangles,
-                          params.ntypes, params.box_L, params.nsteps);
+                          params.ntypes, (int)topo.bond_params.size(), (int)topo.angle_params.size(),
+                          params.box_L, params.nsteps);
     }
 
     auto t_end = std::chrono::steady_clock::now();
