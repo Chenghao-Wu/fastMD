@@ -18,6 +18,9 @@ struct TopologyData {
 
     std::vector<int> exclusion_offsets;
     std::vector<int> exclusion_list;
+
+    std::vector<int> mol_ids;
+    std::vector<int> images;
 };
 
 SimParams parse_config(const std::string& filename, TopologyData& topo);

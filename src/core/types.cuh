@@ -55,6 +55,17 @@ struct SimParams {
     int   ntypes;
     int   nsteps;
     int   dump_freq;
-    int   thermo_freq;
     uint64_t seed;
+
+    int   thermo_on;
+    int   thermo_freq;
+    char  thermo_file[256];
+
+    int   stress_on;
+    int   stress_freq;
+    char  stress_file[256];
+
+    int   rg_on;
+    int   rg_freq;
+    char  rg_file[256];
 };
