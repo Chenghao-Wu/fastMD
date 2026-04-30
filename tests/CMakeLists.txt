@@ -53,3 +53,6 @@ target_sources(test_correlator PRIVATE ${CMAKE_SOURCE_DIR}/src/analysis/correlat
 
 add_cuda_test(test_lammps_data)
 target_sources(test_lammps_data PRIVATE ${CMAKE_SOURCE_DIR}/src/io/lammps_data.cpp)
+
+add_cuda_test(test_rg)
+target_sources(test_rg PRIVATE ${CMAKE_SOURCE_DIR}/src/analysis/rg.cu)
