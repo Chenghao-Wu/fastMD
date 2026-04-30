@@ -35,7 +35,24 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
         else if (key == "gamma")  iss >> params.gamma;
         else if (key == "nsteps") iss >> params.nsteps;
         else if (key == "dump_freq")   iss >> params.dump_freq;
-        else if (key == "thermo_freq") iss >> params.thermo_freq;
+        else if (key == "thermo") {
+            iss >> params.thermo_on >> params.thermo_freq;
+            std::string f; iss >> f;
+            strncpy(params.thermo_file, f.c_str(), 255);
+            params.thermo_file[255] = '\0';
+        }
+        else if (key == "stress") {
+            iss >> params.stress_on >> params.stress_freq;
+            std::string f; iss >> f;
+            strncpy(params.stress_file, f.c_str(), 255);
+            params.stress_file[255] = '\0';
+        }
+        else if (key == "rg") {
+            iss >> params.rg_on >> params.rg_freq;
+            std::string f; iss >> f;
+            strncpy(params.rg_file, f.c_str(), 255);
+            params.rg_file[255] = '\0';
+        }
         else if (key == "seed")   iss >> params.seed;
         else if (key == "coords_file") iss >> coords_file;
         else if (key == "lammps_data_file") iss >> topo.data_file;
