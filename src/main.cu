@@ -15,6 +15,7 @@
 #include "io/config.hpp"
 #include "io/lammps_data.hpp"
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 
 int main(int argc, char** argv) {
@@ -277,6 +278,8 @@ int main(int argc, char** argv) {
 
     float half_dt = 0.5f * params.dt;
 
+    auto t_start = std::chrono::steady_clock::now();
+
     for (int step = 1; step <= params.nsteps; step++) {
         launch_integrator_pre_force(sys.pos, sys.vel, sys.force,
                                      sys.pos_ref, sys.d_max_dr2_int,
@@ -361,6 +364,14 @@ int main(int argc, char** argv) {
             dumper.dump_frame(sys.pos, step, params.box_L, stream_io);
         }
     }
+
+    auto t_end = std::chrono::steady_clock::now();
+    double elapsed = std::chrono::duration<double>(t_end - t_start).count();
+    double steps_per_sec = params.nsteps / elapsed;
+    double ns_per_day = (params.nsteps * params.dt) / (elapsed / 86400.0);
+
+    printf("Wall time: %.3f s  |  Steps/s: %.1f  |  ns/day: %.3f\n",
+           elapsed, steps_per_sec, ns_per_day);
 
     if (params.stress_on) {
         int buf_size = CORR_LEVELS * CORR_POINTS * STRESS_COMPONENTS;
