@@ -1,5 +1,6 @@
 #pragma once
 #include "types.cuh"
+#include <vector>
 
 struct System {
     float4* pos;
@@ -17,6 +18,9 @@ struct System {
     int*    exclusion_list;
     int     nexclusions;
 
+    int*    d_mol_id;
+    int*    d_image;
+
     float2* lj_params;
     float*  virial;
 
@@ -32,4 +36,7 @@ struct System {
     void free();
     void zero_forces();
     void zero_virial();
+    void allocate_rg_buffers(const std::vector<int>& mol_ids,
+                             const std::vector<int>& images,
+                             int natoms_padded);
 };

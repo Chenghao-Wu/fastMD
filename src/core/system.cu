@@ -36,6 +36,9 @@ void System::allocate(const SimParams& params) {
     exclusion_offsets = nullptr;
     exclusion_list = nullptr;
     nexclusions = 0;
+
+    d_mol_id = nullptr;
+    d_image = nullptr;
 }
 
 void System::free() {
@@ -52,6 +55,8 @@ void System::free() {
     if (angles) CUDA_CHECK(cudaFree(angles));
     if (exclusion_offsets) CUDA_CHECK(cudaFree(exclusion_offsets));
     if (exclusion_list) CUDA_CHECK(cudaFree(exclusion_list));
+    if (d_mol_id) CUDA_CHECK(cudaFree(d_mol_id));
+    if (d_image) CUDA_CHECK(cudaFree(d_image));
 }
 
 void System::zero_forces() {
@@ -60,4 +65,25 @@ void System::zero_forces() {
 
 void System::zero_virial() {
     CUDA_CHECK(cudaMemset(virial, 0, 6 * sizeof(float)));
+}
+
+void System::allocate_rg_buffers(const std::vector<int>& mol_ids,
+                                  const std::vector<int>& images,
+                                  int natoms_padded) {
+    size_t n_int = natoms_padded * sizeof(int);
+    size_t n_3int = natoms_padded * 3 * sizeof(int);
+
+    CUDA_CHECK(cudaMalloc(&d_mol_id, n_int));
+    CUDA_CHECK(cudaMemset(d_mol_id, -1, n_int));
+    CUDA_CHECK(cudaMemcpy(d_mol_id, mol_ids.data(),
+                          mol_ids.size() * sizeof(int),
+                          cudaMemcpyHostToDevice));
+
+    CUDA_CHECK(cudaMalloc(&d_image, n_3int));
+    CUDA_CHECK(cudaMemset(d_image, 0, n_3int));
+    if (!images.empty()) {
+        CUDA_CHECK(cudaMemcpy(d_image, images.data(),
+                              images.size() * sizeof(int),
+                              cudaMemcpyHostToDevice));
+    }
 }
