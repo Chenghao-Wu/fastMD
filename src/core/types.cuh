@@ -65,6 +65,9 @@ struct SimParams {
     int   stress_freq;
     char  stress_file[256];
 
+    int   restart_freq;
+    char  restart_file[256];
+
     int   rg_on;
     int   rg_freq;
     char  rg_file[256];
