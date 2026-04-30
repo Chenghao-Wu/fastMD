@@ -252,7 +252,7 @@ void write_lammps_data(const std::string& path,
 
     fprintf(fp, "Atoms\n\n");
     for (int i = 0; i < natoms; i++) {
-        int mol = d_mol_id ? (h_mol_id[i] + 1) : 1;
+        int mol = d_mol_id ? h_mol_id[i] : 1;
         int type = unpack_type_id(h_pos[i].w) + 1;
         int ix = d_image ? h_image[i * 3] : 0;
         int iy = d_image ? h_image[i * 3 + 1] : 0;
