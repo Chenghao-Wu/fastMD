@@ -21,6 +21,9 @@ struct TopologyData {
 
     std::vector<int> mol_ids;
     std::vector<int> images;
+    float box_L = 0.0f;
 };
+
+void finalize_params(SimParams& params);
 
 SimParams parse_config(const std::string& filename, TopologyData& topo);
