@@ -14,6 +14,7 @@
 #include "io/dump.cuh"
 #include "io/config.hpp"
 #include "io/lammps_data.hpp"
+#include <algorithm>
 #include <cstdio>
 
 int main(int argc, char** argv) {
@@ -123,6 +124,89 @@ int main(int argc, char** argv) {
             fprintf(stderr, "Warning: rg_on but no mol_ids in data file, disabling Rg\n");
             params.rg_on = 0;
         } else {
+            // Sort atoms by mol_id so chains are contiguous
+            int natoms = (int)topo.mol_ids.size();
+            std::vector<int> perm(natoms);
+            for (int i = 0; i < natoms; i++) perm[i] = i;
+            std::sort(perm.begin(), perm.end(),
+                      [&](int a, int b) { return topo.mol_ids[a] < topo.mol_ids[b]; });
+
+            // Build inverse mapping: old_idx -> new_idx
+            std::vector<int> inv_perm(natoms);
+            for (int i = 0; i < natoms; i++) inv_perm[perm[i]] = i;
+
+            // Permute positions, velocities, mol_ids, images
+            std::vector<float4> sorted_pos(natoms);
+            std::vector<float4> sorted_vel(natoms);
+            std::vector<int> sorted_mol(natoms);
+            std::vector<int> sorted_img(topo.images.size());
+            for (int i = 0; i < natoms; i++) {
+                sorted_pos[i] = topo.positions[perm[i]];
+                sorted_mol[i] = topo.mol_ids[perm[i]];
+            }
+            for (int i = 0; i < natoms; i++)
+                sorted_vel[i] = (perm[i] < (int)topo.velocities.size())
+                    ? topo.velocities[perm[i]] : make_float4(0,0,0,0);
+            if (!topo.images.empty()) {
+                for (int i = 0; i < natoms; i++) {
+                    int s = perm[i] * 3;
+                    int d = i * 3;
+                    sorted_img[d + 0] = topo.images[s + 0];
+                    sorted_img[d + 1] = topo.images[s + 1];
+                    sorted_img[d + 2] = topo.images[s + 2];
+                }
+            }
+            topo.positions.swap(sorted_pos);
+            topo.velocities.swap(sorted_vel);
+            topo.mol_ids.swap(sorted_mol);
+            topo.images.swap(sorted_img);
+
+            // Remap bond and angle atom indices
+            for (auto& b : topo.bonds) {
+                b.x = inv_perm[b.x];
+                b.y = inv_perm[b.y];
+            }
+            for (auto& a : topo.angles) {
+                a.x = inv_perm[a.x];
+                a.y = inv_perm[a.y];
+                a.z = inv_perm[a.z];
+            }
+
+            // Re-upload sorted data to GPU
+            std::copy(topo.positions.begin(), topo.positions.end(), pos_pad.begin());
+            std::copy(topo.velocities.begin(), topo.velocities.end(), vel_pad.begin());
+            CUDA_CHECK(cudaMemcpy(sys.pos, pos_pad.data(), np * sizeof(float4),
+                                   cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(sys.vel, vel_pad.data(), np * sizeof(float4),
+                                   cudaMemcpyHostToDevice));
+            if (sys.nbonds > 0) {
+                CUDA_CHECK(cudaMemcpy(sys.bonds, topo.bonds.data(),
+                                      sys.nbonds * sizeof(int2), cudaMemcpyHostToDevice));
+                CUDA_CHECK(cudaMemcpy(sys.bond_param_idx, topo.bond_types.data(),
+                                      sys.nbonds * sizeof(int), cudaMemcpyHostToDevice));
+            }
+            if (sys.nangles > 0) {
+                CUDA_CHECK(cudaMemcpy(sys.angles, topo.angles.data(),
+                                      sys.nangles * sizeof(int4), cudaMemcpyHostToDevice));
+            }
+            // Also rebuild exclusions since indices changed
+            if (sys.nbonds > 0) {
+                build_exclusions(topo, topo);
+                sys.nexclusions = static_cast<int>(topo.exclusion_list.size());
+                if (sys.nexclusions > 0) {
+                    CUDA_CHECK(cudaFree(sys.exclusion_offsets));
+                    CUDA_CHECK(cudaFree(sys.exclusion_list));
+                    CUDA_CHECK(cudaMalloc(&sys.exclusion_offsets,
+                                          (params.natoms + 1) * sizeof(int)));
+                    CUDA_CHECK(cudaMalloc(&sys.exclusion_list,
+                                          sys.nexclusions * sizeof(int)));
+                    CUDA_CHECK(cudaMemcpy(sys.exclusion_offsets, topo.exclusion_offsets.data(),
+                                          (params.natoms + 1) * sizeof(int), cudaMemcpyHostToDevice));
+                    CUDA_CHECK(cudaMemcpy(sys.exclusion_list, topo.exclusion_list.data(),
+                                          sys.nexclusions * sizeof(int), cudaMemcpyHostToDevice));
+                }
+            }
+
             int cur_mol = topo.mol_ids[0];
             chain_offsets.push_back(0);
             for (size_t i = 1; i < topo.mol_ids.size(); i++) {
