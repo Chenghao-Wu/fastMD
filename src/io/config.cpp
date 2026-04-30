@@ -7,6 +7,7 @@
 
 SimParams parse_config(const std::string& filename, TopologyData& topo) {
     SimParams params = {};
+    params.restart_freq = -1;
     std::string coords_file;
     std::vector<std::tuple<int,int,float,float>> lj_entries;
 
@@ -51,6 +52,12 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
             std::string f; iss >> f;
             strncpy(params.rg_file, f.c_str(), 255);
             params.rg_file[255] = '\0';
+        }
+        else if (key == "restart") {
+            iss >> params.restart_freq;
+            std::string f; iss >> f;
+            strncpy(params.restart_file, f.c_str(), 255);
+            params.restart_file[255] = '\0';
         }
         else if (key == "seed")   iss >> params.seed;
         else if (key == "coords_file") iss >> coords_file;
