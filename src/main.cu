@@ -30,6 +30,8 @@ int main(int argc, char** argv) {
         printf("Loaded %zu bonds, %zu angles from %s\n",
                topo.bonds.size(), topo.angles.size(), topo.data_file.c_str());
     }
+    params.box_L = topo.box_L;
+    finalize_params(params);
     printf("Loaded %d atoms, box=%.2f, rc=%.2f, dt=%.4f, nsteps=%d\n",
            params.natoms, params.box_L, params.rc, params.dt, params.nsteps);
 
