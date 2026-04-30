@@ -363,6 +363,22 @@ int main(int argc, char** argv) {
         if (params.dump_freq > 0 && step % params.dump_freq == 0) {
             dumper.dump_frame(sys.pos, step, params.box_L, stream_io);
         }
+
+        if (params.restart_freq > 0 && step % params.restart_freq == 0 && step != params.nsteps) {
+            std::string fname = build_restart_filename(params.restart_file, step);
+            write_lammps_data(fname, sys.pos, sys.vel, sys.d_image, sys.d_mol_id,
+                              sys.bonds, sys.bond_param_idx, sys.angles,
+                              params.natoms, sys.nbonds, sys.nangles,
+                              params.ntypes, params.box_L, step);
+        }
+    }
+
+    if (params.restart_freq >= 0) {
+        std::string fname = build_restart_final_filename(params.restart_file);
+        write_lammps_data(fname, sys.pos, sys.vel, sys.d_image, sys.d_mol_id,
+                          sys.bonds, sys.bond_param_idx, sys.angles,
+                          params.natoms, sys.nbonds, sys.nangles,
+                          params.ntypes, params.box_L, params.nsteps);
     }
 
     auto t_end = std::chrono::steady_clock::now();
