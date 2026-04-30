@@ -24,6 +24,7 @@ add_library(core STATIC
     src/force/angle.cu
     src/integrate/langevin.cu
     src/analysis/thermo.cu
+    src/analysis/rg.cu
     src/analysis/correlator.cu
     src/io/dump.cu
     src/io/lammps_data.cpp

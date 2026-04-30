@@ -22,7 +22,7 @@ void ThermoBuffers::open_file(const char* path) {
 }
 
 void ThermoBuffers::close_file() {
-    if (fp) fclose(fp);
+    if (fp) { fclose(fp); fp = nullptr; }
 }
 
 __global__ void kinetic_stress_kernel(const float4* __restrict__ vel,

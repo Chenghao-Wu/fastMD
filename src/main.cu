@@ -10,6 +10,7 @@
 #include "integrate/langevin.cuh"
 #include "analysis/thermo.cuh"
 #include "analysis/correlator.cuh"
+#include "analysis/rg.cuh"
 #include "io/dump.cuh"
 #include "io/config.hpp"
 #include "io/lammps_data.hpp"
@@ -102,10 +103,52 @@ int main(int argc, char** argv) {
     langevin.init(np, params.gamma, params.dt, params.temperature, params.seed);
 
     MultipleTauCorrelator correlator;
-    correlator.allocate();
+    if (params.stress_on) {
+        correlator.allocate();
+    }
 
     ThermoBuffers thermo_bufs;
     thermo_bufs.allocate();
+    if (params.thermo_on) {
+        thermo_bufs.open_file(params.thermo_file);
+    }
+
+    RgBuffers rg_bufs;
+    std::vector<int> chain_offsets;
+    std::vector<int> chain_lengths;
+    int nchains = 0;
+
+    if (params.rg_on) {
+        if (topo.mol_ids.empty()) {
+            fprintf(stderr, "Warning: rg_on but no mol_ids in data file, disabling Rg\n");
+            params.rg_on = 0;
+        } else {
+            int cur_mol = topo.mol_ids[0];
+            chain_offsets.push_back(0);
+            for (size_t i = 1; i < topo.mol_ids.size(); i++) {
+                if (topo.mol_ids[i] != cur_mol) {
+                    chain_offsets.push_back((int)i);
+                    cur_mol = topo.mol_ids[i];
+                }
+            }
+            chain_offsets.push_back((int)topo.mol_ids.size());
+            nchains = (int)chain_offsets.size() - 1;
+            chain_lengths.resize(nchains);
+            int max_len = 0;
+            for (int c = 0; c < nchains; c++) {
+                chain_lengths[c] = chain_offsets[c + 1] - chain_offsets[c];
+                if (chain_lengths[c] > max_len) max_len = chain_lengths[c];
+            }
+            if (max_len > 1024) {
+                fprintf(stderr, "Warning: max chain length %d > 1024, disabling Rg\n", max_len);
+                params.rg_on = 0;
+            } else {
+                sys.allocate_rg_buffers(topo.mol_ids, topo.images, np);
+                rg_bufs.allocate(chain_offsets, chain_lengths, nchains, max_len,
+                                 params.rg_file);
+            }
+        }
+    }
 
     BinaryDumper dumper;
     dumper.open("traj.bin", params.natoms, params.ntypes);
@@ -197,21 +240,35 @@ int main(int argc, char** argv) {
         launch_integrator_post_force(sys.vel, sys.force, params.natoms, half_dt);
         CUDA_CHECK(cudaDeviceSynchronize());
 
-        if (step % params.thermo_freq == 0) {
+        bool need_thermo = params.thermo_on && (step % params.thermo_freq == 0);
+        bool need_stress = params.stress_on && (step % params.stress_freq == 0);
+
+        if (need_thermo || need_stress) {
             ThermoOutput thermo;
             compute_thermo(sys.vel, sys.force, sys.virial,
-                            params.natoms, params.box_L, &thermo, thermo_bufs,
-                            step, nullptr);
-            printf("Step %d: T=%.4f KE=%.4f PE=%.4f Pxx=%.4f\n",
-                   step, thermo.temperature, thermo.kinetic_energy,
-                   thermo.potential_energy, thermo.stress[0]);
+                            params.natoms, params.box_L, &thermo,
+                            thermo_bufs, step, thermo_bufs.fp);
 
-            float* d_stress_for_corr;
-            CUDA_CHECK(cudaMalloc(&d_stress_for_corr, 6 * sizeof(float)));
-            CUDA_CHECK(cudaMemcpy(d_stress_for_corr, thermo.stress,
-                                   6 * sizeof(float), cudaMemcpyHostToDevice));
-            correlator.push_sample(d_stress_for_corr);
-            CUDA_CHECK(cudaFree(d_stress_for_corr));
+            if (need_thermo) {
+                printf("Step %d: T=%.4f KE=%.4f PE=%.4f Pxx=%.4f\n",
+                       step, thermo.temperature, thermo.kinetic_energy,
+                       thermo.potential_energy, thermo.stress[0]);
+            }
+            if (need_stress) {
+                float* d_stress_for_corr;
+                CUDA_CHECK(cudaMalloc(&d_stress_for_corr, 6 * sizeof(float)));
+                CUDA_CHECK(cudaMemcpy(d_stress_for_corr, thermo.stress,
+                                       6 * sizeof(float), cudaMemcpyHostToDevice));
+                correlator.push_sample(d_stress_for_corr);
+                CUDA_CHECK(cudaFree(d_stress_for_corr));
+            }
+        }
+
+        if (params.rg_on && step % params.rg_freq == 0) {
+            float rg;
+            compute_rg(sys.pos, sys.d_image, rg_bufs,
+                       params.box_L, step, &rg);
+            printf("  Rg=%.4f\n", rg);
         }
 
         if (params.dump_freq > 0 && step % params.dump_freq == 0) {
@@ -219,16 +276,16 @@ int main(int argc, char** argv) {
         }
     }
 
-    {
+    if (params.stress_on) {
         int buf_size = CORR_LEVELS * CORR_POINTS * STRESS_COMPONENTS;
         std::vector<float> h_corr(buf_size);
         std::vector<int> h_counts(CORR_LEVELS * CORR_POINTS);
         int total_levels;
         correlator.get_results(h_corr.data(), h_counts.data(), &total_levels);
 
-        FILE* corr_fp = fopen("stress_acf.dat", "w");
+        FILE* corr_fp = fopen(params.stress_file, "w");
         fprintf(corr_fp, "# lag_steps  C_xx  C_xy  C_xz  C_yy  C_yz  C_zz  count\n");
-        int lag_step = params.thermo_freq;
+        int lag_step = params.stress_freq;
         for (int level = 0; level < total_levels; level++) {
             for (int lag = 0; lag < CORR_POINTS; lag++) {
                 int count = h_counts[level * CORR_POINTS + lag];
@@ -243,12 +300,14 @@ int main(int argc, char** argv) {
             lag_step *= CORR_POINTS;
         }
         fclose(corr_fp);
-        printf("Stress autocorrelation written to stress_acf.dat\n");
+        printf("Stress autocorrelation written to %s\n", params.stress_file);
     }
 
     dumper.close();
+    thermo_bufs.close_file();
     thermo_bufs.free();
-    correlator.free();
+    if (params.rg_on) rg_bufs.free();
+    if (params.stress_on) correlator.free();
     langevin.free();
     verlet.free();
     morton.free();
