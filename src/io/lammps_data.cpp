@@ -30,7 +30,6 @@ void parse_lammps_data(const std::string& path, TopologyData& topo) {
             size_t start = line.find_first_not_of(" \t\r\n");
             if (start == std::string::npos) continue;
             if (line[start] == '#') continue;
-            if (is_section_header(line.substr(start))) break;
 
             float lo, hi;
             char dim_label[4];
