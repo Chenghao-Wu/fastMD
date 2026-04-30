@@ -26,7 +26,6 @@ Create a config file (e.g. `run.conf`):
 
 ```
 natoms 30000
-box_L 34.995
 ntypes 1
 rc 2.5
 skin 0.3
@@ -35,7 +34,7 @@ temperature 1.0
 gamma 1.0
 nsteps 5000
 dump_freq 0
-thermo_freq 1000
+thermo 1 1000 thermo.dat
 seed 42
 lj 0 0 1.0 1.0
 bond_type 0 30.0 1.5 1.0 1.0
@@ -48,6 +47,49 @@ Run:
 ```bash
 ./fastMD ../run.conf
 ```
+
+## Configuration Reference
+
+### Simulation parameters
+
+| Key | Arguments | Description |
+|-----|-----------|-------------|
+| `natoms` | `N` | Number of atoms in the system |
+| `ntypes` | `N` | Number of atom types |
+| `rc` | `float` | Non-bonded cutoff radius |
+| `skin` | `float` | Neighbor list skin distance |
+| `dt` | `float` | Timestep size |
+| `temperature` | `float` | Target thermostat temperature |
+| `gamma` | `float` | Langevin friction coefficient |
+| `nsteps` | `N` | Number of simulation steps |
+| `dump_freq` | `N` | Trajectory dump frequency (0 to disable) |
+| `seed` | `N` | Random number generator seed |
+
+### Interaction types
+
+**`lj <ti> <tj> <eps> <sig>`** — Lennard-Jones non-bonded interaction between atom types `ti` and `tj`. Both types are 0-indexed. Parameters are symmetric (applied to both `ti,tj` and `tj,ti`). Required.
+
+**`bond_type <t> <k> <R0> <eps> <sig>`** — FENE bond parameters for bond type `t`. `t` is 0-indexed (corresponds to LAMMPS bond type minus 1). Parameters:
+- `t` — bond type index (0 = LAMMPS bond type 1, 1 = LAMMPS bond type 2, etc.)
+- `k` — FENE spring constant
+- `R0` — equilibrium bond distance
+- `eps`, `sig` — WCA wall parameters (repulsive LJ between bonded atoms)
+
+**`angle_type <t> <k> <theta0>`** — Harmonic angle bending parameters for angle type `t`. `t` is 0-indexed (LAMMPS angle type minus 1). Parameters:
+- `k` — angle force constant
+- `theta0` — equilibrium angle in degrees
+
+**`lammps_data_file <path>`** — Path to LAMMPS data file containing atom coordinates, bonds, and angles.
+
+To run without angle interactions, simply omit all `angle_type` lines and ensure your LAMMPS data file has no `Angles` section.
+
+### Analysis output
+
+**`thermo <on> <freq> <file>`** — Thermodynamic output. Writes CSV with columns: `step, ke, pe, etotal, T, Pxx, Pyy, Pzz, Pxy, Pxz, Pyz` at the given frequency. Set `<on>` to 1 to enable, 0 to disable.
+
+**`rg <on> <freq> <file>`** — Radius of gyration. Computes ensemble-averaged Rg per chain using molecule IDs from the LAMMPS data file. Set `<on>` to 1 to enable, 0 to disable.
+
+**`stress <on> <freq> <file>`** — Stress autocorrelation. Uses a multiple-tau correlator to compute the stress autocorrelation function for viscosity analysis. Requires a LAMMPS data file with a `Velocities` section.
 
 ## Features
 
