@@ -16,7 +16,7 @@ def run_fastmd(config_path: str) -> subprocess.CompletedProcess:
         cwd=SCRIPT_DIR,
         capture_output=True,
         text=True,
-        timeout=1200,
+        timeout=3600,
     )
     if result.returncode != 0:
         print(f"fastMD stderr:\n{result.stderr}")
@@ -30,7 +30,7 @@ def run_lammps(input_path: str) -> subprocess.CompletedProcess:
         cwd=SCRIPT_DIR,
         capture_output=True,
         text=True,
-        timeout=1200,
+        timeout=3600,
     )
     if result.returncode != 0:
         print(f"LAMMPS stderr:\n{result.stderr}")
