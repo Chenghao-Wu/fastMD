@@ -9,35 +9,13 @@ utils.set_work_dir()
 PE_REL_TOL = 0.01  # 1%
 PXX_REL_TOL = 0.01  # 1%
 
-NSTEPS = 10
-
 
 def main():
-    # Generate configs
-    fastmd_config = utils.write_fastmd_config(NSTEPS)
-    lammps_input = utils.write_lammps_input(NSTEPS)
-
-    # Run fastMD
-    print(f"Running fastMD for {NSTEPS} steps...")
-    fastmd_result = utils.run_fastmd(fastmd_config)
-    if fastmd_result.returncode != 0:
-        print("FAIL: fastMD crashed")
-        print(fastmd_result.stderr)
+    if not os.path.exists("thermo_fastmd_10.dat") or not os.path.exists("thermo_lammps_10.dat"):
+        print("Thermo files not found. Run run_tests.sh to generate them first.")
         sys.exit(1)
 
-    # Run LAMMPS
-    print(f"Running LAMMPS for {NSTEPS} steps...")
-    lammps_result = utils.run_lammps(lammps_input)
-    if lammps_result.returncode != 0:
-        print("FAIL: LAMMPS crashed")
-        print(lammps_result.stderr)
-        sys.exit(1)
-
-    # Extract thermo from LAMMPS log
-    extract_lammps_thermo(lammps_result.stdout, "thermo_lammps_10.dat")
-
-    # Parse both outputs
-    fastmd_thermo = utils.parse_thermo("thermo_fastmd.dat")
+    fastmd_thermo = utils.parse_thermo("thermo_fastmd_10.dat")
     lammps_thermo = utils.parse_thermo("thermo_lammps_10.dat")
 
     # Both fastMD and LAMMPS output per-atom KE and PE — no normalization needed
@@ -50,7 +28,8 @@ def main():
     if max_pe_diff > PE_REL_TOL:
         print(f"FAIL: PE relative difference {max_pe_diff*100:.4f}% exceeds {PE_REL_TOL*100}%")
         print("PE values (fastMD vs LAMMPS):")
-        for i in range(min(NSTEPS, len(fastmd_thermo["PE"]))):
+        n_steps = min(len(fastmd_thermo["PE"]), len(lammps_thermo["PE"]))
+        for i in range(n_steps):
             print(f"  step {i+1}: {fastmd_thermo['PE'][i]:.4f} vs {lammps_thermo['PE'][i]:.4f}")
         sys.exit(1)
 
@@ -64,47 +43,6 @@ def main():
         sys.exit(1)
 
     print("PASS: forces test")
-
-
-def extract_lammps_thermo(stdout: str, output_path: str):
-    """Extract thermo table from LAMMPS stdout into a file."""
-    lines = stdout.splitlines()
-    in_thermo = False
-    thermo_lines = []
-
-    for line in lines:
-        if line.strip().startswith("Step ") and ("KinEng" in line or "kineng" in line.lower()):
-            thermo_lines.append("# step  KE  PE  T  Pxx  Pyy  Pzz  Pxy  Pxz  Pyz")
-            in_thermo = True
-            continue
-        if in_thermo:
-            stripped = line.strip()
-            if stripped and stripped[0].isdigit():
-                thermo_lines.append(stripped)
-            elif thermo_lines and line.strip() == "":
-                pass
-            elif thermo_lines and not line.strip().startswith(("Loop", "WARNING", "ERROR")):
-                pass
-
-    # Fallback: parse the log file written by LAMMPS
-    if len(thermo_lines) <= 1:
-        log_path = os.path.join(os.path.dirname(__file__), "log.lammps")
-        if os.path.exists(log_path):
-            with open(log_path) as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("Step ") and ("KinEng" in line or "kineng" in line.lower()):
-                        thermo_lines = [
-                            "# step  KE  PE  T  Pxx  Pyy  Pzz  Pxy  Pxz  Pyz"
-                        ]
-                        continue
-                    if thermo_lines and line and line.split()[0].isdigit():
-                        parts = line.split()
-                        if len(parts) >= 10:
-                            thermo_lines.append("  ".join(parts[:10]))
-
-    with open(os.path.join(os.path.dirname(__file__), output_path), "w") as f:
-        f.write("\n".join(thermo_lines) + "\n")
 
 
 if __name__ == "__main__":

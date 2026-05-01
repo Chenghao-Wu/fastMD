@@ -37,6 +37,9 @@ if result.returncode != 0:
     print("ERROR: LAMMPS 10-step run failed")
     print(result.stderr)
     exit(1)
+# Save the 10-step fastMD thermo before 5000-step run overwrites it
+import shutil
+shutil.copy("thermo_fastmd.dat", "thermo_fastmd_10.dat")
 print("10-step simulations complete.")
 PYEOF
 
@@ -93,7 +96,7 @@ def extract_from_log(log_file, output_file):
                 in_thermo = True
                 continue
             if in_thermo:
-                if stripped and stripped.split()[0].isdigit():
+                if stripped and stripped.split()[0].isdigit() and "CPU" not in stripped:
                     parts = stripped.split()
                     if len(parts) >= 10:
                         thermo_lines.append("  ".join(parts[:10]))
