@@ -19,10 +19,7 @@ def main():
     fastmd_thermo = utils.parse_thermo("thermo_fastmd.dat")
     lammps_thermo = utils.parse_thermo("thermo_lammps.dat")
 
-    # Normalize LAMMPS KE and PE to per-atom
-    natoms = 30000
-    lammps_thermo["KE"] = lammps_thermo["KE"] / natoms
-    lammps_thermo["PE"] = lammps_thermo["PE"] / natoms
+    # Both fastMD and LAMMPS output per-atom KE and PE — no normalization needed
 
     # Discard equilibration
     n_total = len(fastmd_thermo["step"])

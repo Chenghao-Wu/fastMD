@@ -9,7 +9,7 @@ echo ""
 
 # Ensure data symlink exists
 if [ ! -e data ]; then
-    ln -s ../../../data/bonded_ring_n40m30M25.data data
+    ln -sf /home/zhenghaowu/fastMD/data/bonded_ring_n40m30M25.data data
     echo "Created data symlink"
 fi
 
@@ -88,7 +88,7 @@ def extract_from_log(log_file, output_file):
     with open(log_file) as f:
         for line in f:
             stripped = line.strip()
-            if stripped.startswith("Step") and "ke" in stripped.lower():
+            if stripped.startswith("Step") and ("KinEng" in stripped or "kineng" in stripped.lower()):
                 thermo_lines.append("# step  KE  PE  T  Pxx  Pyy  Pzz  Pxy  Pxz  Pyz")
                 in_thermo = True
                 continue

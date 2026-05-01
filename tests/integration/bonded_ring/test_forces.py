@@ -40,10 +40,7 @@ def main():
     fastmd_thermo = utils.parse_thermo("thermo_fastmd.dat")
     lammps_thermo = utils.parse_thermo("thermo_lammps_10.dat")
 
-    # Normalize LAMMPS KE and PE to per-atom
-    natoms = 30000
-    lammps_thermo["KE"] = lammps_thermo["KE"] / natoms
-    lammps_thermo["PE"] = lammps_thermo["PE"] / natoms
+    # Both fastMD and LAMMPS output per-atom KE and PE — no normalization needed
 
     # Compare PE at each step
     pe_rel_diff = utils.relative_diff(fastmd_thermo["PE"], lammps_thermo["PE"])
@@ -76,7 +73,7 @@ def extract_lammps_thermo(stdout: str, output_path: str):
     thermo_lines = []
 
     for line in lines:
-        if line.strip().startswith("Step ") and "ke" in line.lower():
+        if line.strip().startswith("Step ") and ("KinEng" in line or "kineng" in line.lower()):
             thermo_lines.append("# step  KE  PE  T  Pxx  Pyy  Pzz  Pxy  Pxz  Pyz")
             in_thermo = True
             continue
@@ -96,7 +93,7 @@ def extract_lammps_thermo(stdout: str, output_path: str):
             with open(log_path) as f:
                 for line in f:
                     line = line.strip()
-                    if line.startswith("Step ") and "ke" in line.lower():
+                    if line.startswith("Step ") and ("KinEng" in line or "kineng" in line.lower()):
                         thermo_lines = [
                             "# step  KE  PE  T  Pxx  Pyy  Pzz  Pxy  Pxz  Pyz"
                         ]
