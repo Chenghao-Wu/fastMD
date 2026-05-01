@@ -7,6 +7,12 @@ cd "$SCRIPT_DIR"
 echo "=== Bonded Ring Integration Tests ==="
 echo ""
 
+# Ensure data symlink exists
+if [ ! -e data ]; then
+    ln -s ../../../data/bonded_ring_n40m30M25.data data
+    echo "Created data symlink"
+fi
+
 # Step 1: Run 10-step simulations for force test
 echo "--- Running 10-step simulations for force test ---"
 

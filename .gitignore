@@ -21,5 +21,10 @@ fastmd_benchmark.conf
 lammps_benchmark.in
 profile_fastmd.conf
 
+# Integration test artifacts
+tests/integration/bonded_ring/fastmd_*steps.conf
+tests/integration/bonded_ring/lammps_*steps.in
+tests/integration/bonded_ring/thermo_*.dat
+
 # CTest
 Testing/
