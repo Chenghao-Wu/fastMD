@@ -21,6 +21,10 @@ def main():
     fastmd_thermo = utils.parse_thermo("thermo_fastmd.dat")
     lammps_thermo = utils.parse_thermo("thermo_lammps.dat")
 
+    # LAMMPS includes step 0 (initial state), fastMD starts at step 1.
+    # Drop LAMMPS step 0 to align trajectories.
+    lammps_thermo = {k: v[1:] for k, v in lammps_thermo.items()}
+
     # Both fastMD and LAMMPS output per-atom KE and PE — no normalization needed
 
     fm_total_e = utils.total_energy_per_atom(fastmd_thermo)
