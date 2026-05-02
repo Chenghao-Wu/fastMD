@@ -357,7 +357,7 @@ int main(int argc, char** argv) {
 
             if (need_thermo) {
                 float etot = thermo.kinetic_energy + thermo.potential_energy;
-                printf("Step %6d  T=%10.4f  KE=%11.2f  PE=%11.2f  Etot=%11.2f  Pxx=%8.2f\n",
+                printf("\nStep %6d  T=%10.4f  KE=%11.2f  PE=%11.2f  Etot=%11.2f  Pxx=%8.2f\n",
                        step, thermo.temperature, thermo.kinetic_energy,
                        thermo.potential_energy, etot, thermo.stress[0]);
             }
