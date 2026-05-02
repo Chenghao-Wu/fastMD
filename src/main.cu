@@ -367,7 +367,6 @@ int main(int argc, char** argv) {
             float rg;
             compute_rg(sys.pos, sys.d_image, rg_bufs,
                        params.box_L, step, &rg);
-            printf("  Rg=%.4f\n", rg);
         }
 
         if (params.dump_freq > 0 && step % params.dump_freq == 0) {
