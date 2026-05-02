@@ -8,7 +8,6 @@
 SimParams parse_config(const std::string& filename, TopologyData& topo) {
     SimParams params = {};
     params.restart_freq = -1;
-    bool has_langevin = false;
     std::string coords_file;
     std::vector<std::tuple<int,int,float,float>> lj_entries;
 
@@ -32,8 +31,14 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
         else if (key == "rc")     iss >> params.rc;
         else if (key == "skin")   iss >> params.skin;
         else if (key == "dt")     iss >> params.dt;
-        else if (key == "temperature") { iss >> params.temperature; has_langevin = true; }
-        else if (key == "gamma")  iss >> params.gamma;
+        else if (key == "temperature") {
+            throw std::runtime_error(
+                "'temperature' is deprecated. Use 'nvt_langevin T_start T_stop Tdamp [seed]' instead.");
+        }
+        else if (key == "gamma") {
+            throw std::runtime_error(
+                "'gamma' is deprecated. Use 'nvt_langevin T_start T_stop Tdamp [seed]' instead.");
+        }
         else if (key == "nsteps") iss >> params.nsteps;
         else if (key == "dump_freq")   iss >> params.dump_freq;
         else if (key == "thermo") {
@@ -60,7 +65,18 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
             strncpy(params.restart_file, f.c_str(), 255);
             params.restart_file[255] = '\0';
         }
-        else if (key == "seed")   iss >> params.seed;
+        else if (key == "seed") {
+            throw std::runtime_error(
+                "'seed' as a standalone key is deprecated. "
+                "Specify seed in 'nvt_langevin T_start T_stop Tdamp [seed]'.");
+        }
+        else if (key == "nvt_langevin") {
+            params.ensemble = Ensemble::Langevin;
+            iss >> params.T_start >> params.T_stop >> params.Tdamp;
+            if (!(iss >> params.seed)) {
+                params.seed = 42;
+            }
+        }
         else if (key == "nvt_nh") {
             params.ensemble = Ensemble::NVT_NH;
             iss >> params.T_start >> params.T_stop >> params.Tdamp;
@@ -132,20 +148,22 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
         }
     }
 
-    // Validate ensemble mutual exclusion
-    if (has_langevin && params.ensemble != Ensemble::Langevin) {
-        throw std::runtime_error(
-            "Cannot use 'temperature'/'gamma' with nvt_nh/npt_nh. "
-            "Choose one ensemble type.");
+    // Validate ensemble parameters
+    if (params.ensemble == Ensemble::Langevin) {
+        if (params.Tdamp <= 0.0f) {
+            throw std::runtime_error("Tdamp must be > 0 for nvt_langevin");
+        }
     }
-    if (params.ensemble != Ensemble::Langevin && params.Tdamp <= 0.0f) {
-        throw std::runtime_error("Tdamp must be > 0 for nvt_nh/npt_nh");
+    if (params.ensemble == Ensemble::NVT_NH || params.ensemble == Ensemble::NPT_NH) {
+        if (params.Tdamp <= 0.0f) {
+            throw std::runtime_error("Tdamp must be > 0 for nvt_nh/npt_nh");
+        }
+        if (params.nh_chain_length < 1) {
+            throw std::runtime_error("nh_chain_length must be >= 1");
+        }
     }
     if (params.ensemble == Ensemble::NPT_NH && params.Pdamp <= 0.0f) {
         throw std::runtime_error("Pdamp must be > 0 for npt_nh");
-    }
-    if (params.nh_chain_length < 1) {
-        throw std::runtime_error("nh_chain_length must be >= 1");
     }
 
     return params;
