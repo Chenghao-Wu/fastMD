@@ -289,6 +289,14 @@ int main(int argc, char** argv) {
 
     auto t_start = std::chrono::steady_clock::now();
 
+    int progress_interval = 1000;
+    if (params.nsteps < 100) progress_interval = 1;
+    else if (params.nsteps < 1000) progress_interval = params.nsteps / 2;
+    int last_progress_step = 0;
+    double progress_speed = 0.0;
+    auto last_progress_time = t_start;
+    int step_field_width = snprintf(nullptr, 0, "%d", params.nsteps);
+
     for (int step = 1; step <= params.nsteps; step++) {
         launch_integrator_pre_force(sys.pos, sys.vel, sys.force,
                                      sys.pos_ref, sys.d_max_dr2_int,
@@ -380,6 +388,50 @@ int main(int argc, char** argv) {
                               params.natoms, sys.nbonds, sys.nangles,
                               params.ntypes, (int)topo.bond_params.size(), (int)topo.angle_params.size(),
                               params.box_L, step);
+        }
+
+        bool at_progress = (step % progress_interval == 0);
+        if (at_progress || step == params.nsteps) {
+            auto now = std::chrono::steady_clock::now();
+            double dt_since_last = std::chrono::duration<double>(now - last_progress_time).count();
+            int steps_since_last = step - last_progress_step;
+            if (steps_since_last > 0 && dt_since_last > 0.0)
+                progress_speed = steps_since_last / dt_since_last;
+            last_progress_step = step;
+            last_progress_time = now;
+
+            int pct = (int)((long long)step * 100 / params.nsteps);
+            int bar_width = 20;
+            int filled = (int)((long long)step * bar_width / params.nsteps);
+            if (filled > bar_width) filled = bar_width;
+
+            char bar[23];
+            bar[0] = '[';
+            for (int i = 0; i < bar_width; i++) {
+                if (i < filled - 1) bar[i + 1] = '=';
+                else if (i == filled - 1 && step < params.nsteps) bar[i + 1] = '>';
+                else if (i < filled) bar[i + 1] = '=';
+                else bar[i + 1] = ' ';
+            }
+            bar[bar_width + 1] = ']';
+            bar[bar_width + 2] = '\0';
+
+            if (step == params.nsteps) {
+                printf("\r%s %3d%%  Step %*d/%d  done\n",
+                       bar, pct, step_field_width, step, params.nsteps);
+            } else {
+                double elapsed_total = std::chrono::duration<double>(now - t_start).count();
+                double eta = (step > 0) ? (elapsed_total / step) * (params.nsteps - step) : 0.0;
+                double eta_s = eta;
+                const char* eta_unit = "s";
+                if (eta_s > 86400.0) { eta_s /= 86400.0; eta_unit = "d"; }
+                else if (eta_s > 3600.0) { eta_s /= 3600.0; eta_unit = "h"; }
+                else if (eta_s > 60.0) { eta_s /= 60.0; eta_unit = "m"; }
+                printf("\r%s %3d%%  Step %*d/%d  speed=%.0f st/s  ETA=%.1f%s",
+                       bar, pct, step_field_width, step, params.nsteps,
+                       progress_speed, eta_s, eta_unit);
+                fflush(stdout);
+            }
         }
     }
 
