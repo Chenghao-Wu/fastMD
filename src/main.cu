@@ -28,13 +28,22 @@ int main(int argc, char** argv) {
     SimParams params = parse_config(argv[1], topo);
     if (!topo.data_file.empty()) {
         parse_lammps_data(topo.data_file, topo);
-        printf("Loaded %zu bonds, %zu angles from %s\n",
-               topo.bonds.size(), topo.angles.size(), topo.data_file.c_str());
     }
     params.box_L = topo.box_L;
     finalize_params(params);
-    printf("Loaded %d atoms, box=%.2f, rc=%.2f, dt=%.4f, nsteps=%d\n",
+
+    printf("[setup]  atoms=%d  box=%.2f  rc=%.2f  dt=%.4f  nsteps=%d",
            params.natoms, params.box_L, params.rc, params.dt, params.nsteps);
+    if (topo.bonds.size() > 0) printf("  bonds=%zu", topo.bonds.size());
+    if (topo.angles.size() > 0) printf("  angles=%zu", topo.angles.size());
+    printf("\n");
+
+    printf("[setup]  T_target=%.2f  gamma=%.2f  seed=%d  thermo_freq=%d",
+           params.temperature, params.gamma, params.seed, params.thermo_freq);
+    if (params.rg_on) printf("  rg_on");
+    if (params.stress_on) printf("  stress_on");
+    if (params.restart_freq >= 0) printf("  restart_on");
+    printf("\n\n");
 
     System sys;
     sys.allocate(params);
