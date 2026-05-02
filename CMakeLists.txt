@@ -23,6 +23,7 @@ add_library(core STATIC
     src/force/fene.cu
     src/force/angle.cu
     src/integrate/langevin.cu
+    src/integrate/nose_hoover.cu
     src/analysis/thermo.cu
     src/analysis/rg.cu
     src/analysis/correlator.cu
