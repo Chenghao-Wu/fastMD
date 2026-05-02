@@ -40,6 +40,8 @@ __host__ __device__ inline int unpack_type_id(float w) {
 #endif
 }
 
+enum class Ensemble { Langevin = 0, NVT_NH = 1, NPT_NH = 2 };
+
 struct SimParams {
     float box_L;
     float inv_L;
@@ -71,4 +73,14 @@ struct SimParams {
     int   rg_on;
     int   rg_freq;
     char  rg_file[256];
+
+    // Nosé-Hoover
+    Ensemble ensemble = Ensemble::Langevin;
+    float T_start = 0.0f;
+    float T_stop  = 0.0f;
+    float Tdamp   = 0.0f;
+    float P_start = 0.0f;
+    float P_stop  = 0.0f;
+    float Pdamp   = 0.0f;
+    int   nh_chain_length = 3;
 };
