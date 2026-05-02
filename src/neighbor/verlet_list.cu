@@ -349,7 +349,9 @@ void VerletList::build(const float4* pos, int natoms, float box_L, float inv_L,
         cell_ids, cell_ids_out, atom_ids, sorted_atoms,
         natoms, 0, 32, stream);
 
-    // Stage 3: find cell starts/ends
+    // Stage 3: clear stale cell data, then find cell starts/ends
+    CUDA_CHECK(cudaMemsetAsync(cell_starts, 0, ncells * sizeof(int), stream));
+    CUDA_CHECK(cudaMemsetAsync(cell_ends,   0, ncells * sizeof(int), stream));
     find_cell_starts<<<blocks, 256, 0, stream>>>(
         cell_ids_out, cell_starts, cell_ends, natoms);
 
