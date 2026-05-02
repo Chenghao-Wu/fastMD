@@ -348,9 +348,10 @@ int main(int argc, char** argv) {
                             thermo_bufs, step, thermo_bufs.fp);
 
             if (need_thermo) {
-                printf("Step %d: T=%.4f KE=%.4f PE=%.4f Pxx=%.4f\n",
+                float etot = thermo.kinetic_energy + thermo.potential_energy;
+                printf("Step %6d  T=%10.4f  KE=%11.2f  PE=%11.2f  Etot=%11.2f  Pxx=%8.2f\n",
                        step, thermo.temperature, thermo.kinetic_energy,
-                       thermo.potential_energy, thermo.stress[0]);
+                       thermo.potential_energy, etot, thermo.stress[0]);
             }
             if (need_stress) {
                 float* d_stress_for_corr;
