@@ -8,6 +8,7 @@ void NoseHooverState::init(const SimParams& params) {
     natoms = params.natoms;
     natoms_padded = div_ceil(natoms, TILE_SIZE) * TILE_SIZE;
     M = params.nh_chain_length;
+    if (M > kMaxChainLength) M = kMaxChainLength;
     dt = params.dt;
     nsteps = params.nsteps;
     is_npt = (params.ensemble == Ensemble::NPT_NH);
@@ -27,11 +28,10 @@ void NoseHooverState::init(const SimParams& params) {
     eps = 0.0f;
     v_eps = 0.0f;
 
-    int n_chain = natoms_padded * M;
-    CUDA_CHECK(cudaMalloc(&d_xi, n_chain * sizeof(float)));
-    CUDA_CHECK(cudaMemset(d_xi, 0, n_chain * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_v_xi, n_chain * sizeof(float)));
-    CUDA_CHECK(cudaMemset(d_v_xi, 0, n_chain * sizeof(float)));
+    for (int k = 0; k < kMaxChainLength; k++) {
+        xi[k] = 0.0f;
+        v_xi[k] = 0.0f;
+    }
 
     float N_f = 3.0f * static_cast<float>(natoms);
     float kT = T_target;
@@ -44,66 +44,90 @@ void NoseHooverState::init(const SimParams& params) {
 }
 
 void NoseHooverState::free() {
-    if (d_xi)   { CUDA_CHECK(cudaFree(d_xi));   d_xi   = nullptr; }
-    if (d_v_xi) { CUDA_CHECK(cudaFree(d_v_xi)); d_v_xi = nullptr; }
+    // No device allocations for the chain (host-side)
 }
 
-// --- Thermostat chain kernel ---
+// --- Suzuki-Yoshida weights for n_sy=7 ---
+// Higher-order decomposition for stability with large system-wide chain masses.
+static const int kNumSY = 7;
+static const float sy_weight[kNumSY] = {
+     0.784513610477560f,
+     0.235573213359357f,
+    -1.177679984178870f,
+     1.315186320683906f,
+    -1.177679984178870f,
+     0.235573213359357f,
+     0.784513610477560f
+};
 
-__global__ void nh_thermostat_half_kernel(
+// Single velocity-Verlet step on the NH chain of length M.
+// dt_sy is the substep for one SY iteration.
+static void chain_step(NoseHooverState& nh, float total_KE, float dt_sy) {
+    int M = nh.M;
+    float Q1_inv = 1.0f / nh.Q1;
+    float Q_rest_inv = 1.0f / nh.Q_rest;
+    float kT_target = nh.T_target;
+    float N_f = 3.0f * static_cast<float>(nh.natoms);
+
+    // First half-step on momenta
+    float G0 = (2.0f * total_KE - N_f * kT_target) * Q1_inv;
+    nh.v_xi[0] += 0.5f * dt_sy * G0;
+    for (int k = 1; k < M; k++) {
+        float prev_Q_inv = (k == 1) ? Q1_inv : Q_rest_inv;
+        float Gk = (nh.v_xi[k-1] * nh.v_xi[k-1] / prev_Q_inv - kT_target) * Q_rest_inv;
+        nh.v_xi[k] += 0.5f * dt_sy * Gk;
+    }
+
+    // Full step on positions
+    for (int k = 0; k < M; k++) {
+        nh.xi[k] += dt_sy * nh.v_xi[k];
+    }
+
+    // Second half-step on momenta (with recomputed forces)
+    G0 = (2.0f * total_KE - N_f * kT_target) * Q1_inv;
+    nh.v_xi[0] += 0.5f * dt_sy * G0;
+    for (int k = 1; k < M; k++) {
+        float prev_Q_inv = (k == 1) ? Q1_inv : Q_rest_inv;
+        float Gk = (nh.v_xi[k-1] * nh.v_xi[k-1] / prev_Q_inv - kT_target) * Q_rest_inv;
+        nh.v_xi[k] += 0.5f * dt_sy * Gk;
+    }
+}
+
+// --- System-wide NH chain propagation (host-side) ---
+
+void nh_propagate_chain(NoseHooverState& nh, float total_KE,
+                         float half_dt, float& scale_out) {
+    // Suzuki-Yoshida decomposition: apply chain_step for each weight
+    for (int sy = 0; sy < kNumSY; sy++) {
+        float dt_sy = sy_weight[sy] * half_dt;
+        chain_step(nh, total_KE, dt_sy);
+    }
+
+    // Global velocity scale = exp(-v_ξ₀ * half_dt)
+    scale_out = expf(-nh.v_xi[0] * half_dt);
+}
+
+// --- Global velocity scaling kernel ---
+
+__global__ void nh_global_scale_vel_kernel(
     float4* __restrict__ vel,
-    float* __restrict__ d_xi,
-    float* __restrict__ d_v_xi,
-    int natoms, int M, float half_dt,
-    float Q1_inv, float Q_rest_inv, float kT_target)
+    float scale, int natoms)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= natoms) return;
 
     float4 v = vel[i];
-    float KE_i = 0.5f * (v.x*v.x + v.y*v.y + v.z*v.z);
-
-    float* xi   = d_xi   + i * M;
-    float* v_xi = d_v_xi + i * M;
-
-    // Chain element 0: coupled to particle KE
-    float G0 = (2.0f * KE_i - kT_target) * Q1_inv;
-    v_xi[0] += 0.5f * half_dt * G0;
-    xi[0]   += half_dt * v_xi[0];
-
-    // Chain elements 1..M-1
-    for (int k = 1; k < M; k++) {
-        float prev_Q_inv = (k == 1) ? Q1_inv : Q_rest_inv;
-        float Gk = (v_xi[k-1] * v_xi[k-1] * prev_Q_inv - kT_target) * Q_rest_inv;
-        v_xi[k] += 0.5f * half_dt * Gk;
-        xi[k]   += half_dt * v_xi[k];
-    }
-
-    // Recompute forces with updated xi
-    G0 = (2.0f * KE_i - kT_target) * Q1_inv;
-    v_xi[0] += 0.5f * half_dt * G0;
-    for (int k = 1; k < M; k++) {
-        float prev_Q_inv = (k == 1) ? Q1_inv : Q_rest_inv;
-        float Gk = (v_xi[k-1] * v_xi[k-1] * prev_Q_inv - kT_target) * Q_rest_inv;
-        v_xi[k] += 0.5f * half_dt * Gk;
-    }
-
-    // Scale velocity by exp(-v_xi_0 * half_dt)
-    float scale = expf(-v_xi[0] * half_dt);
     v.x *= scale;
     v.y *= scale;
     v.z *= scale;
     vel[i] = v;
 }
 
-void launch_nh_thermostat_half(float4* vel, float* d_xi, float* d_v_xi,
-                                int natoms, int M, float half_dt,
-                                float Q1_inv, float Q_rest_inv,
-                                float kT_target, cudaStream_t stream) {
+void launch_nh_global_scale_vel(float4* vel, float scale,
+                                 int natoms, cudaStream_t stream) {
     int blocks = div_ceil(natoms, 256);
-    nh_thermostat_half_kernel<<<blocks, 256, 0, stream>>>(
-        vel, d_xi, d_v_xi, natoms, M, half_dt,
-        Q1_inv, Q_rest_inv, kT_target);
+    nh_global_scale_vel_kernel<<<blocks, 256, 0, stream>>>(
+        vel, scale, natoms);
 }
 
 // --- Barostat velocity rescale kernel ---

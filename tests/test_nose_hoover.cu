@@ -5,37 +5,37 @@
 #include "neighbor/verlet_list.cuh"
 #include "neighbor/skin_trigger.cuh"
 
-static float compute_ke(const std::vector<float4>& vel_host, int N) {
+static float compute_total_ke(const std::vector<float4>& vel_h, int N) {
     float ke = 0.0f;
     for (int i = 0; i < N; i++) {
-        ke += 0.5f * (vel_host[i].x * vel_host[i].x
-                    + vel_host[i].y * vel_host[i].y
-                    + vel_host[i].z * vel_host[i].z);
+        ke += 0.5f * (vel_h[i].x * vel_h[i].x
+                    + vel_h[i].y * vel_h[i].y
+                    + vel_h[i].z * vel_h[i].z);
     }
     return ke;
 }
 
 static float compute_conserved(const std::vector<float4>& vel_h,
                                 const std::vector<float4>& force_h,
-                                const std::vector<float>& xi_h,
-                                const std::vector<float>& v_xi_h,
-                                int natoms, int M,
-                                float Q1_inv, float Q_rest_inv,
-                                float kT) {
-    float ke = compute_ke(vel_h, natoms);
+                                const NoseHooverState& nh,
+                                int natoms) {
+    float ke = compute_total_ke(vel_h, natoms);
     float pe = 0.0f;
     for (int i = 0; i < natoms; i++) pe += force_h[i].w;
-    float th_energy = 0.0f;
-    for (int i = 0; i < natoms; i++) {
-        int off = i * M;
-        th_energy += 0.5f * v_xi_h[off] * v_xi_h[off] / Q1_inv
-                   + kT * xi_h[off];
-        for (int k = 1; k < M; k++) {
-            th_energy += 0.5f * v_xi_h[off + k] * v_xi_h[off + k] / Q_rest_inv
-                       + kT * xi_h[off + k];
-        }
+
+    // System-wide chain energy
+    float N_f = 3.0f * natoms;
+    float kT = nh.T_target;
+    float Q1 = nh.Q1;
+    float Q_rest = nh.Q_rest;
+
+    float chain_energy = 0.5f * Q1 * nh.v_xi[0] * nh.v_xi[0]
+                       + N_f * kT * nh.xi[0];
+    for (int k = 1; k < nh.M; k++) {
+        chain_energy += 0.5f * Q_rest * nh.v_xi[k] * nh.v_xi[k]
+                      + kT * nh.xi[k];
     }
-    return ke + pe + th_energy;
+    return ke + pe + chain_energy;
 }
 
 // Test 1: NVE limit — NH NVT with very large Tdamp should conserve energy
@@ -122,22 +122,17 @@ TEST(NoseHoover, NVTLimitEnergyConservation) {
 
     auto vel_h   = to_host(d_vel, N);
     auto force_h = to_host(d_force, np);
-    auto xi_h    = to_host(nh.d_xi, np * M);
-    auto v_xi_h  = to_host(nh.d_v_xi, np * M);
-
-    float E0 = compute_conserved(vel_h, force_h, xi_h, v_xi_h,
-                                  N, M,
-                                  1.0f/nh.Q1, 1.0f/nh.Q_rest,
-                                  params.T_start);
+    float E0 = compute_conserved(vel_h, force_h, nh, N);
 
     float hdt = 0.5f * dt;
-    float Q1_inv = 1.0f / nh.Q1;
-    float Q_rest_inv = 1.0f / nh.Q_rest;
 
     for (int step = 0; step < nsteps; step++) {
-        launch_nh_thermostat_half(d_vel, nh.d_xi, nh.d_v_xi,
-                                   N, M, hdt, Q1_inv, Q_rest_inv,
-                                   nh.T_target);
+        float total_ke = compute_total_ke(to_host(d_vel, N), N);
+
+        float nh_scale;
+        nh_propagate_chain(nh, total_ke, hdt, nh_scale);
+        launch_nh_global_scale_vel(d_vel, nh_scale, N);
+
         launch_nh_v_verlet_half(d_vel, d_force, N, hdt);
         launch_nh_update_pos(d_pos, d_vel, d_pos_ref,
                               nullptr, d_max_dr2,
@@ -156,21 +151,17 @@ TEST(NoseHoover, NVTLimitEnergyConservation) {
                           N, ntypes, rc2, L, inv_L);
 
         launch_nh_v_verlet_half(d_vel, d_force, N, hdt);
-        launch_nh_thermostat_half(d_vel, nh.d_xi, nh.d_v_xi,
-                                   N, M, hdt, Q1_inv, Q_rest_inv,
-                                   nh.T_target);
+
+        total_ke = compute_total_ke(to_host(d_vel, N), N);
+        nh_propagate_chain(nh, total_ke, hdt, nh_scale);
+        launch_nh_global_scale_vel(d_vel, nh_scale, N);
         CUDA_CHECK(cudaDeviceSynchronize());
     }
 
     vel_h   = to_host(d_vel, N);
     force_h = to_host(d_force, np);
-    xi_h    = to_host(nh.d_xi, np * M);
-    v_xi_h  = to_host(nh.d_v_xi, np * M);
 
-    float E_final = compute_conserved(vel_h, force_h, xi_h, v_xi_h,
-                                       N, M,
-                                       1.0f/nh.Q1, 1.0f/nh.Q_rest,
-                                       params.T_start);
+    float E_final = compute_conserved(vel_h, force_h, nh, N);
     float drift = fabsf(E_final - E0) / fabsf(E0);
 
     EXPECT_LT(drift, 0.01f) << "Conserved quantity drift too large: "
@@ -199,10 +190,10 @@ TEST(NoseHoover, NVTReachesTargetTemperature) {
     const int ntypes = 1;
     const int ntiles = div_ceil(N, TILE_SIZE);
     const int np = ntiles * TILE_SIZE;
-    const int nsteps = 2000;
+    const int nsteps = 5000;
     const int M = 3;
-    const float Tdamp = 1.0f;
-    const float T_target = 2.0f;
+    const float Tdamp = 0.5f;
+    const float T_target = 1.5f;
 
     std::vector<float4> h_pos(np, make_float4(0,0,0, pack_type_id(-1)));
     srand(123);
@@ -214,9 +205,9 @@ TEST(NoseHoover, NVTReachesTargetTemperature) {
     }
     std::vector<float4> h_vel(np, make_float4(0,0,0,0));
     for (int i = 0; i < N; i++) {
-        h_vel[i] = make_float4(0.5f * (rand()/(float)RAND_MAX - 0.5f),
-                                0.5f * (rand()/(float)RAND_MAX - 0.5f),
-                                0.5f * (rand()/(float)RAND_MAX - 0.5f), 0.0f);
+        h_vel[i] = make_float4(0.3f * (rand()/(float)RAND_MAX - 0.5f),
+                                0.3f * (rand()/(float)RAND_MAX - 0.5f),
+                                0.3f * (rand()/(float)RAND_MAX - 0.5f), 0.0f);
     }
 
     float4* d_pos   = to_device(h_pos);
@@ -245,7 +236,7 @@ TEST(NoseHoover, NVTReachesTargetTemperature) {
     params.nsteps = nsteps;
     params.ntypes = ntypes;
     params.ensemble = Ensemble::NVT_NH;
-    params.T_start = 0.5f;
+    params.T_start = T_target;
     params.T_stop  = T_target;
     params.Tdamp = Tdamp;
     params.nh_chain_length = M;
@@ -265,19 +256,17 @@ TEST(NoseHoover, NVTReachesTargetTemperature) {
     CUDA_CHECK(cudaDeviceSynchronize());
 
     float hdt = 0.5f * dt;
-    float Q1_inv = 1.0f / nh.Q1;
-    float Q_rest_inv = 1.0f / nh.Q_rest;
 
     double ke_sum = 0.0;
     int ke_count = 0;
 
     for (int step = 0; step < nsteps; step++) {
-        float frac = (float)step / (float)nsteps;
-        nh.T_target = params.T_start + (params.T_stop - params.T_start) * frac;
+        float total_ke = compute_total_ke(to_host(d_vel, N), N);
 
-        launch_nh_thermostat_half(d_vel, nh.d_xi, nh.d_v_xi,
-                                   N, M, hdt, Q1_inv, Q_rest_inv,
-                                   nh.T_target);
+        float nh_scale;
+        nh_propagate_chain(nh, total_ke, hdt, nh_scale);
+        launch_nh_global_scale_vel(d_vel, nh_scale, N);
+
         launch_nh_v_verlet_half(d_vel, d_force, N, hdt);
         launch_nh_update_pos(d_pos, d_vel, d_pos_ref,
                               nullptr, d_max_dr2,
@@ -296,20 +285,21 @@ TEST(NoseHoover, NVTReachesTargetTemperature) {
                           N, ntypes, rc2, L, inv_L);
 
         launch_nh_v_verlet_half(d_vel, d_force, N, hdt);
-        launch_nh_thermostat_half(d_vel, nh.d_xi, nh.d_v_xi,
-                                   N, M, hdt, Q1_inv, Q_rest_inv,
-                                   nh.T_target);
+
+        total_ke = compute_total_ke(to_host(d_vel, N), N);
+        nh_propagate_chain(nh, total_ke, hdt, nh_scale);
+        launch_nh_global_scale_vel(d_vel, nh_scale, N);
         CUDA_CHECK(cudaDeviceSynchronize());
 
         if (step >= nsteps / 2) {
             auto vel_h = to_host(d_vel, N);
-            ke_sum += compute_ke(vel_h, N);
+            ke_sum += compute_total_ke(vel_h, N);
             ke_count++;
         }
     }
 
     double T_avg = (2.0 * ke_sum / ke_count) / (3.0 * N);
-    EXPECT_NEAR(T_avg, T_target, 0.15f)
+    EXPECT_NEAR(T_avg, T_target, 0.1f)
         << "Average temperature " << T_avg
         << " deviates too much from target " << T_target;
 

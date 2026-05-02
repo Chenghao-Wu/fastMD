@@ -1,10 +1,12 @@
 #pragma once
 #include "../core/types.cuh"
 
+static constexpr int kMaxChainLength = 10;
+
 struct NoseHooverState {
-    // Thermostat chain — device: natoms_padded * M floats each
-    float* d_xi = nullptr;
-    float* d_v_xi = nullptr;
+    // Thermostat chain — host-side, single system-wide chain
+    float xi[kMaxChainLength] = {};
+    float v_xi[kMaxChainLength] = {};
 
     // Barostat — host
     float eps = 0.0f;     // log strain: V = V0 * exp(3*eps)
@@ -42,11 +44,14 @@ struct NoseHooverState {
 
 // --- Kernel launches ---
 
-void launch_nh_thermostat_half(float4* vel, float* d_xi, float* d_v_xi,
-                                int natoms, int M, float half_dt,
-                                float Q1_inv, float Q_rest_inv,
-                                float kT_target,
-                                cudaStream_t stream = 0);
+// Propagate system-wide NH chain for half_dt, return global velocity scale factor.
+// total_KE is the total kinetic energy of the system.
+void nh_propagate_chain(NoseHooverState& nh, float total_KE,
+                         float half_dt, float& scale_out);
+
+// Apply global velocity scale factor on GPU
+void launch_nh_global_scale_vel(float4* vel, float scale,
+                                 int natoms, cudaStream_t stream = 0);
 
 void launch_nh_barostat_vel_half(float4* vel, float v_eps_W,
                                   float N_f_inv, int natoms,
