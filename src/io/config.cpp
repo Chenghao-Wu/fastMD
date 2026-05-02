@@ -8,6 +8,7 @@
 SimParams parse_config(const std::string& filename, TopologyData& topo) {
     SimParams params = {};
     params.restart_freq = -1;
+    bool has_langevin = false;
     std::string coords_file;
     std::vector<std::tuple<int,int,float,float>> lj_entries;
 
@@ -31,7 +32,7 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
         else if (key == "rc")     iss >> params.rc;
         else if (key == "skin")   iss >> params.skin;
         else if (key == "dt")     iss >> params.dt;
-        else if (key == "temperature") iss >> params.temperature;
+        else if (key == "temperature") { iss >> params.temperature; has_langevin = true; }
         else if (key == "gamma")  iss >> params.gamma;
         else if (key == "nsteps") iss >> params.nsteps;
         else if (key == "dump_freq")   iss >> params.dump_freq;
@@ -60,6 +61,21 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
             params.restart_file[255] = '\0';
         }
         else if (key == "seed")   iss >> params.seed;
+        else if (key == "nvt_nh") {
+            params.ensemble = Ensemble::NVT_NH;
+            iss >> params.T_start >> params.T_stop >> params.Tdamp;
+            if (!(iss >> params.nh_chain_length)) {
+                params.nh_chain_length = 3;
+            }
+        }
+        else if (key == "npt_nh") {
+            params.ensemble = Ensemble::NPT_NH;
+            iss >> params.T_start >> params.T_stop >> params.Tdamp
+                >> params.P_start >> params.P_stop >> params.Pdamp;
+            if (!(iss >> params.nh_chain_length)) {
+                params.nh_chain_length = 3;
+            }
+        }
         else if (key == "coords_file") iss >> coords_file;
         else if (key == "lammps_data_file") iss >> topo.data_file;
         else if (key == "lj") {
@@ -114,6 +130,22 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
             int type = 0;
             topo.positions[i] = make_float4(x, y, z, pack_type_id(type));
         }
+    }
+
+    // Validate ensemble mutual exclusion
+    if (has_langevin && params.ensemble != Ensemble::Langevin) {
+        throw std::runtime_error(
+            "Cannot use 'temperature'/'gamma' with nvt_nh/npt_nh. "
+            "Choose one ensemble type.");
+    }
+    if (params.ensemble != Ensemble::Langevin && params.Tdamp <= 0.0f) {
+        throw std::runtime_error("Tdamp must be > 0 for nvt_nh/npt_nh");
+    }
+    if (params.ensemble == Ensemble::NPT_NH && params.Pdamp <= 0.0f) {
+        throw std::runtime_error("Pdamp must be > 0 for npt_nh");
+    }
+    if (params.nh_chain_length < 1) {
+        throw std::runtime_error("nh_chain_length must be >= 1");
     }
 
     return params;
