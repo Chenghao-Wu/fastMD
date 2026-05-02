@@ -57,7 +57,7 @@ TEST(Integrator, NVEEnergyConservation) {
     verlet.allocate(N, rc + skin, L);
 
     LangevinState lang;
-    lang.init(np, 0.0f, dt, 1.0f, 12345);
+    lang.init(np, 1e10f, dt, 1.0f, 12345);  // Tdamp≈∞ → gamma≈0 → NVE limit
 
     CUDA_CHECK(cudaMemcpy(d_pos_ref, d_pos, np * sizeof(float4),
                            cudaMemcpyDeviceToDevice));
