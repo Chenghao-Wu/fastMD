@@ -56,3 +56,10 @@ target_sources(test_lammps_data PRIVATE ${CMAKE_SOURCE_DIR}/src/io/lammps_data.c
 
 add_cuda_test(test_rg)
 target_sources(test_rg PRIVATE ${CMAKE_SOURCE_DIR}/src/analysis/rg.cu)
+
+add_cuda_test(test_nose_hoover)
+target_sources(test_nose_hoover PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/integrate/nose_hoover.cu
+    ${CMAKE_SOURCE_DIR}/src/force/lj.cu
+    ${CMAKE_SOURCE_DIR}/src/neighbor/verlet_list.cu
+    ${CMAKE_SOURCE_DIR}/src/core/morton.cu)
