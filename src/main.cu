@@ -48,8 +48,8 @@ int main(int argc, char** argv) {
                    params.P_start, params.P_stop, params.Pdamp);
         }
     } else {
-        printf("[setup]  T_target=%.2f  gamma=%.2f  seed=%lu  thermo_freq=%d",
-               params.temperature, params.gamma, (unsigned long)params.seed, params.thermo_freq);
+        printf("[setup]  ensemble=nvt_langevin  T_start=%.2f  T_stop=%.2f  Tdamp=%.2f  seed=%lu",
+               params.T_start, params.T_stop, params.Tdamp, (unsigned long)params.seed);
     }
     if (params.rg_on) printf("  rg_on");
     if (params.stress_on) printf("  stress_on");
@@ -124,7 +124,7 @@ int main(int argc, char** argv) {
     verlet.allocate(params.natoms, params.rc + params.skin, params.box_L);
 
     LangevinState langevin;
-    langevin.init(np, params.gamma, params.dt, params.temperature, params.seed);
+    langevin.init(np, params.Tdamp, params.dt, params.T_start, params.seed);
 
     NoseHooverState nose_hoover;
     if (params.ensemble != Ensemble::Langevin) {
@@ -322,7 +322,11 @@ int main(int argc, char** argv) {
     for (int step = 1; step <= params.nsteps; step++) {
 
         if (params.ensemble == Ensemble::Langevin) {
-            // --- Existing Langevin path (unchanged) ---
+            // Linear temperature ramping from T_start to T_stop
+            float frac = (float)(step - 1) / (float)params.nsteps;
+            langevin.kT = params.T_start
+                + (params.T_stop - params.T_start) * frac;
+
             launch_integrator_pre_force(sys.pos, sys.vel, sys.force,
                                          sys.pos_ref, sys.d_max_dr2_int,
                                          sys.d_image,
