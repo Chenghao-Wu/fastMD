@@ -50,8 +50,6 @@ struct SimParams {
     float rc2;
     float skin;
     float dt;
-    float temperature;
-    float gamma;
     int   natoms;
     int   ntiles;
     int   ntypes;
