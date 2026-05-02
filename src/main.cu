@@ -342,11 +342,12 @@ int main(int argc, char** argv) {
 
             float hdt = 0.5f * params.dt;
 
-            // Compute thermo for total KE (needed for thermostat chain)
+            // Compute thermo for total KE and virial
             ThermoOutput nh_thermo;
             compute_thermo(sys.vel, sys.force, sys.virial,
                            params.natoms, nose_hoover.L, &nh_thermo,
                            thermo_bufs, step, nullptr);
+            float chain_KE = nh_thermo.kinetic_energy;
 
             if (nose_hoover.is_npt) {
                 // Barostat half-step on host (Suzuki-Yoshida)
@@ -387,12 +388,16 @@ int main(int argc, char** argv) {
                 float v_eps_W = nose_hoover.v_eps / nose_hoover.W;
                 launch_nh_barostat_vel_half(sys.vel, v_eps_W, N_f_inv,
                                              params.natoms, hdt);
+
+                // Update KE analytically: KE_new = KE_old * baro_scale^2
+                float baro_scale = expf(-(1.0f + 3.0f * N_f_inv)
+                                          * v_eps_W * hdt);
+                chain_KE *= baro_scale * baro_scale;
             }
 
-            // System-wide NH chain thermostat: propagate chain, get global scale
+            // System-wide NH chain thermostat with current KE
             float nh_scale;
-            nh_propagate_chain(nose_hoover, nh_thermo.kinetic_energy,
-                                hdt, nh_scale);
+            nh_propagate_chain(nose_hoover, chain_KE, hdt, nh_scale);
             launch_nh_global_scale_vel(sys.vel, nh_scale, params.natoms);
 
             // Half-step velocity Verlet
@@ -502,6 +507,7 @@ int main(int argc, char** argv) {
             compute_thermo(sys.vel, sys.force, sys.virial,
                            params.natoms, nose_hoover.L, &nh_thermo2,
                            thermo_bufs, step, nullptr);
+            float chain_KE2 = nh_thermo2.kinetic_energy;
 
             if (nose_hoover.is_npt) {
                 float v_eps_W = nose_hoover.v_eps / nose_hoover.W;
@@ -509,11 +515,15 @@ int main(int argc, char** argv) {
                 launch_nh_barostat_vel_half(sys.vel, v_eps_W, N_f_inv,
                                              params.natoms, hdt);
 
+                // Update KE analytically after barostat rescale
+                float baro_scale = expf(-(1.0f + 3.0f * N_f_inv)
+                                          * v_eps_W * hdt);
+                chain_KE2 *= baro_scale * baro_scale;
+
                 // Barostat half-step (host)
-                float KE2 = nh_thermo2.kinetic_energy;
                 float vir_trace2 = nh_thermo2.stress[0]
                                  + nh_thermo2.stress[1] + nh_thermo2.stress[2];
-                float P2 = (2.0f * KE2 - vir_trace2)
+                float P2 = (2.0f * chain_KE2 - vir_trace2)
                          / (3.0f * nose_hoover.V);
 
                 static const float sy_w[3] = {
@@ -538,10 +548,9 @@ int main(int argc, char** argv) {
                 nose_hoover.inv_L = 1.0f / nose_hoover.L;
             }
 
-            // System-wide NH chain thermostat
+            // System-wide NH chain thermostat with current KE
             float nh_scale2;
-            nh_propagate_chain(nose_hoover, nh_thermo2.kinetic_energy,
-                                hdt, nh_scale2);
+            nh_propagate_chain(nose_hoover, chain_KE2, hdt, nh_scale2);
             launch_nh_global_scale_vel(sys.vel, nh_scale2, params.natoms);
         }
 

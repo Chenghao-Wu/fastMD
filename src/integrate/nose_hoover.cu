@@ -47,64 +47,110 @@ void NoseHooverState::free() {
     // No device allocations for the chain (host-side)
 }
 
-// --- Suzuki-Yoshida weights for n_sy=7 ---
-// Higher-order decomposition for stability with large system-wide chain masses.
-static const int kNumSY = 7;
-static const float sy_weight[kNumSY] = {
-     0.784513610477560f,
-     0.235573213359357f,
-    -1.177679984178870f,
-     1.315186320683906f,
-    -1.177679984178870f,
-     0.235573213359357f,
-     0.784513610477560f
-};
-
-// Single velocity-Verlet step on the NH chain of length M.
-// dt_sy is the substep for one SY iteration.
-static void chain_step(NoseHooverState& nh, float total_KE, float dt_sy) {
-    int M = nh.M;
-    float Q1_inv = 1.0f / nh.Q1;
-    float Q_rest_inv = 1.0f / nh.Q_rest;
-    float kT_target = nh.T_target;
-    float N_f = 3.0f * static_cast<float>(nh.natoms);
-
-    // First half-step on momenta
-    float G0 = (2.0f * total_KE - N_f * kT_target) * Q1_inv;
-    nh.v_xi[0] += 0.5f * dt_sy * G0;
-    for (int k = 1; k < M; k++) {
-        float prev_Q_inv = (k == 1) ? Q1_inv : Q_rest_inv;
-        float Gk = (nh.v_xi[k-1] * nh.v_xi[k-1] / prev_Q_inv - kT_target) * Q_rest_inv;
-        nh.v_xi[k] += 0.5f * dt_sy * Gk;
-    }
-
-    // Full step on positions
-    for (int k = 0; k < M; k++) {
-        nh.xi[k] += dt_sy * nh.v_xi[k];
-    }
-
-    // Second half-step on momenta (with recomputed forces)
-    G0 = (2.0f * total_KE - N_f * kT_target) * Q1_inv;
-    nh.v_xi[0] += 0.5f * dt_sy * G0;
-    for (int k = 1; k < M; k++) {
-        float prev_Q_inv = (k == 1) ? Q1_inv : Q_rest_inv;
-        float Gk = (nh.v_xi[k-1] * nh.v_xi[k-1] / prev_Q_inv - kT_target) * Q_rest_inv;
-        nh.v_xi[k] += 0.5f * dt_sy * Gk;
-    }
-}
-
 // --- System-wide NH chain propagation (host-side) ---
+// Matches the LAMMPS fix_nh.cpp algorithm:
+// backward-recursion (top-down) → velocity scaling → forward-recursion (bottom-up)
+// with analytic temperature update after velocity scaling.
 
 void nh_propagate_chain(NoseHooverState& nh, float total_KE,
                          float half_dt, float& scale_out) {
-    // Suzuki-Yoshida decomposition: apply chain_step for each weight
-    for (int sy = 0; sy < kNumSY; sy++) {
-        float dt_sy = sy_weight[sy] * half_dt;
-        chain_step(nh, total_KE, dt_sy);
+    int M = nh.M;
+    float Q1 = nh.Q1;
+    float kT_target = nh.T_target;
+    float N_f = 3.0f * static_cast<float>(nh.natoms);
+
+    // LAMMPS uses dt8/dt4/dthalf; we simplify to half_dt based factors
+    float dt2 = half_dt;
+    float dt4 = half_dt * 0.5f;
+    float dt8 = half_dt * 0.25f;
+
+    // v_xi_dotdot[k] = acceleration of chain element k (Gk in our old notation)
+    float v_xi_dotdot[10];
+
+    // Current temperature from KE: T = 2*KE / (N_f)
+    float T_current = (2.0f * total_KE) / N_f;
+
+    // ke = N_f * kT, ke_target = N_f * kT_target
+    // dotdot[0] = (ke_current - ke_target) / Q1
+    //           = (N_f*T_current - N_f*T_target) / (N_f*kT_target*Tdamp^2)
+    //           = (T_current - T_target) / (kT_target * Tdamp^2)
+    if (Q1 > 0.0f) {
+        float kecurrent = N_f * T_current;
+        float ke_target = N_f * kT_target;
+        v_xi_dotdot[0] = (kecurrent - ke_target) / Q1;
+    } else {
+        v_xi_dotdot[0] = 0.0f;
     }
 
-    // Global velocity scale = exp(-v_ξ₀ * half_dt)
-    scale_out = expf(-nh.v_xi[0] * half_dt);
+    int nc_tchain = 1;    // number of SY loops (LAMMPS default)
+    float ncfac = 1.0f / static_cast<float>(nc_tchain);
+
+    for (int iloop = 0; iloop < nc_tchain; iloop++) {
+
+        // --- Backward recursion: ich = M-1 down to 1 ---
+        for (int ich = M - 1; ich > 0; ich--) {
+            // expfac = exp(-dt8 * v_xi[ich+1]) — coupling from element above
+            // v_xi[ich+1] = 0 for ich+1 = M (out of bounds), so expfac ≈ 1 for top element
+            float expfac = (ich + 1 < M)
+                ? expf(-ncfac * dt8 * nh.v_xi[ich + 1])
+                : 1.0f;
+
+            nh.v_xi[ich] *= expfac;
+            nh.v_xi[ich] += v_xi_dotdot[ich] * ncfac * dt4;
+            nh.v_xi[ich] *= expfac;
+        }
+
+        // --- k = 0 ---
+        float expfac0 = (M > 1)
+            ? expf(-ncfac * dt8 * nh.v_xi[1])
+            : 1.0f;
+
+        nh.v_xi[0] *= expfac0;
+        nh.v_xi[0] += v_xi_dotdot[0] * ncfac * dt4;
+        nh.v_xi[0] *= expfac0;
+
+        // --- Velocity scaling ---
+        float factor_eta = expf(-ncfac * dt2 * nh.v_xi[0]);
+        scale_out = factor_eta;  // applied to GPU velocities separately
+
+        // --- Analytic temperature update ---
+        // T_new = T_old * factor_eta^2 (since KE ∝ v^2)
+        T_current *= factor_eta * factor_eta;
+
+        // Recompute dotdot[0] with updated temperature
+        if (Q1 > 0.0f) {
+            float kecurrent = N_f * T_current;
+            float ke_target = N_f * kT_target;
+            v_xi_dotdot[0] = (kecurrent - ke_target) / Q1;
+        }
+
+        // --- Update chain positions ---
+        for (int ich = 0; ich < M; ich++) {
+            nh.xi[ich] += ncfac * dt2 * nh.v_xi[ich];
+        }
+
+        // --- Forward recursion: k=0 ---
+        nh.v_xi[0] *= expfac0;
+        nh.v_xi[0] += v_xi_dotdot[0] * ncfac * dt4;
+        nh.v_xi[0] *= expfac0;
+
+        // --- Forward recursion: ich = 1 to M-1 ---
+        for (int ich = 1; ich < M; ich++) {
+            float expfac = (ich + 1 < M)
+                ? expf(-ncfac * dt8 * nh.v_xi[ich + 1])
+                : 1.0f;
+
+            nh.v_xi[ich] *= expfac;
+
+            // Recompute dotdot[ich] from element below: Q_{ich-1} * v_{ich-1}^2 - kT
+            float Q_prev = (ich == 1) ? Q1 : nh.Q_rest;
+            v_xi_dotdot[ich] = (Q_prev * nh.v_xi[ich - 1] * nh.v_xi[ich - 1]
+                               - kT_target) / nh.Q_rest;
+
+            nh.v_xi[ich] += v_xi_dotdot[ich] * ncfac * dt4;
+            nh.v_xi[ich] *= expfac;
+        }
+    }
 }
 
 // --- Global velocity scaling kernel ---
