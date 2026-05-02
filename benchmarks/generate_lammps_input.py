@@ -21,7 +21,7 @@ def write_fastmd_config(cfg: dict, out_path: str, nsteps: int, thermo_freq: int)
         f"gamma {cfg['gamma']}",
         f"nsteps {nsteps}",
         f"dump_freq {cfg['dump_freq']}",
-        f"thermo_freq {thermo_freq}",
+        f"thermo 1 {thermo_freq} thermo.dat",
         f"seed {cfg['seed']}",
     ]
     for ti, tj, eps, sig in cfg["lj_params"]:

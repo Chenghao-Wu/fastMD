@@ -8,7 +8,7 @@ Here it is:
 
 GPU-accelerated molecular dynamics simulator written in CUDA.
 
-Compared with LAMMPS for 30K bead-spring polymer systems, fastMD gains 20 times acceleration on RTX4090D.
+Compared with LAMMPS for 30K bead-spring polymer systems, fastMD gains 20 times acceleration on RTX4090D (10,000 steps per second).
 
 ## Quick Start
 

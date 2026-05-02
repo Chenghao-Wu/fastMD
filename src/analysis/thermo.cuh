@@ -7,11 +7,17 @@ struct ThermoOutput {
     float potential_energy;
     float temperature;
     float stress[6];
+    float max_vel;      // max velocity magnitude
+    int   max_vel_idx;  // atom index with max velocity
+    float max_force;    // max force magnitude
+    int   max_force_idx;// atom index with max force
 };
 
 struct ThermoBuffers {
     float* d_kin_stress;
     float* d_pe;
+    float* d_max_vel;     // [2]: {max_vel_mag, float(idx)}
+    float* d_max_force;   // [2]: {max_force_mag, float(idx)}
     bool allocated;
     FILE* fp;
 

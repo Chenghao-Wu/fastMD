@@ -235,14 +235,9 @@ int main(int argc, char** argv) {
                 chain_lengths[c] = chain_offsets[c + 1] - chain_offsets[c];
                 if (chain_lengths[c] > max_len) max_len = chain_lengths[c];
             }
-            if (max_len > 1024) {
-                fprintf(stderr, "Warning: max chain length %d > 1024, disabling Rg\n", max_len);
-                params.rg_on = 0;
-            } else {
-                sys.allocate_rg_buffers(topo.mol_ids, topo.images, np);
-                rg_bufs.allocate(chain_offsets, chain_lengths, nchains, max_len,
-                                 params.rg_file);
-            }
+            sys.allocate_rg_buffers(topo.mol_ids, topo.images, np);
+            rg_bufs.allocate(chain_offsets, chain_lengths, nchains, max_len,
+                             params.rg_file);
         }
     }
 
@@ -297,6 +292,9 @@ int main(int argc, char** argv) {
     auto last_progress_time = t_start;
     int step_field_width = snprintf(nullptr, 0, "%d", params.nsteps);
 
+    int steps_since_rebuild = 0;
+    const int max_steps_between_rebuilds = 20;
+
     for (int step = 1; step <= params.nsteps; step++) {
         launch_integrator_pre_force(sys.pos, sys.vel, sys.force,
                                      sys.pos_ref, sys.d_max_dr2_int,
@@ -304,7 +302,17 @@ int main(int argc, char** argv) {
                                      langevin, params.natoms,
                                      params.box_L, params.inv_L, half_dt);
 
-        if (check_and_reset_trigger(sys.d_max_dr2_int, params.skin)) {
+        steps_since_rebuild++;
+        bool triggered = check_and_reset_trigger(sys.d_max_dr2_int, params.skin);
+        bool force_rebuild = (steps_since_rebuild >= max_steps_between_rebuilds);
+
+        if (triggered || force_rebuild) {
+            if (!triggered) {
+                int zero = 0;
+                CUDA_CHECK(cudaMemcpy(sys.d_max_dr2_int, &zero, sizeof(int),
+                                       cudaMemcpyHostToDevice));
+            }
+            steps_since_rebuild = 0;
             if (sys.nbonds == 0 && sys.nangles == 0)
                 morton.sort_and_permute(sys.pos, sys.vel, params.natoms, params.inv_L);
             CUDA_CHECK(cudaMemcpy(sys.pos_ref, sys.pos, np * sizeof(float4),
@@ -312,6 +320,8 @@ int main(int argc, char** argv) {
             verlet.build(sys.pos, params.natoms, params.box_L, params.inv_L,
                          sys.exclusion_offsets, sys.exclusion_list,
                          params.rc + params.skin);
+            printf("  [step %d] verlet rebuild: max_nneigh=%d max_cell=%d ncells=%d nx=%d\n",
+                   step, verlet.max_nneigh, verlet.max_cell_atoms, verlet.ncells, verlet.nx);
         }
 
         CUDA_CHECK(cudaEventRecord(pos_ready, 0));
@@ -357,9 +367,18 @@ int main(int argc, char** argv) {
 
             if (need_thermo) {
                 float etot = thermo.kinetic_energy + thermo.potential_energy;
-                printf("\nStep %6d  T=%10.4f  KE=%11.2f  PE=%11.2f  Etot=%11.2f  Pxx=%8.2f\n",
+                printf("\nStep %6d  T=%10.4f  KE=%11.2f  PE=%11.2f  Etot=%11.2f  Pxx=%8.2f  maxV=%5.2f  maxF=%5.2f\n",
                        step, thermo.temperature, thermo.kinetic_energy,
-                       thermo.potential_energy, etot, thermo.stress[0]);
+                       thermo.potential_energy, etot, thermo.stress[0],
+                       thermo.max_vel, thermo.max_force);
+                if (thermo.max_vel > 10.0f) {
+                    printf("  ** VELOCITY SPIKE: atom %d v=%.2f\n",
+                           thermo.max_vel_idx, thermo.max_vel);
+                }
+                if (thermo.max_force > 100.0f) {
+                    printf("  ** FORCE SPIKE: atom %d f=%.2f\n",
+                           thermo.max_force_idx, thermo.max_force);
+                }
             }
             if (need_stress) {
                 float* d_stress_for_corr;

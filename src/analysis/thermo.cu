@@ -1,9 +1,12 @@
 #include "thermo.cuh"
 #include <cub/cub.cuh>
+#include <cstring>
 
 void ThermoBuffers::allocate() {
     CUDA_CHECK(cudaMalloc(&d_kin_stress, 6 * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_pe, sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_max_vel, 2 * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_max_force, 2 * sizeof(float)));
     allocated = true;
     fp = nullptr;
 }
@@ -11,8 +14,64 @@ void ThermoBuffers::allocate() {
 void ThermoBuffers::free() {
     CUDA_CHECK(cudaFree(d_kin_stress));
     CUDA_CHECK(cudaFree(d_pe));
+    CUDA_CHECK(cudaFree(d_max_vel));
+    CUDA_CHECK(cudaFree(d_max_force));
     allocated = false;
     if (fp) fclose(fp);
+}
+
+// Simple diagnostic: find max velocity and force using shared memory + global atomics.
+// The index may have a race but is close enough for diagnostics.
+__global__ void max_vel_force_kernel(const float4* __restrict__ vel,
+                                      const float4* __restrict__ force,
+                                      float* __restrict__ max_vel_out,
+                                      float* __restrict__ max_force_out,
+                                      int natoms) {
+    __shared__ float sv[32], sf[32];
+    __shared__ int   svi[32], sfi[32];
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int tid = threadIdx.x;
+
+    float vmag2 = 0.0f, fmag2 = 0.0f;
+    int vi = -1, fi = -1;
+    if (i < natoms) {
+        float4 v = vel[i];
+        vmag2 = v.x*v.x + v.y*v.y + v.z*v.z;
+        vi = i;
+        float4 f = force[i];
+        fmag2 = f.x*f.x + f.y*f.y + f.z*f.z;
+        fi = i;
+    }
+
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        float v_other = __shfl_down_sync(0xFFFFFFFF, vmag2, offset);
+        int   vi_other = __shfl_down_sync(0xFFFFFFFF, vi, offset);
+        if (vmag2 < v_other) { vmag2 = v_other; vi = vi_other; }
+        float f_other = __shfl_down_sync(0xFFFFFFFF, fmag2, offset);
+        int   fi_other = __shfl_down_sync(0xFFFFFFFF, fi, offset);
+        if (fmag2 < f_other) { fmag2 = f_other; fi = fi_other; }
+    }
+
+    if (tid % 32 == 0) {
+        sv[tid / 32] = vmag2; svi[tid / 32] = vi;
+        sf[tid / 32] = fmag2; sfi[tid / 32] = fi;
+    }
+    __syncthreads();
+
+    if (tid == 0) {
+        int nw = blockDim.x / 32;
+        float bv = sv[0], bf = sf[0];
+        int bvi = svi[0], bfi = sfi[0];
+        for (int w = 1; w < nw; w++) {
+            if (sv[w] > bv) { bv = sv[w]; bvi = svi[w]; }
+            if (sf[w] > bf) { bf = sf[w]; bfi = sfi[w]; }
+        }
+        atomicMax((int*)&max_vel_out[0], __float_as_int(bv));
+        // Index is best-effort (may race with another block, but diagnostic only)
+        max_vel_out[1] = __int_as_float(bvi);
+        atomicMax((int*)&max_force_out[0], __float_as_int(bf));
+        max_force_out[1] = __int_as_float(bfi);
+    }
 }
 
 void ThermoBuffers::open_file(const char* path) {
@@ -79,16 +138,24 @@ void compute_thermo(const float4* vel, const float4* force,
                      cudaStream_t stream) {
     CUDA_CHECK(cudaMemsetAsync(bufs.d_kin_stress, 0, 6 * sizeof(float), stream));
     CUDA_CHECK(cudaMemsetAsync(bufs.d_pe, 0, sizeof(float), stream));
+    CUDA_CHECK(cudaMemsetAsync(bufs.d_max_vel, 0, 2 * sizeof(float), stream));
+    CUDA_CHECK(cudaMemsetAsync(bufs.d_max_force, 0, 2 * sizeof(float), stream));
 
     int blocks = div_ceil(natoms, 256);
     kinetic_stress_kernel<<<blocks, 256, 0, stream>>>(vel, bufs.d_kin_stress, natoms);
     sum_pe_kernel<<<blocks, 256, 0, stream>>>(force, bufs.d_pe, natoms);
+    max_vel_force_kernel<<<blocks, 256, 0, stream>>>(vel, force, bufs.d_max_vel, bufs.d_max_force, natoms);
 
     float h_kin_stress[6];
     float h_pe;
+    float h_max_vel[2], h_max_force[2];
     CUDA_CHECK(cudaMemcpyAsync(h_kin_stress, bufs.d_kin_stress, 6 * sizeof(float),
                                 cudaMemcpyDeviceToHost, stream));
     CUDA_CHECK(cudaMemcpyAsync(&h_pe, bufs.d_pe, sizeof(float),
+                                cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(h_max_vel, bufs.d_max_vel, 2 * sizeof(float),
+                                cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(h_max_force, bufs.d_max_force, 2 * sizeof(float),
                                 cudaMemcpyDeviceToHost, stream));
 
     float h_virial[6];
@@ -103,6 +170,11 @@ void compute_thermo(const float4* vel, const float4* force,
     h_output->kinetic_energy = ke * inv_n;
     h_output->potential_energy = h_pe * inv_n;
     h_output->temperature = 2.0f * h_output->kinetic_energy / 3.0f;
+
+    h_output->max_vel = sqrtf(h_max_vel[0]);
+    std::memcpy(&h_output->max_vel_idx, &h_max_vel[1], sizeof(int));
+    h_output->max_force = sqrtf(h_max_force[0]);
+    std::memcpy(&h_output->max_force_idx, &h_max_force[1], sizeof(int));
 
     float vol = box_L * box_L * box_L;
     float inv_vol = 1.0f / vol;

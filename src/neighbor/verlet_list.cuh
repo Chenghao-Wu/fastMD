@@ -2,6 +2,8 @@
 #include "../core/types.cuh"
 #include <cub/cub.cuh>
 
+#define MAX_SHARED_ATOMS 96
+
 struct VerletList {
     int*  neighbors;       // [max_neighbors * natoms] transposed
     int*  num_neighbors;   // [natoms]
@@ -20,6 +22,8 @@ struct VerletList {
     size_t cub_temp_bytes;
     int*  h_cell_max;
     int   max_cell_atoms;
+    int*  h_max_nneigh;    // pinned host: max num_neighbors after each build
+    int   max_nneigh;
 
     void allocate(int natoms, float rc_skin, float box_L);
     void free();

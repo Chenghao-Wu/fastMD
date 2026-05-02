@@ -44,9 +44,12 @@ __global__ void lj_verlet_kernel(
                 float sr12 = sr6 * sr6;
                 float force_r = 24.0f * eps * r2inv * (2.0f * sr12 - sr6);
 
-                float fxij = force_r * dx;
-                float fyij = force_r * dy;
-                float fzij = force_r * dz;
+                // Clamp LJ force to prevent overflow in single precision
+                float force_r_clamped = fminf(fmaxf(force_r, -1000.0f), 1000.0f);
+
+                float fxij = force_r_clamped * dx;
+                float fyij = force_r_clamped * dy;
+                float fzij = force_r_clamped * dz;
 
                 fx += fxij; fy += fyij; fz += fzij;
                 pe_i += 0.5f * 4.0f * eps * (sr12 - sr6);

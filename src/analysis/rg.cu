@@ -13,24 +13,24 @@ __global__ void rg_kernel(
     int start = chain_offsets[chain_id];
     int len = chain_lengths[chain_id];
     int tid = threadIdx.x;
+    int bd = blockDim.x;
 
-    // Phase 1: compute COM of this chain
+    // Phase 1: strided accumulation for COM
     float3 com = make_float3(0, 0, 0);
-    if (tid < len) {
-        float4 r = pos[start + tid];
-        int i3 = (start + tid) * 3;
-        com = make_float3(
-            r.x + image[i3 + 0] * box_L,
-            r.y + image[i3 + 1] * box_L,
-            r.z + image[i3 + 2] * box_L);
+    for (int i = tid; i < len; i += bd) {
+        float4 r = pos[start + i];
+        int i3 = (start + i) * 3;
+        com.x += r.x + image[i3 + 0] * box_L;
+        com.y += r.y + image[i3 + 1] * box_L;
+        com.z += r.z + image[i3 + 2] * box_L;
     }
     sdata[tid * 3 + 0] = com.x;
     sdata[tid * 3 + 1] = com.y;
     sdata[tid * 3 + 2] = com.z;
     __syncthreads();
 
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s && tid + s < len) {
+    for (int s = bd / 2; s > 0; s >>= 1) {
+        if (tid < s) {
             sdata[tid * 3 + 0] += sdata[(tid + s) * 3 + 0];
             sdata[tid * 3 + 1] += sdata[(tid + s) * 3 + 1];
             sdata[tid * 3 + 2] += sdata[(tid + s) * 3 + 2];
@@ -42,21 +42,21 @@ __global__ void rg_kernel(
     com.y = sdata[1] / len;
     com.z = sdata[2] / len;
 
-    // Phase 2: compute Rg²
+    // Phase 2: strided accumulation for Rg²
     float rg2 = 0;
-    if (tid < len) {
-        float4 r = pos[start + tid];
-        int i3 = (start + tid) * 3;
+    for (int i = tid; i < len; i += bd) {
+        float4 r = pos[start + i];
+        int i3 = (start + i) * 3;
         float dx = r.x + image[i3 + 0] * box_L - com.x;
         float dy = r.y + image[i3 + 1] * box_L - com.y;
         float dz = r.z + image[i3 + 2] * box_L - com.z;
-        rg2 = dx*dx + dy*dy + dz*dz;
+        rg2 += dx*dx + dy*dy + dz*dz;
     }
     sdata[tid] = rg2;
     __syncthreads();
 
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s && tid + s < len) {
+    for (int s = bd / 2; s > 0; s >>= 1) {
+        if (tid < s) {
             sdata[tid] += sdata[tid + s];
         }
         __syncthreads();
@@ -75,6 +75,7 @@ void RgBuffers::allocate(const std::vector<int>& chain_offsets,
     nchains = nchains_in;
     max_chain_len = max_chain_len_in;
     block_size = next_pow2(max_chain_len);
+    if (block_size > 1024) block_size = 1024;
 
     CUDA_CHECK(cudaMalloc(&d_chain_offsets,
                           (nchains + 1) * sizeof(int)));
