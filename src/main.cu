@@ -8,6 +8,7 @@
 #include "force/fene.cuh"
 #include "force/angle.cuh"
 #include "integrate/langevin.cuh"
+#include "integrate/nose_hoover.cuh"
 #include "analysis/thermo.cuh"
 #include "analysis/correlator.cuh"
 #include "analysis/rg.cuh"
@@ -38,8 +39,18 @@ int main(int argc, char** argv) {
     if (topo.angles.size() > 0) printf("  angles=%zu", topo.angles.size());
     printf("\n");
 
-    printf("[setup]  T_target=%.2f  gamma=%.2f  seed=%d  thermo_freq=%d",
-           params.temperature, params.gamma, params.seed, params.thermo_freq);
+    if (params.ensemble != Ensemble::Langevin) {
+        printf("[setup]  ensemble=%s  T_start=%.2f  T_stop=%.2f  Tdamp=%.2f  chain=%d",
+               params.ensemble == Ensemble::NPT_NH ? "npt_nh" : "nvt_nh",
+               params.T_start, params.T_stop, params.Tdamp, params.nh_chain_length);
+        if (params.ensemble == Ensemble::NPT_NH) {
+            printf("  P_start=%.2f  P_stop=%.2f  Pdamp=%.2f",
+                   params.P_start, params.P_stop, params.Pdamp);
+        }
+    } else {
+        printf("[setup]  T_target=%.2f  gamma=%.2f  seed=%lu  thermo_freq=%d",
+               params.temperature, params.gamma, (unsigned long)params.seed, params.thermo_freq);
+    }
     if (params.rg_on) printf("  rg_on");
     if (params.stress_on) printf("  stress_on");
     if (params.restart_freq >= 0) printf("  restart_on");
@@ -114,6 +125,11 @@ int main(int argc, char** argv) {
 
     LangevinState langevin;
     langevin.init(np, params.gamma, params.dt, params.temperature, params.seed);
+
+    NoseHooverState nose_hoover;
+    if (params.ensemble != Ensemble::Langevin) {
+        nose_hoover.init(params);
+    }
 
     MultipleTauCorrelator correlator;
     if (params.stress_on) {
@@ -280,6 +296,14 @@ int main(int argc, char** argv) {
     }
     CUDA_CHECK(cudaDeviceSynchronize());
 
+    if (params.ensemble == Ensemble::NPT_NH) {
+        ThermoOutput init_thermo;
+        compute_thermo(sys.vel, sys.force, sys.virial,
+                       params.natoms, params.box_L, &init_thermo,
+                       thermo_bufs, 0, nullptr);
+        (void)init_thermo;
+    }
+
     float half_dt = 0.5f * params.dt;
 
     auto t_start = std::chrono::steady_clock::now();
@@ -296,12 +320,110 @@ int main(int argc, char** argv) {
     const int max_steps_between_rebuilds = 20;
 
     for (int step = 1; step <= params.nsteps; step++) {
-        launch_integrator_pre_force(sys.pos, sys.vel, sys.force,
-                                     sys.pos_ref, sys.d_max_dr2_int,
-                                     sys.d_image,
-                                     langevin, params.natoms,
-                                     params.box_L, params.inv_L, half_dt);
 
+        if (params.ensemble == Ensemble::Langevin) {
+            // --- Existing Langevin path (unchanged) ---
+            launch_integrator_pre_force(sys.pos, sys.vel, sys.force,
+                                         sys.pos_ref, sys.d_max_dr2_int,
+                                         sys.d_image,
+                                         langevin, params.natoms,
+                                         params.box_L, params.inv_L, half_dt);
+        } else {
+            // --- NH path ---
+
+            // Ramping: update T_target and P_target (linear from start to stop)
+            float frac = (float)(step - 1) / (float)params.nsteps;
+            nose_hoover.T_target = nose_hoover.T_start
+                + (nose_hoover.T_stop - nose_hoover.T_start) * frac;
+            if (nose_hoover.is_npt) {
+                nose_hoover.P_target = nose_hoover.P_start
+                    + (nose_hoover.P_stop - nose_hoover.P_start) * frac;
+            }
+
+            float hdt = 0.5f * params.dt;
+            float Q1_inv = 1.0f / nose_hoover.Q1;
+            float Q_rest_inv = 1.0f / nose_hoover.Q_rest;
+
+            // Step 1: Thermostat chain half-step
+            launch_nh_thermostat_half(sys.vel, nose_hoover.d_xi,
+                                       nose_hoover.d_v_xi,
+                                       params.natoms, nose_hoover.M,
+                                       hdt, Q1_inv, Q_rest_inv,
+                                       nose_hoover.T_target);
+
+            if (nose_hoover.is_npt) {
+                // Step 2: Barostat half-step on host (Suzuki-Yoshida)
+                static const float sy_w[3] = {
+                    1.0f / (2.0f - cbrtf(2.0f)),
+                    -cbrtf(2.0f) / (2.0f - cbrtf(2.0f)),
+                    1.0f / (2.0f - cbrtf(2.0f))
+                };
+
+                float N_f = 3.0f * params.natoms;
+                float N_f_inv = 1.0f / N_f;
+                float hdt2 = 0.5f * params.dt;
+
+                // Compute thermo for current KE and virial
+                ThermoOutput tmp_thermo;
+                compute_thermo(sys.vel, sys.force, sys.virial,
+                               params.natoms, nose_hoover.L, &tmp_thermo,
+                               thermo_bufs, step, nullptr);
+
+                float KE = tmp_thermo.kinetic_energy;
+                float vir_trace = tmp_thermo.stress[0]
+                                + tmp_thermo.stress[1]
+                                + tmp_thermo.stress[2];
+                float P_inst = (2.0f * KE - vir_trace)
+                             / (3.0f * nose_hoover.V);
+
+                for (int sy = 0; sy < 3; sy++) {
+                    float w = sy_w[sy] * hdt2;
+                    float dv_eps = 3.0f * nose_hoover.V
+                                 * (P_inst - nose_hoover.P_target) * w;
+                    float v_eps_half = nose_hoover.v_eps + 0.5f * dv_eps;
+                    nose_hoover.eps += v_eps_half * w / nose_hoover.W;
+                    dv_eps = 3.0f * nose_hoover.V0
+                           * expf(3.0f * nose_hoover.eps)
+                           * (P_inst - nose_hoover.P_target) * w;
+                    nose_hoover.v_eps += dv_eps;
+                }
+
+                // Update volume and box dimensions
+                nose_hoover.V = nose_hoover.V0
+                              * expf(3.0f * nose_hoover.eps);
+                nose_hoover.L = cbrtf(nose_hoover.V);
+                nose_hoover.inv_L = 1.0f / nose_hoover.L;
+
+                // Step 3: Barostat velocity rescale
+                float v_eps_W = nose_hoover.v_eps / nose_hoover.W;
+                launch_nh_barostat_vel_half(sys.vel, v_eps_W, N_f_inv,
+                                             params.natoms, hdt);
+            }
+
+            // Step 4: Half-step velocity Verlet
+            launch_nh_v_verlet_half(sys.vel, sys.force, params.natoms, hdt);
+
+            if (nose_hoover.is_npt) {
+                // Step 5: Position update with barostat scaling
+                float v_eps_W = nose_hoover.v_eps / nose_hoover.W;
+                float v_eps_W_dt = v_eps_W * params.dt;
+                float exp_vW_dt = expf(v_eps_W_dt);
+                launch_nh_update_pos(sys.pos, sys.vel, sys.pos_ref,
+                                      sys.d_image, sys.d_max_dr2_int,
+                                      params.natoms, nose_hoover.L,
+                                      nose_hoover.inv_L,
+                                      exp_vW_dt, v_eps_W_dt, params.dt);
+            } else {
+                // NVT: standard position update, no barostat scaling
+                launch_nh_update_pos(sys.pos, sys.vel, sys.pos_ref,
+                                      sys.d_image, sys.d_max_dr2_int,
+                                      params.natoms, nose_hoover.L,
+                                      nose_hoover.inv_L,
+                                      1.0f, 0.0f, params.dt);
+            }
+        }
+
+        // --- Verlet rebuild check (common to both paths) ---
         steps_since_rebuild++;
         bool triggered = check_and_reset_trigger(sys.d_max_dr2_int, params.skin);
         bool force_rebuild = (steps_since_rebuild >= max_steps_between_rebuilds);
@@ -313,39 +435,60 @@ int main(int argc, char** argv) {
                                        cudaMemcpyHostToDevice));
             }
             steps_since_rebuild = 0;
-            if (sys.nbonds == 0 && sys.nangles == 0)
-                morton.sort_and_permute(sys.pos, sys.vel, params.natoms, params.inv_L);
-            CUDA_CHECK(cudaMemcpy(sys.pos_ref, sys.pos, np * sizeof(float4),
-                                   cudaMemcpyDeviceToDevice));
-            verlet.build(sys.pos, params.natoms, params.box_L, params.inv_L,
+
+            if (params.ensemble == Ensemble::Langevin) {
+                if (sys.nbonds == 0 && sys.nangles == 0)
+                    morton.sort_and_permute(sys.pos, sys.vel, params.natoms,
+                                             params.inv_L);
+                CUDA_CHECK(cudaMemcpy(sys.pos_ref, sys.pos,
+                                       np * sizeof(float4),
+                                       cudaMemcpyDeviceToDevice));
+            } else if (params.ensemble == Ensemble::NVT_NH) {
+                CUDA_CHECK(cudaMemcpy(sys.pos_ref, sys.pos,
+                                       np * sizeof(float4),
+                                       cudaMemcpyDeviceToDevice));
+            }
+            // NPT_NH: pos_ref already updated in nh_update_pos_kernel, skip copy
+
+            float L_v = (params.ensemble != Ensemble::Langevin)
+                        ? nose_hoover.L : params.box_L;
+            float inv_L_v = (params.ensemble != Ensemble::Langevin)
+                           ? nose_hoover.inv_L : params.inv_L;
+            verlet.build(sys.pos, params.natoms, L_v, inv_L_v,
                          sys.exclusion_offsets, sys.exclusion_list,
                          params.rc + params.skin);
             printf("  [step %d] verlet rebuild: max_nneigh=%d max_cell=%d ncells=%d nx=%d\n",
                    step, verlet.max_nneigh, verlet.max_cell_atoms, verlet.ncells, verlet.nx);
         }
 
+        // --- Force computation (common to both paths) ---
         CUDA_CHECK(cudaEventRecord(pos_ready, 0));
         CUDA_CHECK(cudaStreamWaitEvent(stream_lj, pos_ready, 0));
         CUDA_CHECK(cudaStreamWaitEvent(stream_bonded, pos_ready, 0));
 
         sys.zero_virial();
 
+        float L_f = (params.ensemble != Ensemble::Langevin)
+                    ? nose_hoover.L : params.box_L;
+        float inv_L_f = (params.ensemble != Ensemble::Langevin)
+                        ? nose_hoover.inv_L : params.inv_L;
+
         launch_lj_kernel(sys.pos, sys.force, sys.virial, sys.lj_params,
                           verlet.neighbors, verlet.num_neighbors,
                           params.natoms, params.ntypes,
-                          params.rc2, params.box_L, params.inv_L, stream_lj);
+                          params.rc2, L_f, inv_L_f, stream_lj);
         CUDA_CHECK(cudaEventRecord(force_done_lj, stream_lj));
         CUDA_CHECK(cudaStreamWaitEvent(stream_bonded, force_done_lj, 0));
         if (sys.nbonds > 0) {
             launch_fene_kernel(sys.pos, sys.force, sys.virial,
                                 sys.bonds, sys.bond_param_idx, d_fene_params,
-                                sys.nbonds, 1, params.box_L, params.inv_L,
+                                sys.nbonds, 1, L_f, inv_L_f,
                                 stream_bonded);
         }
         if (sys.nangles > 0) {
             launch_angle_kernel(sys.pos, sys.force, sys.virial,
                                  sys.angles, d_angle_params,
-                                 sys.nangles, params.box_L, params.inv_L,
+                                 sys.nangles, L_f, inv_L_f,
                                  stream_bonded);
         }
 
@@ -353,16 +496,77 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaStreamWaitEvent(0, force_done_lj, 0));
         CUDA_CHECK(cudaStreamWaitEvent(0, force_done_bonded, 0));
 
-        launch_integrator_post_force(sys.vel, sys.force, params.natoms, half_dt);
+        if (params.ensemble == Ensemble::Langevin) {
+            // --- Existing Langevin post-force (unchanged) ---
+            launch_integrator_post_force(sys.vel, sys.force,
+                                          params.natoms, half_dt);
+        } else {
+            // --- NH post-force ---
+            float hdt = 0.5f * params.dt;
+            float Q1_inv = 1.0f / nose_hoover.Q1;
+            float Q_rest_inv = 1.0f / nose_hoover.Q_rest;
+
+            // Velocity Verlet half-step
+            launch_nh_v_verlet_half(sys.vel, sys.force, params.natoms, hdt);
+
+            if (nose_hoover.is_npt) {
+                float v_eps_W = nose_hoover.v_eps / nose_hoover.W;
+                float N_f_inv = 1.0f / (3.0f * params.natoms);
+                launch_nh_barostat_vel_half(sys.vel, v_eps_W, N_f_inv,
+                                             params.natoms, hdt);
+
+                // Barostat half-step (host)
+                ThermoOutput tmp2;
+                compute_thermo(sys.vel, sys.force, sys.virial,
+                               params.natoms, nose_hoover.L, &tmp2,
+                               thermo_bufs, step, nullptr);
+                float KE2 = tmp2.kinetic_energy;
+                float vir_trace2 = tmp2.stress[0]
+                                 + tmp2.stress[1] + tmp2.stress[2];
+                float P2 = (2.0f * KE2 - vir_trace2)
+                         / (3.0f * nose_hoover.V);
+
+                static const float sy_w[3] = {
+                    1.0f / (2.0f - cbrtf(2.0f)),
+                    -cbrtf(2.0f) / (2.0f - cbrtf(2.0f)),
+                    1.0f / (2.0f - cbrtf(2.0f))
+                };
+                for (int sy = 0; sy < 3; sy++) {
+                    float w = sy_w[sy] * hdt;
+                    float dv_eps = 3.0f * nose_hoover.V
+                                 * (P2 - nose_hoover.P_target) * w;
+                    float v_eps_half = nose_hoover.v_eps + 0.5f * dv_eps;
+                    nose_hoover.eps += v_eps_half * w / nose_hoover.W;
+                    dv_eps = 3.0f * nose_hoover.V0
+                           * expf(3.0f * nose_hoover.eps)
+                           * (P2 - nose_hoover.P_target) * w;
+                    nose_hoover.v_eps += dv_eps;
+                }
+                nose_hoover.V = nose_hoover.V0
+                              * expf(3.0f * nose_hoover.eps);
+                nose_hoover.L = cbrtf(nose_hoover.V);
+                nose_hoover.inv_L = 1.0f / nose_hoover.L;
+            }
+
+            // Thermostat chain half-step
+            launch_nh_thermostat_half(sys.vel, nose_hoover.d_xi,
+                                       nose_hoover.d_v_xi,
+                                       params.natoms, nose_hoover.M,
+                                       hdt, Q1_inv, Q_rest_inv,
+                                       nose_hoover.T_target);
+        }
+
         CUDA_CHECK(cudaDeviceSynchronize());
 
         bool need_thermo = params.thermo_on && (step % params.thermo_freq == 0);
         bool need_stress = params.stress_on && (step % params.stress_freq == 0);
 
         if (need_thermo || need_stress) {
+            float thermo_L = (params.ensemble != Ensemble::Langevin)
+                            ? nose_hoover.L : params.box_L;
             ThermoOutput thermo;
             compute_thermo(sys.vel, sys.force, sys.virial,
-                            params.natoms, params.box_L, &thermo,
+                            params.natoms, thermo_L, &thermo,
                             thermo_bufs, step, thermo_bufs.fp);
 
             if (need_thermo) {
@@ -392,21 +596,26 @@ int main(int argc, char** argv) {
 
         if (params.rg_on && step % params.rg_freq == 0) {
             float rg;
-            compute_rg(sys.pos, sys.d_image, rg_bufs,
-                       params.box_L, step, &rg);
+            float rg_L = (params.ensemble != Ensemble::Langevin)
+                        ? nose_hoover.L : params.box_L;
+            compute_rg(sys.pos, sys.d_image, rg_bufs, rg_L, step, &rg);
         }
 
         if (params.dump_freq > 0 && step % params.dump_freq == 0) {
-            dumper.dump_frame(sys.pos, step, params.box_L, stream_io);
+            float dump_L = (params.ensemble != Ensemble::Langevin)
+                          ? nose_hoover.L : params.box_L;
+            dumper.dump_frame(sys.pos, step, dump_L, stream_io);
         }
 
         if (params.restart_freq > 0 && step % params.restart_freq == 0 && step != params.nsteps) {
+            float restart_L = (params.ensemble != Ensemble::Langevin)
+                             ? nose_hoover.L : params.box_L;
             std::string fname = build_restart_filename(params.restart_file, step);
             write_lammps_data(fname, sys.pos, sys.vel, sys.d_image, sys.d_mol_id,
                               sys.bonds, sys.bond_param_idx, sys.angles,
                               params.natoms, sys.nbonds, sys.nangles,
                               params.ntypes, (int)topo.bond_params.size(), (int)topo.angle_params.size(),
-                              params.box_L, step);
+                              restart_L, step);
         }
 
         bool at_progress = (step % progress_interval == 0);
@@ -455,12 +664,14 @@ int main(int argc, char** argv) {
     }
 
     if (params.restart_freq >= 0) {
+        float final_L = (params.ensemble != Ensemble::Langevin)
+                       ? nose_hoover.L : params.box_L;
         std::string fname = build_restart_final_filename(params.restart_file);
         write_lammps_data(fname, sys.pos, sys.vel, sys.d_image, sys.d_mol_id,
                           sys.bonds, sys.bond_param_idx, sys.angles,
                           params.natoms, sys.nbonds, sys.nangles,
                           params.ntypes, (int)topo.bond_params.size(), (int)topo.angle_params.size(),
-                          params.box_L, params.nsteps);
+                          final_L, params.nsteps);
     }
 
     auto t_end = std::chrono::steady_clock::now();
@@ -503,6 +714,9 @@ int main(int argc, char** argv) {
     thermo_bufs.free();
     if (params.rg_on) rg_bufs.free();
     if (params.stress_on) correlator.free();
+    if (params.ensemble != Ensemble::Langevin) {
+        nose_hoover.free();
+    }
     langevin.free();
     verlet.free();
     morton.free();
