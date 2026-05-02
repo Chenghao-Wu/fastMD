@@ -11,12 +11,13 @@ __global__ void init_rng_kernel(curandStatePhilox4_32_10_t* states,
     }
 }
 
-void LangevinState::init(int natoms_padded, float gamma, float dt,
-                          float temperature, uint64_t seed) {
+void LangevinState::init(int natoms_padded, float Tdamp, float dt,
+                         float temperature, uint64_t seed) {
+    float gamma = 1.0f / Tdamp;
     c1 = expf(-gamma * dt);
     c2 = sqrtf(1.0f - c1 * c1);
     half_dt = 0.5f * dt;
-    kT = temperature;
+    kT = temperature;  // initial target, updated each step during ramping
 
     CUDA_CHECK(cudaMalloc(&rng_states,
                            natoms_padded * sizeof(curandStatePhilox4_32_10_t)));

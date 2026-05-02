@@ -9,7 +9,7 @@ struct LangevinState {
     float half_dt;
     float kT;
 
-    void init(int natoms_padded, float gamma, float dt, float temperature,
+    void init(int natoms_padded, float Tdamp, float dt, float temperature,
               uint64_t seed);
     void free();
 };
