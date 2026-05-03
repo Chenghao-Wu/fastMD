@@ -30,12 +30,10 @@ ntypes 1
 rc 2.5
 skin 0.3
 dt 0.001
-temperature 1.0
-gamma 1.0
 nsteps 5000
 dump_freq 0
 thermo 1 1000 thermo.dat
-seed 42
+nvt_langevin 1.0 1.0 1.0 42
 lj 0 0 1.0 1.0
 bond_type 0 30.0 1.5 1.0 1.0
 angle_type 0 5.0 180.0
@@ -59,11 +57,18 @@ Run:
 | `rc` | `float` | Non-bonded cutoff radius |
 | `skin` | `float` | Neighbor list skin distance |
 | `dt` | `float` | Timestep size |
-| `temperature` | `float` | Target thermostat temperature |
-| `gamma` | `float` | Langevin friction coefficient |
 | `nsteps` | `N` | Number of simulation steps |
 | `dump_freq` | `N` | Trajectory dump frequency (0 to disable) |
-| `seed` | `N` | Random number generator seed |
+
+### Ensemble
+
+Choose exactly one of the following ensemble keys. All support linear temperature ramping from `T_start` to `T_stop` over the simulation.
+
+| Key | Arguments | Description |
+|-----|-----------|-------------|
+| `nvt_langevin` | `T_start T_stop Tdamp [seed]` | Langevin thermostat (NVT). `Tdamp` is the characteristic damping time. `seed` defaults to 42. |
+| `nvt_nh` | `T_start T_stop Tdamp [chain_length]` | Nosé-Hoover thermostat (NVT). `chain_length` defaults to 3. |
+| `npt_nh` | `T_start T_stop Tdamp P_start P_stop Pdamp [chain_length]` | Nosé-Hoover thermostat + barostat (NPT). `P_start`/`P_stop` for pressure ramping, `Pdamp` for barostat damping. |
 
 ### Interaction types
 
@@ -96,7 +101,8 @@ To run without angle interactions, simply omit all `angle_type` lines and ensure
 - Lennard-Jones non-bonded potential
 - FENE bonded potential
 - Harmonic angle bending potential
-- Langevin thermostat
+- Langevin thermostat (NVT) with temperature damping and ramping
+- Nosé-Hoover thermostat (NVT/NPT) with chain integration and barostat
 - Verlet neighbor lists with automatic rebuild
 - Morton spatial sorting for cache efficiency
 - Stress autocorrelation analysis
@@ -115,7 +121,7 @@ fastMD/
 │   ├── analysis/   # thermodynamics, correlators
 │   ├── core/       # system state, PBC, Morton sorting
 │   ├── force/      # LJ, FENE, angle force kernels
-│   ├── integrate/  # Langevin integrator
+│   ├── integrate/  # Langevin and Nosé-Hoover integrators
 │   ├── io/         # config parsing, LAMMPS parser, binary dump
 │   └── neighbor/   # Verlet and tile neighbor lists
 ├── tests/          # unit tests
