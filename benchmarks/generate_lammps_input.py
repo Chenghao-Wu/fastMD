@@ -9,7 +9,7 @@ def load_config(path: str) -> dict:
         return json.load(f)
 
 
-def write_fastmd_config(cfg: dict, out_path: str, nsteps: int, thermo_freq: int):
+def write_fastmd_config(cfg: dict, ensemble: dict, out_path: str, nsteps: int, thermo_freq: int):
     lines = [
         f"natoms {cfg['natoms']}",
         f"ntypes {cfg['ntypes']}",
@@ -19,8 +19,17 @@ def write_fastmd_config(cfg: dict, out_path: str, nsteps: int, thermo_freq: int)
         f"nsteps {nsteps}",
         f"dump_freq {cfg['dump_freq']}",
         f"thermo 1 {thermo_freq} thermo.dat",
-        f"nvt_langevin {cfg['T_start']} {cfg['T_stop']} {cfg['Tdamp']} {cfg['seed']}",
     ]
+    etype = ensemble["type"]
+    if etype == "nvt_langevin":
+        lines.append(f"nvt_langevin {ensemble['T_start']} {ensemble['T_stop']} {ensemble['Tdamp']} {ensemble['seed']}")
+    elif etype == "nvt_nh":
+        chain = ensemble.get("chain_length", 3)
+        lines.append(f"nvt_nh {ensemble['T_start']} {ensemble['T_stop']} {ensemble['Tdamp']} {chain}")
+    elif etype == "npt_nh":
+        chain = ensemble.get("chain_length", 3)
+        lines.append(f"npt_nh {ensemble['T_start']} {ensemble['T_stop']} {ensemble['Tdamp']} "
+                     f"{ensemble['P_start']} {ensemble['P_stop']} {ensemble['Pdamp']} {chain}")
     for ti, tj, eps, sig in cfg["lj_params"]:
         lines.append(f"lj {ti} {tj} {eps} {sig}")
     for t, k, R0, eps, sig in cfg["bond_params"]:
@@ -32,11 +41,27 @@ def write_fastmd_config(cfg: dict, out_path: str, nsteps: int, thermo_freq: int)
     Path(out_path).write_text("\n".join(lines) + "\n")
 
 
-def write_lammps_input(cfg: dict, out_path: str, nsteps: int, thermo_freq: int):
+def write_lammps_input(cfg: dict, ensemble: dict, out_path: str, nsteps: int, thermo_freq: int):
     lj = cfg["lj_params"][0]
     bond = cfg["bond_params"][0]
     angle = cfg["angle_params"][0]
     neighbor_dist = cfg["rc"] + cfg["skin"]
+
+    etype = ensemble["type"]
+    if etype == "nvt_langevin":
+        fix_lines = [
+            "fix 1 all nve",
+            f"fix 2 all langevin {ensemble['T_start']} {ensemble['T_stop']} {ensemble['Tdamp']} {ensemble['seed']}",
+        ]
+    elif etype == "nvt_nh":
+        fix_lines = [
+            f"fix 1 all nvt temp {ensemble['T_start']} {ensemble['T_stop']} {ensemble['Tdamp']} tchain {ensemble.get('chain_length', 3)}",
+        ]
+    elif etype == "npt_nh":
+        fix_lines = [
+            f"fix 1 all npt temp {ensemble['T_start']} {ensemble['T_stop']} {ensemble['Tdamp']} "
+            f"iso {ensemble['P_start']} {ensemble['P_stop']} {ensemble['Pdamp']}",
+        ]
 
     lines = [
         "units lj",
@@ -64,24 +89,26 @@ def write_lammps_input(cfg: dict, out_path: str, nsteps: int, thermo_freq: int):
         "neigh_modify delay 0 every 1 check yes",
         "",
         f"timestep {cfg['dt']}",
-        f"fix 1 all nve",
-        f"fix 2 all langevin {cfg['T_start']} {cfg['T_stop']} {cfg['Tdamp']} {cfg['seed']}",
+    ]
+    lines.extend(fix_lines)
+    lines.extend([
         "",
         f"thermo {thermo_freq}",
         "thermo_style custom step temp pe ke etotal",
         "",
         f"run {nsteps}",
-    ]
+    ])
     Path(out_path).write_text("\n".join(lines) + "\n")
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: generate_lammps_input.py <benchmark.json>")
+    if len(sys.argv) < 4:
+        print("Usage: generate_lammps_input.py <benchmark.json> <phase> <ensemble_json>")
         sys.exit(1)
 
     cfg = load_config(sys.argv[1])
-    phase = sys.argv[2] if len(sys.argv) > 2 else "benchmark"
+    phase = sys.argv[2]
+    ensemble = json.loads(sys.argv[3])
 
     if phase == "validation":
         nsteps = cfg["nsteps_validation"]
@@ -90,8 +117,8 @@ def main():
         nsteps = cfg["nsteps_benchmark"]
         thermo_freq = cfg["thermo_freq_benchmark"]
 
-    write_fastmd_config(cfg, "fastmd_benchmark.conf", nsteps, thermo_freq)
-    write_lammps_input(cfg, "lammps_benchmark.in", nsteps, thermo_freq)
+    write_fastmd_config(cfg, ensemble, "fastmd_benchmark.conf", nsteps, thermo_freq)
+    write_lammps_input(cfg, ensemble, "lammps_benchmark.in", nsteps, thermo_freq)
     print("Generated fastmd_benchmark.conf and lammps_benchmark.in")
 
 
