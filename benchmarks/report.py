@@ -18,17 +18,21 @@ def get_gpu_name() -> str:
 
 def write_report(
     cfg: dict,
+    ensemble: str,
     fastmd_time: float,
     lammps_time: float,
     ns_per_day_f: float,
     ns_per_day_l: float,
     speedup: float,
     validation: dict,
-    out_path: str = "benchmark_report.json",
+    out_path: str = None,
 ):
+    if out_path is None:
+        out_path = f"benchmark_report_{ensemble}.json"
     report = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "gpu": get_gpu_name(),
+        "ensemble": ensemble,
         "system": cfg["data_file"],
         "n_atoms": cfg["natoms"],
         "nsteps": cfg["nsteps_benchmark"],
