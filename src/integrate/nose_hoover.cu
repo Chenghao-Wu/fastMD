@@ -2,6 +2,47 @@
 #include "../neighbor/skin_trigger.cuh"
 #include "../core/pbc.cuh"
 
+void allocate_nh_device_state(NoseHooverDeviceState*& d_state) {
+    CUDA_CHECK(cudaMalloc(&d_state, sizeof(NoseHooverDeviceState)));
+}
+
+void init_nh_device_state(const NoseHooverState& host,
+                          NoseHooverDeviceState* d_state) {
+    NoseHooverDeviceState h;
+    for (int k = 0; k < kMaxChainLength; k++) {
+        h.xi[k] = host.xi[k];
+        h.v_xi[k] = host.v_xi[k];
+    }
+    h.eps = host.eps;
+    h.v_eps = host.v_eps;
+    h.chain_KE_carry = 0.0f;
+    h.nh_scale = 1.0f;
+    h.T_target = host.T_target;
+    h.P_target = host.P_target;
+    CUDA_CHECK(cudaMemcpy(d_state, &h, sizeof(NoseHooverDeviceState),
+                          cudaMemcpyHostToDevice));
+}
+
+void free_nh_device_state(NoseHooverDeviceState* d_state) {
+    CUDA_CHECK(cudaFree(d_state));
+}
+
+void set_nh_scale_device(NoseHooverDeviceState* d_state, float scale) {
+    CUDA_CHECK(cudaMemcpy(&d_state->nh_scale, &scale, sizeof(float),
+                          cudaMemcpyHostToDevice));
+}
+
+void set_nh_targets_device(NoseHooverDeviceState* d_state,
+                           float T_target, float P_target) {
+    NoseHooverDeviceState h;
+    CUDA_CHECK(cudaMemcpy(&h, d_state, sizeof(NoseHooverDeviceState),
+                          cudaMemcpyDeviceToHost));
+    h.T_target = T_target;
+    h.P_target = P_target;
+    CUDA_CHECK(cudaMemcpy(d_state, &h, sizeof(NoseHooverDeviceState),
+                          cudaMemcpyHostToDevice));
+}
+
 // --- Init / Free ---
 
 void NoseHooverState::init(const SimParams& params) {

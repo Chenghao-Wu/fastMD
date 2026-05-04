@@ -42,6 +42,27 @@ struct NoseHooverState {
     void free();
 };
 
+// Device-resident NH chain state — eliminates D2H/H2D round-trips in the inner loop.
+// Persists across time steps. Host State retains geometry/mass params only.
+struct NoseHooverDeviceState {
+    float xi[kMaxChainLength];
+    float v_xi[kMaxChainLength];
+    float eps;               // log strain (NPT)
+    float v_eps;             // barostat momentum (NPT)
+    float chain_KE_carry;    // KE * scale^2, carried to next step's pre-force
+    float nh_scale;          // latest thermostat scale, consumed by next kernel
+    float T_target;
+    float P_target;
+};
+
+void allocate_nh_device_state(NoseHooverDeviceState*& d_state);
+void init_nh_device_state(const NoseHooverState& host,
+                          NoseHooverDeviceState* d_state);
+void free_nh_device_state(NoseHooverDeviceState* d_state);
+void set_nh_scale_device(NoseHooverDeviceState* d_state, float scale);
+void set_nh_targets_device(NoseHooverDeviceState* d_state,
+                           float T_target, float P_target);
+
 // --- Kernel launches ---
 
 // Propagate system-wide NH chain for half_dt, return global velocity scale factor.
