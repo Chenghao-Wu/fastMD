@@ -313,3 +313,105 @@ TEST(NoseHoover, NVTReachesTargetTemperature) {
     free_device(d_virial);
     free_device(d_lj);
 }
+
+// Test 3: GPU chain kernel produces identical results to host nh_propagate_chain
+TEST(NoseHoover, GPUChainMatchesHost) {
+    const int N = 100;
+    const int M = 3;
+    const float Tdamp = 0.5f;
+    const float T_target = 1.5f;
+    const float dt = 0.002f;
+    const float hdt = 0.5f * dt;
+
+    SimParams params = {};
+    params.natoms = N;
+    params.box_L = 10.0f;
+    params.inv_L = 0.1f;
+    params.dt = dt;
+    params.nsteps = 1;
+    params.ntypes = 1;
+    params.ensemble = Ensemble::NVT_NH;
+    params.T_start = T_target;
+    params.T_stop = T_target;
+    params.Tdamp = Tdamp;
+    params.nh_chain_length = M;
+
+    NoseHooverState nh_host;
+    nh_host.init(params);
+
+    NoseHooverDeviceState* d_state = nullptr;
+    allocate_nh_device_state(d_state);
+    init_nh_device_state(nh_host, d_state);
+
+    float* d_ke = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_ke, sizeof(float)));
+
+    srand(12345);
+    for (int trial = 0; trial < 10000; trial++) {
+        float ke = 0.5f * N * T_target * (0.5f + (rand() / (float)RAND_MAX) * 1.5f);
+
+        // --- Host: post-force chain (reads raw KE) ---
+        NoseHooverState nh_copy = nh_host;
+        float host_scale;
+        nh_propagate_chain(nh_copy, ke, hdt, host_scale);
+
+        // --- GPU: post-force chain (reads raw KE from d_ke_buf) ---
+        NoseHooverDeviceState h_temp;
+        CUDA_CHECK(cudaMemcpy(&h_temp, d_state, sizeof(NoseHooverDeviceState),
+                              cudaMemcpyDeviceToHost));
+        h_temp.T_target = T_target;
+        CUDA_CHECK(cudaMemcpy(d_state, &h_temp, sizeof(NoseHooverDeviceState),
+                              cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_ke, &ke, sizeof(float), cudaMemcpyHostToDevice));
+
+        nh_propagate_chain_kernel<<<1, 32>>>(
+            d_state, d_ke, false, M, nh_host.Q1, nh_host.Q_rest, hdt, N);
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        CUDA_CHECK(cudaMemcpy(&h_temp, d_state, sizeof(NoseHooverDeviceState),
+                              cudaMemcpyDeviceToHost));
+
+        // Compare scale (bit-identical)
+        EXPECT_FLOAT_EQ(h_temp.nh_scale, host_scale)
+            << "post-force scale differs at trial " << trial;
+        EXPECT_FLOAT_EQ(h_temp.xi[0], nh_copy.xi[0]);
+        EXPECT_FLOAT_EQ(h_temp.xi[1], nh_copy.xi[1]);
+        EXPECT_FLOAT_EQ(h_temp.xi[2], nh_copy.xi[2]);
+        EXPECT_FLOAT_EQ(h_temp.v_xi[0], nh_copy.v_xi[0]);
+        EXPECT_FLOAT_EQ(h_temp.v_xi[1], nh_copy.v_xi[1]);
+        EXPECT_FLOAT_EQ(h_temp.v_xi[2], nh_copy.v_xi[2]);
+        EXPECT_FLOAT_EQ(h_temp.chain_KE_carry, ke * host_scale * host_scale)
+            << "chain_KE_carry differs at trial " << trial;
+
+        // --- Host: pre-force chain (reads chain_KE_carry) ---
+        float carry = ke * host_scale * host_scale;
+        NoseHooverState nh_copy2 = nh_copy;
+        float host_scale2;
+        nh_propagate_chain(nh_copy2, carry, hdt, host_scale2);
+
+        // --- GPU: pre-force chain (reads chain_KE_carry from state) ---
+        nh_propagate_chain_kernel<<<1, 32>>>(
+            d_state, d_ke, true, M, nh_host.Q1, nh_host.Q_rest, hdt, N);
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        CUDA_CHECK(cudaMemcpy(&h_temp, d_state, sizeof(NoseHooverDeviceState),
+                              cudaMemcpyDeviceToHost));
+
+        EXPECT_FLOAT_EQ(h_temp.nh_scale, host_scale2)
+            << "pre-force scale differs at trial " << trial;
+        EXPECT_FLOAT_EQ(h_temp.xi[0], nh_copy2.xi[0]);
+        EXPECT_FLOAT_EQ(h_temp.v_xi[0], nh_copy2.v_xi[0]);
+
+        // Advance host state for next trial
+        nh_host.xi[0] = nh_copy2.xi[0];
+        nh_host.xi[1] = nh_copy2.xi[1];
+        nh_host.xi[2] = nh_copy2.xi[2];
+        nh_host.v_xi[0] = nh_copy2.v_xi[0];
+        nh_host.v_xi[1] = nh_copy2.v_xi[1];
+        nh_host.v_xi[2] = nh_copy2.v_xi[2];
+    }
+
+    nh_host.free();
+    CUDA_CHECK(cudaFree(d_ke));
+    free_nh_device_state(d_state);
+}
