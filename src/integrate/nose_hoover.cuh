@@ -63,6 +63,19 @@ void set_nh_scale_device(NoseHooverDeviceState* d_state, float scale);
 void set_nh_targets_device(NoseHooverDeviceState* d_state,
                            float T_target, float P_target);
 
+// Propagate system-wide NH chain on GPU.
+// If use_carry: reads KE from d_state->chain_KE_carry (pre-force call).
+// If !use_carry: reads KE from d_ke_buf (post-force call), and writes
+//   d_state->chain_KE_carry = KE * scale^2 for the next step's pre-force.
+// Always writes d_state->nh_scale, updates xi/v_xi.
+// Launch with <<<1, 32>>>.
+__global__ void nh_propagate_chain_kernel(
+    NoseHooverDeviceState* __restrict__ d_state,
+    const float* __restrict__ d_ke_buf,
+    bool use_carry,
+    int M, float Q1, float Q_rest,
+    float half_dt, int natoms);
+
 // --- Kernel launches ---
 
 // Propagate system-wide NH chain for half_dt, return global velocity scale factor.

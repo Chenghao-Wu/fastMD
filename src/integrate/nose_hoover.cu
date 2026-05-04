@@ -43,6 +43,100 @@ void set_nh_targets_device(NoseHooverDeviceState* d_state,
                           cudaMemcpyHostToDevice));
 }
 
+__global__ void nh_propagate_chain_kernel(
+    NoseHooverDeviceState* __restrict__ d_state,
+    const float* __restrict__ d_ke_buf,
+    bool use_carry,
+    int M, float Q1, float Q_rest,
+    float half_dt, int natoms)
+{
+    float total_KE = use_carry ? d_state->chain_KE_carry : *d_ke_buf;
+    float kT_target = d_state->T_target;
+    float N_f = 3.0f * static_cast<float>(natoms);
+
+    float dt2 = half_dt;
+    float dt4 = half_dt * 0.5f;
+    float dt8 = half_dt * 0.25f;
+
+    float v_xi_dotdot[10] = {};
+
+    float T_current = (2.0f * total_KE) / N_f;
+
+    if (Q1 > 0.0f) {
+        float kecurrent = N_f * T_current;
+        float ke_target = N_f * kT_target;
+        v_xi_dotdot[0] = (kecurrent - ke_target) / Q1;
+    }
+
+    int nc_tchain = 1;
+    float ncfac = 1.0f / static_cast<float>(nc_tchain);
+    float scale = 1.0f;
+
+    for (int iloop = 0; iloop < nc_tchain; iloop++) {
+
+        // Backward recursion: ich = M-1 down to 1
+        for (int ich = M - 1; ich > 0; ich--) {
+            float expfac = (ich + 1 < M)
+                ? expf(-ncfac * dt8 * d_state->v_xi[ich + 1])
+                : 1.0f;
+            d_state->v_xi[ich] *= expfac;
+            d_state->v_xi[ich] += v_xi_dotdot[ich] * ncfac * dt4;
+            d_state->v_xi[ich] *= expfac;
+        }
+
+        // k = 0
+        float expfac0 = (M > 1)
+            ? expf(-ncfac * dt8 * d_state->v_xi[1])
+            : 1.0f;
+        d_state->v_xi[0] *= expfac0;
+        d_state->v_xi[0] += v_xi_dotdot[0] * ncfac * dt4;
+        d_state->v_xi[0] *= expfac0;
+
+        // Velocity scaling factor
+        float factor_eta = expf(-ncfac * dt2 * d_state->v_xi[0]);
+        scale = factor_eta;
+
+        // Analytic temperature update
+        T_current *= factor_eta * factor_eta;
+
+        if (Q1 > 0.0f) {
+            float kecurrent = N_f * T_current;
+            float ke_target = N_f * kT_target;
+            v_xi_dotdot[0] = (kecurrent - ke_target) / Q1;
+        }
+
+        // Update chain positions
+        for (int ich = 0; ich < M; ich++) {
+            d_state->xi[ich] += ncfac * dt2 * d_state->v_xi[ich];
+        }
+
+        // Forward recursion: k = 0
+        d_state->v_xi[0] *= expfac0;
+        d_state->v_xi[0] += v_xi_dotdot[0] * ncfac * dt4;
+        d_state->v_xi[0] *= expfac0;
+
+        // Forward recursion: ich = 1 to M-1
+        for (int ich = 1; ich < M; ich++) {
+            float expfac = (ich + 1 < M)
+                ? expf(-ncfac * dt8 * d_state->v_xi[ich + 1])
+                : 1.0f;
+            d_state->v_xi[ich] *= expfac;
+            float Q_prev = (ich == 1) ? Q1 : Q_rest;
+            v_xi_dotdot[ich] = (Q_prev * d_state->v_xi[ich - 1] * d_state->v_xi[ich - 1]
+                                - kT_target) / Q_rest;
+            d_state->v_xi[ich] += v_xi_dotdot[ich] * ncfac * dt4;
+            d_state->v_xi[ich] *= expfac;
+        }
+    }
+
+    d_state->nh_scale = scale;
+
+    // Carry KE forward only for post-force calls (use_carry=false)
+    if (!use_carry) {
+        d_state->chain_KE_carry = total_KE * scale * scale;
+    }
+}
+
 // --- Init / Free ---
 
 void NoseHooverState::init(const SimParams& params) {
