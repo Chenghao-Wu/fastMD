@@ -49,7 +49,32 @@ struct NoseHooverState {
 void nh_propagate_chain(NoseHooverState& nh, float total_KE,
                          float half_dt, float& scale_out);
 
-// Apply global velocity scale factor on GPU
+// --- Fused pre-force kernels ---
+// NVT: thermostat scale + velocity half-step + position update + PBC + displacement
+void launch_nh_nvt_pre_force_fused(float4* pos, float4* vel, const float4* force,
+                                    const float4* pos_ref,
+                                    int* d_max_dr2_int, int* d_image,
+                                    float nh_scale, float half_dt, float dt,
+                                    int natoms, float L, float inv_L,
+                                    cudaStream_t stream = 0);
+
+// NPT: barostat+thermostat scale + velocity half-step + position update + PBC + displacement
+void launch_nh_npt_pre_force_fused(float4* pos, float4* vel, const float4* force,
+                                    float4* pos_ref,
+                                    int* d_max_dr2_int, int* d_image,
+                                    float nh_scale, float baro_scale,
+                                    float half_dt, float dt,
+                                    float exp_vW, float v_eps_W_dt,
+                                    int natoms, float L, float inv_L,
+                                    cudaStream_t stream = 0);
+
+// --- Fused post-force kernel ---
+// NVT: velocity half-step + KE reduction in a single pass
+void launch_nh_nvt_v_half_ke_reduce(float4* vel, const float4* force,
+                                     float* ke_out, int natoms, float half_dt,
+                                     cudaStream_t stream = 0);
+
+// --- Original (non-fused) kernels, still used by NPT post-force ---
 void launch_nh_global_scale_vel(float4* vel, float scale,
                                  int natoms, cudaStream_t stream = 0);
 
@@ -67,3 +92,7 @@ void launch_nh_update_pos(float4* pos, float4* vel, float4* pos_ref,
                            int natoms, float L, float inv_L,
                            float exp_vW_dt, float v_eps_W_dt, float dt,
                            cudaStream_t stream = 0);
+
+// Lightweight KE-only reduction: single kernel + single D2H copy + sync.
+float compute_ke_only(const float4* vel, int natoms,
+                      float* d_ke_buf, cudaStream_t stream = 0);

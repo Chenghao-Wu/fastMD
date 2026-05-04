@@ -44,7 +44,6 @@ void NoseHooverState::init(const SimParams& params) {
 }
 
 void NoseHooverState::free() {
-    // No device allocations for the chain (host-side)
 }
 
 // --- System-wide NH chain propagation (host-side) ---
@@ -65,15 +64,11 @@ void nh_propagate_chain(NoseHooverState& nh, float total_KE,
     float dt8 = half_dt * 0.25f;
 
     // v_xi_dotdot[k] = acceleration of chain element k (Gk in our old notation)
-    float v_xi_dotdot[10];
+    float v_xi_dotdot[10] = {};
 
     // Current temperature from KE: T = 2*KE / (N_f)
     float T_current = (2.0f * total_KE) / N_f;
 
-    // ke = N_f * kT, ke_target = N_f * kT_target
-    // dotdot[0] = (ke_current - ke_target) / Q1
-    //           = (N_f*T_current - N_f*T_target) / (N_f*kT_target*Tdamp^2)
-    //           = (T_current - T_target) / (kT_target * Tdamp^2)
     if (Q1 > 0.0f) {
         float kecurrent = N_f * T_current;
         float ke_target = N_f * kT_target;
@@ -89,8 +84,6 @@ void nh_propagate_chain(NoseHooverState& nh, float total_KE,
 
         // --- Backward recursion: ich = M-1 down to 1 ---
         for (int ich = M - 1; ich > 0; ich--) {
-            // expfac = exp(-dt8 * v_xi[ich+1]) — coupling from element above
-            // v_xi[ich+1] = 0 for ich+1 = M (out of bounds), so expfac ≈ 1 for top element
             float expfac = (ich + 1 < M)
                 ? expf(-ncfac * dt8 * nh.v_xi[ich + 1])
                 : 1.0f;
@@ -111,10 +104,9 @@ void nh_propagate_chain(NoseHooverState& nh, float total_KE,
 
         // --- Velocity scaling ---
         float factor_eta = expf(-ncfac * dt2 * nh.v_xi[0]);
-        scale_out = factor_eta;  // applied to GPU velocities separately
+        scale_out = factor_eta;
 
         // --- Analytic temperature update ---
-        // T_new = T_old * factor_eta^2 (since KE ∝ v^2)
         T_current *= factor_eta * factor_eta;
 
         // Recompute dotdot[0] with updated temperature
@@ -142,7 +134,6 @@ void nh_propagate_chain(NoseHooverState& nh, float total_KE,
 
             nh.v_xi[ich] *= expfac;
 
-            // Recompute dotdot[ich] from element below: Q_{ich-1} * v_{ich-1}^2 - kT
             float Q_prev = (ich == 1) ? Q1 : nh.Q_rest;
             v_xi_dotdot[ich] = (Q_prev * nh.v_xi[ich - 1] * nh.v_xi[ich - 1]
                                - kT_target) / nh.Q_rest;
@@ -292,4 +283,256 @@ void launch_nh_update_pos(float4* pos, float4* vel, float4* pos_ref,
     nh_update_pos_kernel<<<blocks, 256, 0, stream>>>(
         pos, vel, pos_ref, d_image, d_max_dr2_int,
         natoms, L, inv_L, exp_vW_dt, v_eps_W_dt, dt);
+}
+
+// --- Fused NVT pre-force kernel ---
+// Combines: thermostat velocity scaling + velocity half-step + position update + PBC + displacement
+
+__global__ void nh_nvt_pre_force_fused_kernel(
+    float4* __restrict__ pos,
+    float4* __restrict__ vel,
+    const float4* __restrict__ force,
+    const float4* __restrict__ pos_ref,
+    int* __restrict__ d_max_dr2_int,
+    int* __restrict__ d_image,
+    float nh_scale, float half_dt, float dt,
+    float L, float inv_L, int natoms)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= natoms) return;
+
+    float4 r = pos[i];
+    float4 v = vel[i];
+    float4 f = force[i];
+
+    // Thermostat velocity scaling
+    v.x *= nh_scale;
+    v.y *= nh_scale;
+    v.z *= nh_scale;
+
+    // Velocity Verlet half-kick
+    v.x += half_dt * f.x;
+    v.y += half_dt * f.y;
+    v.z += half_dt * f.z;
+
+    // Position update (NVT: no barostat)
+    r.x += dt * v.x;
+    r.y += dt * v.y;
+    r.z += dt * v.z;
+
+    // PBC wrapping
+    int ix = (int)floorf(r.x * inv_L);
+    int iy = (int)floorf(r.y * inv_L);
+    int iz = (int)floorf(r.z * inv_L);
+    r.x -= ix * L;
+    r.y -= iy * L;
+    r.z -= iz * L;
+    if (d_image != nullptr) {
+        int i3 = i * 3;
+        d_image[i3 + 0] += ix;
+        d_image[i3 + 1] += iy;
+        d_image[i3 + 2] += iz;
+    }
+
+    // Displacement tracking (pos_ref unchanged for NVT)
+    update_max_displacement(r, pos_ref[i], d_max_dr2_int, L, inv_L);
+
+    pos[i] = r;
+    vel[i] = v;
+}
+
+void launch_nh_nvt_pre_force_fused(float4* pos, float4* vel, const float4* force,
+                                    const float4* pos_ref,
+                                    int* d_max_dr2_int, int* d_image,
+                                    float nh_scale, float half_dt, float dt,
+                                    int natoms, float L, float inv_L,
+                                    cudaStream_t stream) {
+    int blocks = div_ceil(natoms, 256);
+    nh_nvt_pre_force_fused_kernel<<<blocks, 256, 0, stream>>>(
+        pos, vel, force, pos_ref, d_max_dr2_int, d_image,
+        nh_scale, half_dt, dt, L, inv_L, natoms);
+}
+
+// --- Fused NPT pre-force kernel ---
+// Combines: barostat + thermostat velocity scaling + velocity half-step +
+//           position update with barostat + PBC + displacement (pos_ref updated inline)
+
+__global__ void nh_npt_pre_force_fused_kernel(
+    float4* __restrict__ pos,
+    float4* __restrict__ vel,
+    const float4* __restrict__ force,
+    float4* __restrict__ pos_ref,
+    int* __restrict__ d_max_dr2_int,
+    int* __restrict__ d_image,
+    float nh_scale, float baro_scale, float half_dt, float dt,
+    float exp_vW, float v_eps_W_dt,
+    float L, float inv_L, int natoms)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= natoms) return;
+
+    float4 r = pos[i];
+    float4 v = vel[i];
+    float4 f = force[i];
+    float4 r_ref = pos_ref[i];
+
+    // Combined thermostat + barostat velocity scaling
+    float scale = nh_scale * baro_scale;
+    v.x *= scale;
+    v.y *= scale;
+    v.z *= scale;
+
+    // Velocity Verlet half-kick
+    v.x += half_dt * f.x;
+    v.y += half_dt * f.y;
+    v.z += half_dt * f.z;
+
+    // Position update with barostat
+    float half_vW_dt = 0.5f * v_eps_W_dt;
+    float f_pos = dt * expf(half_vW_dt) * sinchf(half_vW_dt);
+
+    r.x = r.x * exp_vW + v.x * f_pos;
+    r.y = r.y * exp_vW + v.y * f_pos;
+    r.z = r.z * exp_vW + v.z * f_pos;
+
+    r_ref.x *= exp_vW;
+    r_ref.y *= exp_vW;
+    r_ref.z *= exp_vW;
+
+    // PBC wrapping
+    int ix = (int)floorf(r.x * inv_L);
+    int iy = (int)floorf(r.y * inv_L);
+    int iz = (int)floorf(r.z * inv_L);
+    r.x -= ix * L;
+    r.y -= iy * L;
+    r.z -= iz * L;
+    if (d_image != nullptr) {
+        int i3 = i * 3;
+        d_image[i3 + 0] += ix;
+        d_image[i3 + 1] += iy;
+        d_image[i3 + 2] += iz;
+    }
+
+    // Displacement tracking
+    update_max_displacement(r, r_ref, d_max_dr2_int, L, inv_L);
+
+    pos[i] = r;
+    vel[i] = v;
+    pos_ref[i] = r_ref;
+}
+
+void launch_nh_npt_pre_force_fused(float4* pos, float4* vel, const float4* force,
+                                    float4* pos_ref,
+                                    int* d_max_dr2_int, int* d_image,
+                                    float nh_scale, float baro_scale,
+                                    float half_dt, float dt,
+                                    float exp_vW, float v_eps_W_dt,
+                                    int natoms, float L, float inv_L,
+                                    cudaStream_t stream) {
+    int blocks = div_ceil(natoms, 256);
+    nh_npt_pre_force_fused_kernel<<<blocks, 256, 0, stream>>>(
+        pos, vel, force, pos_ref, d_max_dr2_int, d_image,
+        nh_scale, baro_scale, half_dt, dt, exp_vW, v_eps_W_dt,
+        L, inv_L, natoms);
+}
+
+// --- Fused NVT post-force v-half + KE reduction kernel ---
+// Updates velocity AND accumulates KE in shared memory in one pass.
+
+__global__ void nh_nvt_v_half_ke_reduce_kernel(
+    float4* __restrict__ vel,
+    const float4* __restrict__ force,
+    float* __restrict__ ke_out,
+    int natoms, float half_dt)
+{
+    __shared__ float sdata[32];
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int tid = threadIdx.x;
+
+    float v2 = 0.0f;
+    if (i < natoms) {
+        float4 v = vel[i];
+        float4 f = force[i];
+        v.x += half_dt * f.x;
+        v.y += half_dt * f.y;
+        v.z += half_dt * f.z;
+        vel[i] = v;
+        v2 = v.x * v.x + v.y * v.y + v.z * v.z;
+    }
+
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        v2 += __shfl_down_sync(0xFFFFFFFF, v2, offset);
+    }
+
+    if (tid % 32 == 0) {
+        sdata[tid / 32] = v2;
+    }
+    __syncthreads();
+
+    if (tid < 32) {
+        float val = (tid < blockDim.x / 32) ? sdata[tid] : 0.0f;
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            val += __shfl_down_sync(0xFFFFFFFF, val, offset);
+        }
+        if (tid == 0) {
+            atomicAdd(ke_out, val);
+        }
+    }
+}
+
+void launch_nh_nvt_v_half_ke_reduce(float4* vel, const float4* force,
+                                     float* ke_out, int natoms, float half_dt,
+                                     cudaStream_t stream) {
+    int blocks = div_ceil(natoms, 256);
+    nh_nvt_v_half_ke_reduce_kernel<<<blocks, 256, 0, stream>>>(
+        vel, force, ke_out, natoms, half_dt);
+}
+
+// --- Lightweight KE-only reduction ---
+// Much cheaper than compute_thermo: single kernel + single D2H copy + sync.
+// Used for NH chain thermostat where only total KE is needed.
+
+__global__ void ke_reduce_kernel(const float4* __restrict__ vel,
+                                  float* __restrict__ ke_out,
+                                  int natoms) {
+    __shared__ float sdata[32];
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int tid = threadIdx.x;
+
+    float v2 = 0.0f;
+    if (i < natoms) {
+        float4 v = vel[i];
+        v2 = v.x * v.x + v.y * v.y + v.z * v.z;
+    }
+
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        v2 += __shfl_down_sync(0xFFFFFFFF, v2, offset);
+    }
+
+    if (tid % 32 == 0) {
+        sdata[tid / 32] = v2;
+    }
+    __syncthreads();
+
+    if (tid < 32) {
+        float val = (tid < blockDim.x / 32) ? sdata[tid] : 0.0f;
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            val += __shfl_down_sync(0xFFFFFFFF, val, offset);
+        }
+        if (tid == 0) {
+            atomicAdd(ke_out, val);
+        }
+    }
+}
+
+float compute_ke_only(const float4* vel, int natoms,
+                      float* d_ke_buf, cudaStream_t stream) {
+    CUDA_CHECK(cudaMemsetAsync(d_ke_buf, 0, sizeof(float), stream));
+    int blocks = div_ceil(natoms, 256);
+    ke_reduce_kernel<<<blocks, 256, 0, stream>>>(vel, d_ke_buf, natoms);
+    float ke_total;
+    CUDA_CHECK(cudaMemcpyAsync(&ke_total, d_ke_buf, sizeof(float),
+                                cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    return 0.5f * ke_total;
 }

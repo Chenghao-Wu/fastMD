@@ -142,6 +142,11 @@ int main(int argc, char** argv) {
         thermo_bufs.open_file(params.thermo_file);
     }
 
+    float* d_ke_buf = nullptr;
+    if (params.ensemble != Ensemble::Langevin) {
+        CUDA_CHECK(cudaMalloc(&d_ke_buf, sizeof(float)));
+    }
+
     RgBuffers rg_bufs;
     std::vector<int> chain_offsets;
     std::vector<int> chain_lengths;
@@ -304,6 +309,15 @@ int main(int argc, char** argv) {
         (void)init_thermo;
     }
 
+    float chain_KE = 0.0f;
+    if (params.ensemble == Ensemble::NVT_NH) {
+        ThermoOutput init_thermo;
+        compute_thermo(sys.vel, sys.force, sys.virial,
+                       params.natoms, params.box_L, &init_thermo,
+                       thermo_bufs, 0, nullptr);
+        chain_KE = init_thermo.kinetic_energy * params.natoms;
+    }
+
     float half_dt = 0.5f * params.dt;
 
     auto t_start = std::chrono::steady_clock::now();
@@ -346,14 +360,12 @@ int main(int argc, char** argv) {
 
             float hdt = 0.5f * params.dt;
 
-            // Compute thermo for total KE and virial
-            ThermoOutput nh_thermo;
-            compute_thermo(sys.vel, sys.force, sys.virial,
-                           params.natoms, nose_hoover.L, &nh_thermo,
-                           thermo_bufs, step, nullptr);
-            float chain_KE = nh_thermo.kinetic_energy;
-
             if (nose_hoover.is_npt) {
+                ThermoOutput nh_thermo;
+                compute_thermo(sys.vel, sys.force, sys.virial,
+                               params.natoms, nose_hoover.L, &nh_thermo,
+                               thermo_bufs, step, nullptr);
+                chain_KE = nh_thermo.kinetic_energy * params.natoms;
                 // Barostat half-step on host (Suzuki-Yoshida)
                 static const float sy_w[3] = {
                     1.0f / (2.0f - cbrtf(2.0f)),
@@ -388,38 +400,39 @@ int main(int argc, char** argv) {
                 nose_hoover.L = cbrtf(nose_hoover.V);
                 nose_hoover.inv_L = 1.0f / nose_hoover.L;
 
-                // Barostat velocity rescale
+                // Barostat velocity scale (fused into pre-force kernel below)
                 float v_eps_W = nose_hoover.v_eps / nose_hoover.W;
-                launch_nh_barostat_vel_half(sys.vel, v_eps_W, N_f_inv,
-                                             params.natoms, hdt);
-
-                // Update KE analytically: KE_new = KE_old * baro_scale^2
                 float baro_scale = expf(-(1.0f + 3.0f * N_f_inv)
                                           * v_eps_W * hdt);
                 chain_KE *= baro_scale * baro_scale;
+
+                // Position update barostat parameters
+                float pos_exp_vW = expf(v_eps_W * params.dt);
+                float pos_vW_dt = v_eps_W * params.dt;
+
+                // NH chain thermostat
+                float nh_scale;
+                nh_propagate_chain(nose_hoover, chain_KE, hdt, nh_scale);
+
+                // Fused pre-force: barostat+thermostat scale + v-half + position update
+                launch_nh_npt_pre_force_fused(
+                    sys.pos, sys.vel, sys.force,
+                    sys.pos_ref, sys.d_max_dr2_int, sys.d_image,
+                    nh_scale, baro_scale, hdt, params.dt,
+                    pos_exp_vW, pos_vW_dt,
+                    params.natoms, nose_hoover.L, nose_hoover.inv_L);
+            } else {
+                // NVT: host-side NH chain thermostat + fused pre-force
+                float nh_scale;
+                nh_propagate_chain(nose_hoover, chain_KE, hdt, nh_scale);
+
+                // Fused pre-force: thermostat scale + v-half + position update
+                launch_nh_nvt_pre_force_fused(
+                    sys.pos, sys.vel, sys.force,
+                    sys.pos_ref, sys.d_max_dr2_int, sys.d_image,
+                    nh_scale, hdt, params.dt,
+                    params.natoms, nose_hoover.L, nose_hoover.inv_L);
             }
-
-            // System-wide NH chain thermostat with current KE
-            float nh_scale;
-            nh_propagate_chain(nose_hoover, chain_KE, hdt, nh_scale);
-            launch_nh_global_scale_vel(sys.vel, nh_scale, params.natoms);
-
-            // Half-step velocity Verlet
-            launch_nh_v_verlet_half(sys.vel, sys.force, params.natoms, hdt);
-
-            // Position update
-            float pos_exp_vW = 1.0f;
-            float pos_vW_dt = 0.0f;
-            if (nose_hoover.is_npt) {
-                float v_eps_W = nose_hoover.v_eps / nose_hoover.W;
-                pos_vW_dt = v_eps_W * params.dt;
-                pos_exp_vW = expf(pos_vW_dt);
-            }
-            launch_nh_update_pos(sys.pos, sys.vel, sys.pos_ref,
-                                  sys.d_image, sys.d_max_dr2_int,
-                                  params.natoms, nose_hoover.L,
-                                  nose_hoover.inv_L,
-                                  pos_exp_vW, pos_vW_dt, params.dt);
         }
 
         // --- Verlet rebuild check (common to both paths) ---
@@ -503,17 +516,16 @@ int main(int argc, char** argv) {
             // --- NH post-force ---
             float hdt = 0.5f * params.dt;
 
-            // Velocity Verlet half-step
-            launch_nh_v_verlet_half(sys.vel, sys.force, params.natoms, hdt);
-
-            // Compute thermo for current KE
-            ThermoOutput nh_thermo2;
-            compute_thermo(sys.vel, sys.force, sys.virial,
-                           params.natoms, nose_hoover.L, &nh_thermo2,
-                           thermo_bufs, step, nullptr);
-            float chain_KE2 = nh_thermo2.kinetic_energy;
-
+            float chain_KE2;
             if (nose_hoover.is_npt) {
+                // NPT: velocity Verlet half-step (NVT fused kernel below handles this)
+                launch_nh_v_verlet_half(sys.vel, sys.force, params.natoms, hdt);
+                ThermoOutput nh_thermo2;
+                compute_thermo(sys.vel, sys.force, sys.virial,
+                               params.natoms, nose_hoover.L, &nh_thermo2,
+                               thermo_bufs, step, nullptr);
+                chain_KE2 = nh_thermo2.kinetic_energy * params.natoms;
+
                 float v_eps_W = nose_hoover.v_eps / nose_hoover.W;
                 float N_f_inv = 1.0f / (3.0f * params.natoms);
                 launch_nh_barostat_vel_half(sys.vel, v_eps_W, N_f_inv,
@@ -550,15 +562,27 @@ int main(int argc, char** argv) {
                               * expf(3.0f * nose_hoover.eps);
                 nose_hoover.L = cbrtf(nose_hoover.V);
                 nose_hoover.inv_L = 1.0f / nose_hoover.L;
+            } else {
+                // NVT: fused v-half + KE reduction (single kernel pass)
+                CUDA_CHECK(cudaMemsetAsync(d_ke_buf, 0, sizeof(float), 0));
+                launch_nh_nvt_v_half_ke_reduce(sys.vel, sys.force, d_ke_buf,
+                                                params.natoms, hdt);
+                CUDA_CHECK(cudaMemcpyAsync(&chain_KE2, d_ke_buf, sizeof(float),
+                                            cudaMemcpyDeviceToHost, 0));
+                CUDA_CHECK(cudaStreamSynchronize(0));
+                chain_KE2 *= 0.5f;
             }
 
             // System-wide NH chain thermostat with current KE
             float nh_scale2;
             nh_propagate_chain(nose_hoover, chain_KE2, hdt, nh_scale2);
             launch_nh_global_scale_vel(sys.vel, nh_scale2, params.natoms);
+
+            // Carry KE forward to next step's pre-force chain thermostat
+            chain_KE = chain_KE2 * nh_scale2 * nh_scale2;
         }
 
-        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaStreamSynchronize(0));
 
         bool need_thermo = params.thermo_on && (step % params.thermo_freq == 0);
         bool need_stress = params.stress_on && (step % params.stress_freq == 0);
@@ -718,6 +742,7 @@ int main(int argc, char** argv) {
     if (params.stress_on) correlator.free();
     if (params.ensemble != Ensemble::Langevin) {
         nose_hoover.free();
+        CUDA_CHECK(cudaFree(d_ke_buf));
     }
     langevin.free();
     verlet.free();

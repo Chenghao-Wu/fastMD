@@ -49,9 +49,11 @@ def parse_fastmd_thermo(stdout: str):
             parts = line.split()
             for i, p in enumerate(parts):
                 if p.startswith("T="):
-                    temps.append(float(p[2:]))
+                    val = p[2:] if len(p) > 2 else parts[i + 1]
+                    temps.append(float(val))
                 elif p.startswith("PE="):
-                    pes.append(float(p[3:]))
+                    val = p[3:] if len(p) > 3 else parts[i + 1]
+                    pes.append(float(val))
     return temps, pes
 
 
@@ -86,7 +88,7 @@ def validate(temps_f, pes_f, temps_l, pes_l, ensemble: dict, cfg: dict):
     avg_t_f = sum(temps_f[-n:]) / n
     avg_t_l = sum(temps_l[-n:]) / n
     avg_pe_f = sum(pes_f[-n:]) / n
-    avg_pe_l = sum(pes_l[-n:]) / n * cfg["natoms"]
+    avg_pe_l = sum(pes_l[-n:]) / n
 
     rel_temp_diff = abs(avg_t_f - avg_t_l) / ensemble["T_start"]
     rel_pe_diff = abs(avg_pe_f - avg_pe_l) / abs(avg_pe_l) if avg_pe_l != 0 else abs(avg_pe_f - avg_pe_l)
