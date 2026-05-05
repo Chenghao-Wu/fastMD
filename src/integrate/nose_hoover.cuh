@@ -88,7 +88,8 @@ void nh_propagate_chain(NoseHooverState& nh, float total_KE,
 void launch_nh_nvt_pre_force_fused(float4* pos, float4* vel, const float4* force,
                                     const float4* pos_ref,
                                     int* d_max_dr2_int, int* d_image,
-                                    float nh_scale, float half_dt, float dt,
+                                    const NoseHooverDeviceState* d_state,
+                                    float half_dt, float dt,
                                     int natoms, float L, float inv_L,
                                     cudaStream_t stream = 0);
 
@@ -109,7 +110,8 @@ void launch_nh_nvt_v_half_ke_reduce(float4* vel, const float4* force,
                                      cudaStream_t stream = 0);
 
 // --- Original (non-fused) kernels, still used by NPT post-force ---
-void launch_nh_global_scale_vel(float4* vel, float scale,
+void launch_nh_global_scale_vel(float4* vel,
+                                 const NoseHooverDeviceState* d_state,
                                  int natoms, cudaStream_t stream = 0);
 
 void launch_nh_barostat_vel_half(float4* vel, float v_eps_W,

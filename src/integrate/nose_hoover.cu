@@ -300,11 +300,13 @@ void nh_propagate_chain(NoseHooverState& nh, float total_KE,
 
 __global__ void nh_global_scale_vel_kernel(
     float4* __restrict__ vel,
-    float scale, int natoms)
+    const NoseHooverDeviceState* __restrict__ d_state,
+    int natoms)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= natoms) return;
 
+    float scale = d_state->nh_scale;
     float4 v = vel[i];
     v.x *= scale;
     v.y *= scale;
@@ -312,11 +314,12 @@ __global__ void nh_global_scale_vel_kernel(
     vel[i] = v;
 }
 
-void launch_nh_global_scale_vel(float4* vel, float scale,
+void launch_nh_global_scale_vel(float4* vel,
+                                 const NoseHooverDeviceState* d_state,
                                  int natoms, cudaStream_t stream) {
     int blocks = div_ceil(natoms, 256);
     nh_global_scale_vel_kernel<<<blocks, 256, 0, stream>>>(
-        vel, scale, natoms);
+        vel, d_state, natoms);
 }
 
 // --- Barostat velocity rescale kernel ---
@@ -447,11 +450,14 @@ __global__ void nh_nvt_pre_force_fused_kernel(
     const float4* __restrict__ pos_ref,
     int* __restrict__ d_max_dr2_int,
     int* __restrict__ d_image,
-    float nh_scale, float half_dt, float dt,
+    const NoseHooverDeviceState* __restrict__ d_state,
+    float half_dt, float dt,
     float L, float inv_L, int natoms)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= natoms) return;
+
+    float nh_scale = d_state->nh_scale;
 
     float4 r = pos[i];
     float4 v = vel[i];
@@ -496,13 +502,14 @@ __global__ void nh_nvt_pre_force_fused_kernel(
 void launch_nh_nvt_pre_force_fused(float4* pos, float4* vel, const float4* force,
                                     const float4* pos_ref,
                                     int* d_max_dr2_int, int* d_image,
-                                    float nh_scale, float half_dt, float dt,
+                                    const NoseHooverDeviceState* d_state,
+                                    float half_dt, float dt,
                                     int natoms, float L, float inv_L,
                                     cudaStream_t stream) {
     int blocks = div_ceil(natoms, 256);
     nh_nvt_pre_force_fused_kernel<<<blocks, 256, 0, stream>>>(
         pos, vel, force, pos_ref, d_max_dr2_int, d_image,
-        nh_scale, half_dt, dt, L, inv_L, natoms);
+        d_state, half_dt, dt, L, inv_L, natoms);
 }
 
 // --- Fused NPT pre-force kernel ---

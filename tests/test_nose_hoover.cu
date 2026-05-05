@@ -109,6 +109,10 @@ TEST(NoseHoover, NVTLimitEnergyConservation) {
     NoseHooverState nh;
     nh.init(params);
 
+    NoseHooverDeviceState* d_state = nullptr;
+    allocate_nh_device_state(d_state);
+    init_nh_device_state(nh, d_state);
+
     CUDA_CHECK(cudaMemcpy(d_pos_ref, d_pos, np * sizeof(float4),
                            cudaMemcpyDeviceToDevice));
     CUDA_CHECK(cudaMemset(d_max_dr2, 0, sizeof(int)));
@@ -131,7 +135,8 @@ TEST(NoseHoover, NVTLimitEnergyConservation) {
 
         float nh_scale;
         nh_propagate_chain(nh, total_ke, hdt, nh_scale);
-        launch_nh_global_scale_vel(d_vel, nh_scale, N);
+        set_nh_scale_device(d_state, nh_scale);
+        launch_nh_global_scale_vel(d_vel, d_state, N);
 
         launch_nh_v_verlet_half(d_vel, d_force, N, hdt);
         launch_nh_update_pos(d_pos, d_vel, d_pos_ref,
@@ -154,7 +159,8 @@ TEST(NoseHoover, NVTLimitEnergyConservation) {
 
         total_ke = compute_total_ke(to_host(d_vel, N), N);
         nh_propagate_chain(nh, total_ke, hdt, nh_scale);
-        launch_nh_global_scale_vel(d_vel, nh_scale, N);
+        set_nh_scale_device(d_state, nh_scale);
+        launch_nh_global_scale_vel(d_vel, d_state, N);
         CUDA_CHECK(cudaDeviceSynchronize());
     }
 
@@ -167,6 +173,7 @@ TEST(NoseHoover, NVTLimitEnergyConservation) {
     EXPECT_LT(drift, 0.01f) << "Conserved quantity drift too large: "
                              << "E0=" << E0 << " E_final=" << E_final;
 
+    free_nh_device_state(d_state);
     nh.free();
     verlet.free();
     free_device(d_pos);
@@ -244,6 +251,10 @@ TEST(NoseHoover, NVTReachesTargetTemperature) {
     NoseHooverState nh;
     nh.init(params);
 
+    NoseHooverDeviceState* d_state = nullptr;
+    allocate_nh_device_state(d_state);
+    init_nh_device_state(nh, d_state);
+
     CUDA_CHECK(cudaMemcpy(d_pos_ref, d_pos, np * sizeof(float4),
                            cudaMemcpyDeviceToDevice));
     CUDA_CHECK(cudaMemset(d_max_dr2, 0, sizeof(int)));
@@ -265,7 +276,8 @@ TEST(NoseHoover, NVTReachesTargetTemperature) {
 
         float nh_scale;
         nh_propagate_chain(nh, total_ke, hdt, nh_scale);
-        launch_nh_global_scale_vel(d_vel, nh_scale, N);
+        set_nh_scale_device(d_state, nh_scale);
+        launch_nh_global_scale_vel(d_vel, d_state, N);
 
         launch_nh_v_verlet_half(d_vel, d_force, N, hdt);
         launch_nh_update_pos(d_pos, d_vel, d_pos_ref,
@@ -288,7 +300,8 @@ TEST(NoseHoover, NVTReachesTargetTemperature) {
 
         total_ke = compute_total_ke(to_host(d_vel, N), N);
         nh_propagate_chain(nh, total_ke, hdt, nh_scale);
-        launch_nh_global_scale_vel(d_vel, nh_scale, N);
+        set_nh_scale_device(d_state, nh_scale);
+        launch_nh_global_scale_vel(d_vel, d_state, N);
         CUDA_CHECK(cudaDeviceSynchronize());
 
         if (step >= nsteps / 2) {
@@ -303,6 +316,7 @@ TEST(NoseHoover, NVTReachesTargetTemperature) {
         << "Average temperature " << T_avg
         << " deviates too much from target " << T_target;
 
+    free_nh_device_state(d_state);
     nh.free();
     verlet.free();
     free_device(d_pos);
