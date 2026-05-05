@@ -320,6 +320,12 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaMemcpy(npt_scratch.d_V, &V0, sizeof(float), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(npt_scratch.d_L, &L0, sizeof(float), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(npt_scratch.d_inv_L, &inv_L0, sizeof(float), cudaMemcpyHostToDevice));
+
+        // Initialize chain_KE_carry for first pre-force step
+        float init_ke = compute_ke_only(sys.vel, params.natoms, d_ke_buf);
+        float init_carry = init_ke;
+        CUDA_CHECK(cudaMemcpy(&d_nh_state->chain_KE_carry, &init_carry,
+                              sizeof(float), cudaMemcpyHostToDevice));
     }
 
     if (params.ensemble == Ensemble::NVT_NH) {

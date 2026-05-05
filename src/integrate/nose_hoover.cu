@@ -194,12 +194,16 @@ __global__ void nh_npt_chain_baro_kernel(
 {
     // --- Barostat SY half-step ---
     float total_KE = use_carry ? d_state->chain_KE_carry : (*d_ke_buf * 0.5f);
-    float virial_trace = *d_virial_trace;
+    float virial_trace_raw = *d_virial_trace;
     float N_f = 3.0f * static_cast<float>(natoms);
     float N_f_inv = 1.0f / N_f;
-    float V = V0 * nh_expf(3.0f * d_state->eps);
+    float V = V0 * expf(3.0f * d_state->eps);
+    // P_inst matches host formula: KE per-particle, virial trace as stress (÷V)
+    float KE_per_atom = total_KE / static_cast<float>(natoms);
+    float P_inst = (2.0f * KE_per_atom - virial_trace_raw / V) / (3.0f * V);
+
+    // total_KE is used by barostat scaling and chain; keep it as total KE
     float KE = total_KE;
-    float P_inst = (2.0f * KE - virial_trace) / (3.0f * V);
 
     // Suzuki-Yoshida weights
     float sy_w[3];
@@ -212,13 +216,13 @@ __global__ void nh_npt_chain_baro_kernel(
         float dv_eps = 3.0f * V * (P_inst - d_state->P_target) * w;
         float v_eps_half = d_state->v_eps + 0.5f * dv_eps;
         d_state->eps += v_eps_half * w / W;
-        dv_eps = 3.0f * V0 * nh_expf(3.0f * d_state->eps)
+        dv_eps = 3.0f * V0 * expf(3.0f * d_state->eps)
                  * (P_inst - d_state->P_target) * w;
         d_state->v_eps += dv_eps;
     }
 
     // Update volume
-    V = V0 * nh_expf(3.0f * d_state->eps);
+    V = V0 * expf(3.0f * d_state->eps);
     float L = cbrtf(V);
     float inv_L = 1.0f / L;
     *d_V = V;
@@ -228,12 +232,12 @@ __global__ void nh_npt_chain_baro_kernel(
     // Barostat velocity scale (applied in pre-force fused kernel)
     float v_eps_W = d_state->v_eps / W;
     *d_v_eps_W = v_eps_W;
-    *d_baro_scale = nh_expf(-(1.0f + 3.0f * N_f_inv) * v_eps_W * half_dt);
+    *d_baro_scale = expf(-(1.0f + 3.0f * N_f_inv) * v_eps_W * half_dt);
     float baro_scale = *d_baro_scale;
     KE *= baro_scale * baro_scale;
 
     // Position update barostat parameters
-    *d_exp_vW = nh_expf(v_eps_W * dt);
+    *d_exp_vW = expf(v_eps_W * dt);
     *d_v_eps_W_dt = v_eps_W * dt;
 
     // --- NH chain (same as NVT, but uses barostat-scaled KE) ---
