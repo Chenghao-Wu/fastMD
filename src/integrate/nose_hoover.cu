@@ -43,6 +43,28 @@ void set_nh_targets_device(NoseHooverDeviceState* d_state,
                           cudaMemcpyHostToDevice));
 }
 
+void allocate_npt_scratch(NoseHooverNPTScratch& s) {
+    CUDA_CHECK(cudaMalloc(&s.d_V, sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&s.d_L, sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&s.d_inv_L, sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&s.d_baro_scale, sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&s.d_exp_vW, sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&s.d_v_eps_W, sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&s.d_v_eps_W_dt, sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&s.d_virial_trace, sizeof(float)));
+}
+
+void free_npt_scratch(NoseHooverNPTScratch& s) {
+    CUDA_CHECK(cudaFree(s.d_V));
+    CUDA_CHECK(cudaFree(s.d_L));
+    CUDA_CHECK(cudaFree(s.d_inv_L));
+    CUDA_CHECK(cudaFree(s.d_baro_scale));
+    CUDA_CHECK(cudaFree(s.d_exp_vW));
+    CUDA_CHECK(cudaFree(s.d_v_eps_W));
+    CUDA_CHECK(cudaFree(s.d_v_eps_W_dt));
+    CUDA_CHECK(cudaFree(s.d_virial_trace));
+}
+
 // Bit-identical exp approximation for NH chain.
 // Arguments are always small negated products (~ -1e-6 to -1e-2), so a 6th-order
 // Taylor series around 0 gives ~1e-7 relative error — more than adequate.
@@ -151,6 +173,128 @@ __global__ void nh_propagate_chain_kernel(
     // Carry KE forward only for post-force calls (use_carry=false)
     if (!use_carry) {
         d_state->chain_KE_carry = total_KE * scale * scale;
+    }
+}
+
+// --- NPT chain + barostat GPU kernel ---
+// Combined barostat Suzuki-Yoshida half-step + NH chain propagation.
+// Pre-force (use_carry=true): reads chain_KE_carry, updates eps/v_eps/V/L/inv_L.
+// Post-force (use_carry=false): reads raw KE from d_ke_buf, second barostat half-step.
+
+__global__ void nh_npt_chain_baro_kernel(
+    NoseHooverDeviceState* __restrict__ d_state,
+    const float* __restrict__ d_ke_buf,
+    const float* __restrict__ d_virial_trace,
+    bool use_carry,
+    int M, float Q1, float Q_rest, float W,
+    float half_dt, float dt,
+    float V0, int natoms,
+    float* d_V, float* d_L, float* d_inv_L,
+    float* d_baro_scale, float* d_exp_vW, float* d_v_eps_W, float* d_v_eps_W_dt)
+{
+    // --- Barostat SY half-step ---
+    float total_KE = use_carry ? d_state->chain_KE_carry : (*d_ke_buf * 0.5f);
+    float virial_trace = *d_virial_trace;
+    float N_f = 3.0f * static_cast<float>(natoms);
+    float N_f_inv = 1.0f / N_f;
+    float V = V0 * nh_expf(3.0f * d_state->eps);
+    float KE = total_KE;
+    float P_inst = (2.0f * KE - virial_trace) / (3.0f * V);
+
+    // Suzuki-Yoshida weights
+    float sy_w[3];
+    sy_w[0] = 1.0f / (2.0f - cbrtf(2.0f));
+    sy_w[1] = -cbrtf(2.0f) / (2.0f - cbrtf(2.0f));
+    sy_w[2] = 1.0f / (2.0f - cbrtf(2.0f));
+
+    for (int sy = 0; sy < 3; sy++) {
+        float w = sy_w[sy] * half_dt;
+        float dv_eps = 3.0f * V * (P_inst - d_state->P_target) * w;
+        float v_eps_half = d_state->v_eps + 0.5f * dv_eps;
+        d_state->eps += v_eps_half * w / W;
+        dv_eps = 3.0f * V0 * nh_expf(3.0f * d_state->eps)
+                 * (P_inst - d_state->P_target) * w;
+        d_state->v_eps += dv_eps;
+    }
+
+    // Update volume
+    V = V0 * nh_expf(3.0f * d_state->eps);
+    float L = cbrtf(V);
+    float inv_L = 1.0f / L;
+    *d_V = V;
+    *d_L = L;
+    *d_inv_L = inv_L;
+
+    // Barostat velocity scale (applied in pre-force fused kernel)
+    float v_eps_W = d_state->v_eps / W;
+    *d_v_eps_W = v_eps_W;
+    *d_baro_scale = nh_expf(-(1.0f + 3.0f * N_f_inv) * v_eps_W * half_dt);
+    float baro_scale = *d_baro_scale;
+    KE *= baro_scale * baro_scale;
+
+    // Position update barostat parameters
+    *d_exp_vW = nh_expf(v_eps_W * dt);
+    *d_v_eps_W_dt = v_eps_W * dt;
+
+    // --- NH chain (same as NVT, but uses barostat-scaled KE) ---
+    float kT_target = d_state->T_target;
+    float dt2 = half_dt;
+    float dt4 = half_dt * 0.5f;
+    float dt8 = half_dt * 0.25f;
+
+    float v_xi_dotdot[10] = {};
+    float T_current = (2.0f * KE) / N_f;
+
+    if (Q1 > 0.0f) {
+        v_xi_dotdot[0] = (N_f * T_current - N_f * kT_target) / Q1;
+    }
+
+    int nc_tchain = 1;
+    float ncfac = 1.0f / static_cast<float>(nc_tchain);
+    float scale = 1.0f;
+
+    for (int iloop = 0; iloop < nc_tchain; iloop++) {
+        for (int ich = M - 1; ich > 0; ich--) {
+            float expfac = (ich + 1 < M)
+                ? nh_expf(-ncfac * dt8 * d_state->v_xi[ich + 1]) : 1.0f;
+            d_state->v_xi[ich] *= expfac;
+            d_state->v_xi[ich] += v_xi_dotdot[ich] * ncfac * dt4;
+            d_state->v_xi[ich] *= expfac;
+        }
+        float expfac0 = (M > 1)
+            ? nh_expf(-ncfac * dt8 * d_state->v_xi[1]) : 1.0f;
+        d_state->v_xi[0] *= expfac0;
+        d_state->v_xi[0] += v_xi_dotdot[0] * ncfac * dt4;
+        d_state->v_xi[0] *= expfac0;
+
+        float factor_eta = nh_expf(-ncfac * dt2 * d_state->v_xi[0]);
+        scale = factor_eta;
+        T_current *= factor_eta * factor_eta;
+
+        if (Q1 > 0.0f) {
+            v_xi_dotdot[0] = (N_f * T_current - N_f * kT_target) / Q1;
+        }
+        for (int ich = 0; ich < M; ich++) {
+            d_state->xi[ich] += ncfac * dt2 * d_state->v_xi[ich];
+        }
+        d_state->v_xi[0] *= expfac0;
+        d_state->v_xi[0] += v_xi_dotdot[0] * ncfac * dt4;
+        d_state->v_xi[0] *= expfac0;
+        for (int ich = 1; ich < M; ich++) {
+            float expfac = (ich + 1 < M)
+                ? nh_expf(-ncfac * dt8 * d_state->v_xi[ich + 1]) : 1.0f;
+            d_state->v_xi[ich] *= expfac;
+            float Q_prev = (ich == 1) ? Q1 : Q_rest;
+            v_xi_dotdot[ich] = (Q_prev * d_state->v_xi[ich - 1] * d_state->v_xi[ich - 1]
+                                - kT_target) / Q_rest;
+            d_state->v_xi[ich] += v_xi_dotdot[ich] * ncfac * dt4;
+            d_state->v_xi[ich] *= expfac;
+        }
+    }
+
+    d_state->nh_scale = scale;
+    if (!use_carry) {
+        d_state->chain_KE_carry = KE * scale * scale;
     }
 }
 

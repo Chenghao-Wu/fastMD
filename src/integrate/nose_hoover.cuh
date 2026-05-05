@@ -103,6 +103,23 @@ void launch_nh_npt_pre_force_fused(float4* pos, float4* vel, const float4* force
                                     int natoms, float L, float inv_L,
                                     cudaStream_t stream = 0);
 
+// --- NPT scratch buffers ---
+// Holds per-step outputs from the NPT chain+barostat kernel that are
+// consumed by subsequent velocity/position kernels in the same step.
+struct NoseHooverNPTScratch {
+    float* d_V;
+    float* d_L;
+    float* d_inv_L;
+    float* d_baro_scale;
+    float* d_exp_vW;
+    float* d_v_eps_W;
+    float* d_v_eps_W_dt;
+    float* d_virial_trace;
+};
+
+void allocate_npt_scratch(NoseHooverNPTScratch& s);
+void free_npt_scratch(NoseHooverNPTScratch& s);
+
 // Lightweight kernel: compute KE (trace of v^2 tensor) into d_ke_out
 // and sum virial trace from d_virial (6-component) into d_virial_trace_out.
 // Replaces the heavy compute_thermo in the NPT inner loop.
@@ -110,6 +127,23 @@ void launch_nh_npt_ke_and_virial_trace(
     const float4* vel, const float* virial,
     float* d_ke_out, float* d_virial_trace_out,
     int natoms, cudaStream_t stream = 0);
+
+// Combined NPT barostat SY half-step + NH chain propagation on GPU.
+// Reads KE from d_ke_buf and virial trace from d_virial_trace.
+// Updates d_state->eps, v_eps, xi, v_xi, nh_scale, chain_KE_carry.
+// Writes volume-dependent parameters to NPT scratch for subsequent kernels.
+// If use_carry: pre-force call (reads chain_KE_carry, updates eps/v_eps).
+// If !use_carry: post-force call (reads raw KE, second barostat half-step).
+__global__ void nh_npt_chain_baro_kernel(
+    NoseHooverDeviceState* __restrict__ d_state,
+    const float* __restrict__ d_ke_buf,
+    const float* __restrict__ d_virial_trace,
+    bool use_carry,
+    int M, float Q1, float Q_rest, float W,
+    float half_dt, float dt,
+    float V0, int natoms,
+    float* d_V, float* d_L, float* d_inv_L,
+    float* d_baro_scale, float* d_exp_vW, float* d_v_eps_W, float* d_v_eps_W_dt);
 
 // --- Fused post-force kernel ---
 // NVT: velocity half-step + KE reduction in a single pass
