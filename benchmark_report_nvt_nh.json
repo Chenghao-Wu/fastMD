@@ -1,0 +1,22 @@
+{
+  "timestamp": "2026-05-05T07:07:51.206213+00:00",
+  "gpu": "NVIDIA GeForce RTX 4090 D",
+  "ensemble": "nvt_nh",
+  "system": "/home/zhenghaowu/fastMD/data/input_000_minimized.data",
+  "n_atoms": 30000,
+  "nsteps": 100000,
+  "fastMD": {
+    "wall_time_s": 12.29,
+    "ns_per_day": 703209.09
+  },
+  "lammps": {
+    "wall_time_s": 130.93,
+    "ns_per_day": 65987.42
+  },
+  "speedup": 10.66,
+  "validation": {
+    "passed": true,
+    "rel_temp_diff": 2.1742200000007816e-05,
+    "rel_pe_diff": 6.140747642972913e-05
+  }
+}
