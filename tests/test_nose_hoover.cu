@@ -372,7 +372,9 @@ TEST(NoseHoover, GPUChainMatchesHost) {
         float host_scale;
         nh_propagate_chain(nh_copy, ke, hdt, host_scale);
 
-        CUDA_CHECK(cudaMemcpy(d_ke, &ke, sizeof(float), cudaMemcpyHostToDevice));
+        // GPU kernel multiplies d_ke_buf by 0.5f internally; pass raw sum(v^2)
+        float ke_raw = ke * 2.0f;
+        CUDA_CHECK(cudaMemcpy(d_ke, &ke_raw, sizeof(float), cudaMemcpyHostToDevice));
         nh_propagate_chain_kernel<<<1, 32>>>(
             d_state, d_ke, false, M, nh_host.Q1, nh_host.Q_rest, hdt, N);
         CUDA_CHECK(cudaDeviceSynchronize());
