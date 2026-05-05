@@ -103,6 +103,14 @@ void launch_nh_npt_pre_force_fused(float4* pos, float4* vel, const float4* force
                                     int natoms, float L, float inv_L,
                                     cudaStream_t stream = 0);
 
+// Lightweight kernel: compute KE (trace of v^2 tensor) into d_ke_out
+// and sum virial trace from d_virial (6-component) into d_virial_trace_out.
+// Replaces the heavy compute_thermo in the NPT inner loop.
+void launch_nh_npt_ke_and_virial_trace(
+    const float4* vel, const float* virial,
+    float* d_ke_out, float* d_virial_trace_out,
+    int natoms, cudaStream_t stream = 0);
+
 // --- Fused post-force kernel ---
 // NVT: velocity half-step + KE reduction in a single pass
 void launch_nh_nvt_v_half_ke_reduce(float4* vel, const float4* force,

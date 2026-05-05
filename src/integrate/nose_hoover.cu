@@ -67,7 +67,7 @@ __global__ void nh_propagate_chain_kernel(
     int M, float Q1, float Q_rest,
     float half_dt, int natoms)
 {
-    float total_KE = use_carry ? d_state->chain_KE_carry : *d_ke_buf;
+    float total_KE = use_carry ? d_state->chain_KE_carry : (*d_ke_buf * 0.5f);
     float kT_target = d_state->T_target;
     float N_f = 3.0f * static_cast<float>(natoms);
 
@@ -593,6 +593,65 @@ void launch_nh_npt_pre_force_fused(float4* pos, float4* vel, const float4* force
         pos, vel, force, pos_ref, d_max_dr2_int, d_image,
         nh_scale, baro_scale, half_dt, dt, exp_vW, v_eps_W_dt,
         L, inv_L, natoms);
+}
+
+// --- Lightweight KE + virial-trace kernel for NPT ---
+// Computes KE (sum of v^2) into d_ke_out. Only block 0 writes the
+// virial trace (sum of 3 diagonal virial components) to d_virial_trace_out.
+
+__global__ void nh_npt_ke_virial_trace_kernel(
+    const float4* __restrict__ vel,
+    const float* __restrict__ virial,
+    float* __restrict__ d_ke_out,
+    float* __restrict__ d_virial_trace_out,
+    int natoms)
+{
+    __shared__ float sdata[32];
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int tid = threadIdx.x;
+
+    float v2 = 0.0f;
+    if (i < natoms) {
+        float4 v = vel[i];
+        v2 = v.x * v.x + v.y * v.y + v.z * v.z;
+    }
+
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        v2 += __shfl_down_sync(0xFFFFFFFF, v2, offset);
+    }
+
+    if (tid % 32 == 0) {
+        sdata[tid / 32] = v2;
+    }
+    __syncthreads();
+
+    if (tid < 32) {
+        float val = (tid < blockDim.x / 32) ? sdata[tid] : 0.0f;
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            val += __shfl_down_sync(0xFFFFFFFF, val, offset);
+        }
+        if (tid == 0) {
+            atomicAdd(d_ke_out, val);
+        }
+    }
+
+    // Virial trace: only block 0 writes it (once)
+    if (blockIdx.x == 0 && tid == 0) {
+        float vt = virial[0] + virial[3] + virial[5];
+        *d_virial_trace_out = vt;
+    }
+}
+
+void launch_nh_npt_ke_and_virial_trace(
+    const float4* vel, const float* virial,
+    float* d_ke_out, float* d_virial_trace_out,
+    int natoms, cudaStream_t stream)
+{
+    CUDA_CHECK(cudaMemsetAsync(d_ke_out, 0, sizeof(float), stream));
+    CUDA_CHECK(cudaMemsetAsync(d_virial_trace_out, 0, sizeof(float), stream));
+    int blocks = div_ceil(natoms, 256);
+    nh_npt_ke_virial_trace_kernel<<<blocks, 256, 0, stream>>>(
+        vel, virial, d_ke_out, d_virial_trace_out, natoms);
 }
 
 // --- Fused NVT post-force v-half + KE reduction kernel ---
