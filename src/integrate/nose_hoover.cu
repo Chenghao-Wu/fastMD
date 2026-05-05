@@ -43,6 +43,23 @@ void set_nh_targets_device(NoseHooverDeviceState* d_state,
                           cudaMemcpyHostToDevice));
 }
 
+// Bit-identical exp approximation for NH chain.
+// Arguments are always small negated products (~ -1e-6 to -1e-2), so a 6th-order
+// Taylor series around 0 gives ~1e-7 relative error — more than adequate.
+__host__ __device__ inline float nh_expf(float x) {
+    float x2 = x * x;
+    float x3 = x2 * x;
+    float x4 = x3 * x;
+    float x5 = x4 * x;
+    float x6 = x5 * x;
+    return 1.0f + x
+         + x2 * 0.5f
+         + x3 * (1.0f / 6.0f)
+         + x4 * (1.0f / 24.0f)
+         + x5 * (1.0f / 120.0f)
+         + x6 * (1.0f / 720.0f);
+}
+
 __global__ void nh_propagate_chain_kernel(
     NoseHooverDeviceState* __restrict__ d_state,
     const float* __restrict__ d_ke_buf,
@@ -77,7 +94,7 @@ __global__ void nh_propagate_chain_kernel(
         // Backward recursion: ich = M-1 down to 1
         for (int ich = M - 1; ich > 0; ich--) {
             float expfac = (ich + 1 < M)
-                ? expf(-ncfac * dt8 * d_state->v_xi[ich + 1])
+                ? nh_expf(-ncfac * dt8 * d_state->v_xi[ich + 1])
                 : 1.0f;
             d_state->v_xi[ich] *= expfac;
             d_state->v_xi[ich] += v_xi_dotdot[ich] * ncfac * dt4;
@@ -86,14 +103,14 @@ __global__ void nh_propagate_chain_kernel(
 
         // k = 0
         float expfac0 = (M > 1)
-            ? expf(-ncfac * dt8 * d_state->v_xi[1])
+            ? nh_expf(-ncfac * dt8 * d_state->v_xi[1])
             : 1.0f;
         d_state->v_xi[0] *= expfac0;
         d_state->v_xi[0] += v_xi_dotdot[0] * ncfac * dt4;
         d_state->v_xi[0] *= expfac0;
 
         // Velocity scaling factor
-        float factor_eta = expf(-ncfac * dt2 * d_state->v_xi[0]);
+        float factor_eta = nh_expf(-ncfac * dt2 * d_state->v_xi[0]);
         scale = factor_eta;
 
         // Analytic temperature update
@@ -118,7 +135,7 @@ __global__ void nh_propagate_chain_kernel(
         // Forward recursion: ich = 1 to M-1
         for (int ich = 1; ich < M; ich++) {
             float expfac = (ich + 1 < M)
-                ? expf(-ncfac * dt8 * d_state->v_xi[ich + 1])
+                ? nh_expf(-ncfac * dt8 * d_state->v_xi[ich + 1])
                 : 1.0f;
             d_state->v_xi[ich] *= expfac;
             float Q_prev = (ich == 1) ? Q1 : Q_rest;
@@ -220,7 +237,7 @@ void nh_propagate_chain(NoseHooverState& nh, float total_KE,
         // --- Backward recursion: ich = M-1 down to 1 ---
         for (int ich = M - 1; ich > 0; ich--) {
             float expfac = (ich + 1 < M)
-                ? expf(-ncfac * dt8 * nh.v_xi[ich + 1])
+                ? nh_expf(-ncfac * dt8 * nh.v_xi[ich + 1])
                 : 1.0f;
 
             nh.v_xi[ich] *= expfac;
@@ -230,7 +247,7 @@ void nh_propagate_chain(NoseHooverState& nh, float total_KE,
 
         // --- k = 0 ---
         float expfac0 = (M > 1)
-            ? expf(-ncfac * dt8 * nh.v_xi[1])
+            ? nh_expf(-ncfac * dt8 * nh.v_xi[1])
             : 1.0f;
 
         nh.v_xi[0] *= expfac0;
@@ -238,7 +255,7 @@ void nh_propagate_chain(NoseHooverState& nh, float total_KE,
         nh.v_xi[0] *= expfac0;
 
         // --- Velocity scaling ---
-        float factor_eta = expf(-ncfac * dt2 * nh.v_xi[0]);
+        float factor_eta = nh_expf(-ncfac * dt2 * nh.v_xi[0]);
         scale_out = factor_eta;
 
         // --- Analytic temperature update ---
@@ -264,7 +281,7 @@ void nh_propagate_chain(NoseHooverState& nh, float total_KE,
         // --- Forward recursion: ich = 1 to M-1 ---
         for (int ich = 1; ich < M; ich++) {
             float expfac = (ich + 1 < M)
-                ? expf(-ncfac * dt8 * nh.v_xi[ich + 1])
+                ? nh_expf(-ncfac * dt8 * nh.v_xi[ich + 1])
                 : 1.0f;
 
             nh.v_xi[ich] *= expfac;

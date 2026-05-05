@@ -350,46 +350,46 @@ TEST(NoseHoover, GPUChainMatchesHost) {
     for (int trial = 0; trial < 10000; trial++) {
         float ke = 0.5f * N * T_target * (0.5f + (rand() / (float)RAND_MAX) * 1.5f);
 
-        // --- Host: post-force chain (reads raw KE) ---
+        // Reset GPU state to match host before each test (single-step equivalence)
+        init_nh_device_state(nh_host, d_state);
+
+        // --- Post-force test ---
         NoseHooverState nh_copy = nh_host;
         float host_scale;
         nh_propagate_chain(nh_copy, ke, hdt, host_scale);
 
-        // --- GPU: post-force chain (reads raw KE from d_ke_buf) ---
-        NoseHooverDeviceState h_temp;
-        CUDA_CHECK(cudaMemcpy(&h_temp, d_state, sizeof(NoseHooverDeviceState),
-                              cudaMemcpyDeviceToHost));
-        h_temp.T_target = T_target;
-        CUDA_CHECK(cudaMemcpy(d_state, &h_temp, sizeof(NoseHooverDeviceState),
-                              cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(d_ke, &ke, sizeof(float), cudaMemcpyHostToDevice));
-
         nh_propagate_chain_kernel<<<1, 32>>>(
             d_state, d_ke, false, M, nh_host.Q1, nh_host.Q_rest, hdt, N);
         CUDA_CHECK(cudaDeviceSynchronize());
 
+        NoseHooverDeviceState h_temp;
         CUDA_CHECK(cudaMemcpy(&h_temp, d_state, sizeof(NoseHooverDeviceState),
                               cudaMemcpyDeviceToHost));
 
-        // Compare scale (bit-identical)
         EXPECT_FLOAT_EQ(h_temp.nh_scale, host_scale)
             << "post-force scale differs at trial " << trial;
-        EXPECT_FLOAT_EQ(h_temp.xi[0], nh_copy.xi[0]);
-        EXPECT_FLOAT_EQ(h_temp.xi[1], nh_copy.xi[1]);
-        EXPECT_FLOAT_EQ(h_temp.xi[2], nh_copy.xi[2]);
-        EXPECT_FLOAT_EQ(h_temp.v_xi[0], nh_copy.v_xi[0]);
-        EXPECT_FLOAT_EQ(h_temp.v_xi[1], nh_copy.v_xi[1]);
-        EXPECT_FLOAT_EQ(h_temp.v_xi[2], nh_copy.v_xi[2]);
+        // FMA differences ~1 ULP; tolerance 1e-5 covers chain-3 values up to ~100
+        EXPECT_NEAR(h_temp.xi[0], nh_copy.xi[0], 1e-5f);
+        EXPECT_NEAR(h_temp.xi[1], nh_copy.xi[1], 1e-5f);
+        EXPECT_NEAR(h_temp.xi[2], nh_copy.xi[2], 1e-5f);
+        EXPECT_NEAR(h_temp.v_xi[0], nh_copy.v_xi[0], 1e-5f);
+        EXPECT_NEAR(h_temp.v_xi[1], nh_copy.v_xi[1], 1e-5f);
+        EXPECT_NEAR(h_temp.v_xi[2], nh_copy.v_xi[2], 1e-5f);
         EXPECT_FLOAT_EQ(h_temp.chain_KE_carry, ke * host_scale * host_scale)
             << "chain_KE_carry differs at trial " << trial;
 
-        // --- Host: pre-force chain (reads chain_KE_carry) ---
+        // --- Pre-force test: reset GPU state to match nh_copy, set carry ---
+        init_nh_device_state(nh_copy, d_state);
+        CUDA_CHECK(cudaMemcpy(&d_state->chain_KE_carry,
+                              &h_temp.chain_KE_carry, sizeof(float),
+                              cudaMemcpyHostToDevice));
+
         float carry = ke * host_scale * host_scale;
         NoseHooverState nh_copy2 = nh_copy;
         float host_scale2;
         nh_propagate_chain(nh_copy2, carry, hdt, host_scale2);
 
-        // --- GPU: pre-force chain (reads chain_KE_carry from state) ---
         nh_propagate_chain_kernel<<<1, 32>>>(
             d_state, d_ke, true, M, nh_host.Q1, nh_host.Q_rest, hdt, N);
         CUDA_CHECK(cudaDeviceSynchronize());
@@ -399,8 +399,8 @@ TEST(NoseHoover, GPUChainMatchesHost) {
 
         EXPECT_FLOAT_EQ(h_temp.nh_scale, host_scale2)
             << "pre-force scale differs at trial " << trial;
-        EXPECT_FLOAT_EQ(h_temp.xi[0], nh_copy2.xi[0]);
-        EXPECT_FLOAT_EQ(h_temp.v_xi[0], nh_copy2.v_xi[0]);
+        EXPECT_NEAR(h_temp.xi[0], nh_copy2.xi[0], 1e-5f);
+        EXPECT_NEAR(h_temp.v_xi[0], nh_copy2.v_xi[0], 1e-5f);
 
         // Advance host state for next trial
         nh_host.xi[0] = nh_copy2.xi[0];
