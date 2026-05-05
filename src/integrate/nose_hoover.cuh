@@ -97,9 +97,11 @@ void launch_nh_nvt_pre_force_fused(float4* pos, float4* vel, const float4* force
 void launch_nh_npt_pre_force_fused(float4* pos, float4* vel, const float4* force,
                                     float4* pos_ref,
                                     int* d_max_dr2_int, int* d_image,
-                                    float nh_scale, float baro_scale,
+                                    const NoseHooverDeviceState* d_state,
+                                    const float* d_baro_scale,
+                                    const float* d_exp_vW,
+                                    const float* d_v_eps_W_dt,
                                     float half_dt, float dt,
-                                    float exp_vW, float v_eps_W_dt,
                                     int natoms, float L, float inv_L,
                                     cudaStream_t stream = 0);
 
@@ -156,7 +158,7 @@ void launch_nh_global_scale_vel(float4* vel,
                                  const NoseHooverDeviceState* d_state,
                                  int natoms, cudaStream_t stream = 0);
 
-void launch_nh_barostat_vel_half(float4* vel, float v_eps_W,
+void launch_nh_barostat_vel_half(float4* vel, const float* d_v_eps_W,
                                   float N_f_inv, int natoms,
                                   float half_dt,
                                   cudaStream_t stream = 0);

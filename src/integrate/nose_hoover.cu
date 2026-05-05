@@ -470,11 +470,13 @@ void launch_nh_global_scale_vel(float4* vel,
 
 __global__ void nh_barostat_vel_half_kernel(
     float4* __restrict__ vel,
-    float v_eps_W, float N_f_inv, int natoms, float half_dt)
+    const float* __restrict__ d_v_eps_W,
+    float N_f_inv, int natoms, float half_dt)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= natoms) return;
 
+    float v_eps_W = *d_v_eps_W;
     float factor = (1.0f + 3.0f * N_f_inv) * v_eps_W * half_dt;
     float scale = expf(-factor);
 
@@ -485,12 +487,12 @@ __global__ void nh_barostat_vel_half_kernel(
     vel[i] = v;
 }
 
-void launch_nh_barostat_vel_half(float4* vel, float v_eps_W,
+void launch_nh_barostat_vel_half(float4* vel, const float* d_v_eps_W,
                                   float N_f_inv, int natoms,
                                   float half_dt, cudaStream_t stream) {
     int blocks = div_ceil(natoms, 256);
     nh_barostat_vel_half_kernel<<<blocks, 256, 0, stream>>>(
-        vel, v_eps_W, N_f_inv, natoms, half_dt);
+        vel, d_v_eps_W, N_f_inv, natoms, half_dt);
 }
 
 // --- Velocity Verlet half-step ---
@@ -667,12 +669,20 @@ __global__ void nh_npt_pre_force_fused_kernel(
     float4* __restrict__ pos_ref,
     int* __restrict__ d_max_dr2_int,
     int* __restrict__ d_image,
-    float nh_scale, float baro_scale, float half_dt, float dt,
-    float exp_vW, float v_eps_W_dt,
+    const NoseHooverDeviceState* __restrict__ d_state,
+    const float* __restrict__ d_baro_scale,
+    const float* __restrict__ d_exp_vW,
+    const float* __restrict__ d_v_eps_W_dt,
+    float half_dt, float dt,
     float L, float inv_L, int natoms)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= natoms) return;
+
+    float nh_scale = d_state->nh_scale;
+    float baro_scale = *d_baro_scale;
+    float exp_vW = *d_exp_vW;
+    float v_eps_W_dt = *d_v_eps_W_dt;
 
     float4 r = pos[i];
     float4 v = vel[i];
@@ -727,16 +737,18 @@ __global__ void nh_npt_pre_force_fused_kernel(
 void launch_nh_npt_pre_force_fused(float4* pos, float4* vel, const float4* force,
                                     float4* pos_ref,
                                     int* d_max_dr2_int, int* d_image,
-                                    float nh_scale, float baro_scale,
+                                    const NoseHooverDeviceState* d_state,
+                                    const float* d_baro_scale,
+                                    const float* d_exp_vW,
+                                    const float* d_v_eps_W_dt,
                                     float half_dt, float dt,
-                                    float exp_vW, float v_eps_W_dt,
                                     int natoms, float L, float inv_L,
                                     cudaStream_t stream) {
     int blocks = div_ceil(natoms, 256);
     nh_npt_pre_force_fused_kernel<<<blocks, 256, 0, stream>>>(
         pos, vel, force, pos_ref, d_max_dr2_int, d_image,
-        nh_scale, baro_scale, half_dt, dt, exp_vW, v_eps_W_dt,
-        L, inv_L, natoms);
+        d_state, d_baro_scale, d_exp_vW, d_v_eps_W_dt,
+        half_dt, dt, L, inv_L, natoms);
 }
 
 // --- Lightweight KE + virial-trace kernel for NPT ---
