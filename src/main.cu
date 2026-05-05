@@ -137,6 +137,11 @@ int main(int argc, char** argv) {
         init_nh_device_state(nose_hoover, d_nh_state);
     }
 
+    NoseHooverNPTScratch npt_scratch = {};
+    if (params.ensemble == Ensemble::NPT_NH) {
+        allocate_npt_scratch(npt_scratch);
+    }
+
     MultipleTauCorrelator correlator;
     if (params.stress_on) {
         correlator.allocate();
@@ -308,14 +313,15 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaDeviceSynchronize());
 
     if (params.ensemble == Ensemble::NPT_NH) {
-        ThermoOutput init_thermo;
-        compute_thermo(sys.vel, sys.force, sys.virial,
-                       params.natoms, params.box_L, &init_thermo,
-                       thermo_bufs, 0, nullptr);
-        (void)init_thermo;
+        // Set initial volume on device
+        float V0 = nose_hoover.V;
+        float L0 = nose_hoover.L;
+        float inv_L0 = nose_hoover.inv_L;
+        CUDA_CHECK(cudaMemcpy(npt_scratch.d_V, &V0, sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(npt_scratch.d_L, &L0, sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(npt_scratch.d_inv_L, &inv_L0, sizeof(float), cudaMemcpyHostToDevice));
     }
 
-    float chain_KE = 0.0f;  // retained for NPT path (TODO: remove in Task 11)
     if (params.ensemble == Ensemble::NVT_NH) {
         // Use lightweight KE-only reduction instead of full compute_thermo
         float init_ke = compute_ke_only(sys.vel, params.natoms, d_ke_buf);
@@ -367,65 +373,43 @@ int main(int argc, char** argv) {
             float hdt = 0.5f * params.dt;
 
             if (nose_hoover.is_npt) {
-                ThermoOutput nh_thermo;
-                compute_thermo(sys.vel, sys.force, sys.virial,
-                               params.natoms, nose_hoover.L, &nh_thermo,
-                               thermo_bufs, step, nullptr);
-                chain_KE = nh_thermo.kinetic_energy * params.natoms;
-                // Barostat half-step on host (Suzuki-Yoshida)
-                static const float sy_w[3] = {
-                    1.0f / (2.0f - cbrtf(2.0f)),
-                    -cbrtf(2.0f) / (2.0f - cbrtf(2.0f)),
-                    1.0f / (2.0f - cbrtf(2.0f))
-                };
+                // Update T/P targets on device
+                set_nh_targets_device(d_nh_state, nose_hoover.T_target,
+                                      nose_hoover.P_target);
 
-                float N_f = 3.0f * params.natoms;
-                float N_f_inv = 1.0f / N_f;
-                float KE = nh_thermo.kinetic_energy;
-                float vir_trace = nh_thermo.stress[0]
-                                + nh_thermo.stress[1]
-                                + nh_thermo.stress[2];
-                float P_inst = (2.0f * KE - vir_trace)
-                             / (3.0f * nose_hoover.V);
+                // Lightweight KE + virial trace
+                launch_nh_npt_ke_and_virial_trace(
+                    sys.vel, sys.virial,
+                    d_ke_buf, npt_scratch.d_virial_trace,
+                    params.natoms);
 
-                for (int sy = 0; sy < 3; sy++) {
-                    float w = sy_w[sy] * hdt;
-                    float dv_eps = 3.0f * nose_hoover.V
-                                 * (P_inst - nose_hoover.P_target) * w;
-                    float v_eps_half = nose_hoover.v_eps + 0.5f * dv_eps;
-                    nose_hoover.eps += v_eps_half * w / nose_hoover.W;
-                    dv_eps = 3.0f * nose_hoover.V0
-                           * expf(3.0f * nose_hoover.eps)
-                           * (P_inst - nose_hoover.P_target) * w;
-                    nose_hoover.v_eps += dv_eps;
-                }
+                // GPU barostat SY + NH chain (pre-force: use_carry=true)
+                nh_npt_chain_baro_kernel<<<1, 32>>>(
+                    d_nh_state, d_ke_buf, npt_scratch.d_virial_trace,
+                    true,  // use_carry (pre-force)
+                    nose_hoover.M, nose_hoover.Q1, nose_hoover.Q_rest, nose_hoover.W,
+                    hdt, params.dt,
+                    nose_hoover.V0, params.natoms,
+                    npt_scratch.d_V, npt_scratch.d_L, npt_scratch.d_inv_L,
+                    npt_scratch.d_baro_scale, npt_scratch.d_exp_vW,
+                    npt_scratch.d_v_eps_W, npt_scratch.d_v_eps_W_dt);
 
-                // Update volume and box dimensions
-                nose_hoover.V = nose_hoover.V0
-                              * expf(3.0f * nose_hoover.eps);
-                nose_hoover.L = cbrtf(nose_hoover.V);
-                nose_hoover.inv_L = 1.0f / nose_hoover.L;
+                // Read back L for subsequent host-side operations
+                CUDA_CHECK(cudaMemcpy(&nose_hoover.L, npt_scratch.d_L,
+                                      sizeof(float), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(&nose_hoover.inv_L, npt_scratch.d_inv_L,
+                                      sizeof(float), cudaMemcpyDeviceToHost));
 
-                // Barostat velocity scale (fused into pre-force kernel below)
-                float v_eps_W = nose_hoover.v_eps / nose_hoover.W;
-                float baro_scale = expf(-(1.0f + 3.0f * N_f_inv)
-                                          * v_eps_W * hdt);
-                chain_KE *= baro_scale * baro_scale;
-
-                // Position update barostat parameters
-                float pos_exp_vW = expf(v_eps_W * params.dt);
-                float pos_vW_dt = v_eps_W * params.dt;
-
-                // NH chain thermostat
-                float nh_scale;
-                nh_propagate_chain(nose_hoover, chain_KE, hdt, nh_scale);
-
-                // Fused pre-force: barostat+thermostat scale + v-half + position update
+                // Fused pre-force: reads nh_scale, baro_scale, exp_vW, v_eps_W_dt
+                // from device state/scratch
                 launch_nh_npt_pre_force_fused(
                     sys.pos, sys.vel, sys.force,
                     sys.pos_ref, sys.d_max_dr2_int, sys.d_image,
-                    nh_scale, baro_scale, hdt, params.dt,
-                    pos_exp_vW, pos_vW_dt,
+                    d_nh_state,
+                    npt_scratch.d_baro_scale,
+                    npt_scratch.d_exp_vW,
+                    npt_scratch.d_v_eps_W_dt,
+                    hdt, params.dt,
                     params.natoms, nose_hoover.L, nose_hoover.inv_L);
             } else {
                 // NVT: GPU chain thermostat (pre-force, reads chain_KE_carry)
@@ -524,66 +508,54 @@ int main(int argc, char** argv) {
             // --- NH post-force ---
             float hdt = 0.5f * params.dt;
 
-            float chain_KE2;
             if (nose_hoover.is_npt) {
-                // NPT: velocity Verlet half-step (NVT fused kernel below handles this)
+                // Velocity Verlet half-step
                 launch_nh_v_verlet_half(sys.vel, sys.force, params.natoms, hdt);
-                ThermoOutput nh_thermo2;
-                compute_thermo(sys.vel, sys.force, sys.virial,
-                               params.natoms, nose_hoover.L, &nh_thermo2,
-                               thermo_bufs, step, nullptr);
-                chain_KE2 = nh_thermo2.kinetic_energy * params.natoms;
 
-                float v_eps_W = nose_hoover.v_eps / nose_hoover.W;
-                float N_f_inv = 1.0f / (3.0f * params.natoms);
-                launch_nh_barostat_vel_half(sys.vel, v_eps_W, N_f_inv,
-                                             params.natoms, hdt);
+                // Lightweight KE + virial trace
+                launch_nh_npt_ke_and_virial_trace(
+                    sys.vel, sys.virial,
+                    d_ke_buf, npt_scratch.d_virial_trace,
+                    params.natoms);
 
-                // Update KE analytically after barostat rescale
-                float baro_scale = expf(-(1.0f + 3.0f * N_f_inv)
-                                          * v_eps_W * hdt);
-                chain_KE2 *= baro_scale * baro_scale;
+                // GPU barostat SY half-step + NH chain (post-force: use_carry=false)
+                nh_npt_chain_baro_kernel<<<1, 32>>>(
+                    d_nh_state, d_ke_buf, npt_scratch.d_virial_trace,
+                    false,  // use_carry (post-force)
+                    nose_hoover.M, nose_hoover.Q1, nose_hoover.Q_rest, nose_hoover.W,
+                    hdt, params.dt,
+                    nose_hoover.V0, params.natoms,
+                    npt_scratch.d_V, npt_scratch.d_L, npt_scratch.d_inv_L,
+                    npt_scratch.d_baro_scale, npt_scratch.d_exp_vW,
+                    npt_scratch.d_v_eps_W, npt_scratch.d_v_eps_W_dt);
 
-                // Barostat half-step (host)
-                float vir_trace2 = nh_thermo2.stress[0]
-                                 + nh_thermo2.stress[1] + nh_thermo2.stress[2];
-                float P2 = (2.0f * chain_KE2 - vir_trace2)
-                         / (3.0f * nose_hoover.V);
+                // Barostat velocity rescale
+                launch_nh_barostat_vel_half(sys.vel, npt_scratch.d_v_eps_W,
+                                            1.0f / (3.0f * params.natoms),
+                                            params.natoms, hdt);
 
-                static const float sy_w[3] = {
-                    1.0f / (2.0f - cbrtf(2.0f)),
-                    -cbrtf(2.0f) / (2.0f - cbrtf(2.0f)),
-                    1.0f / (2.0f - cbrtf(2.0f))
-                };
-                for (int sy = 0; sy < 3; sy++) {
-                    float w = sy_w[sy] * hdt;
-                    float dv_eps = 3.0f * nose_hoover.V
-                                 * (P2 - nose_hoover.P_target) * w;
-                    float v_eps_half = nose_hoover.v_eps + 0.5f * dv_eps;
-                    nose_hoover.eps += v_eps_half * w / nose_hoover.W;
-                    dv_eps = 3.0f * nose_hoover.V0
-                           * expf(3.0f * nose_hoover.eps)
-                           * (P2 - nose_hoover.P_target) * w;
-                    nose_hoover.v_eps += dv_eps;
-                }
-                nose_hoover.V = nose_hoover.V0
-                              * expf(3.0f * nose_hoover.eps);
-                nose_hoover.L = cbrtf(nose_hoover.V);
-                nose_hoover.inv_L = 1.0f / nose_hoover.L;
+                // NH thermostat velocity rescale
+                launch_nh_global_scale_vel(sys.vel, d_nh_state, params.natoms);
+
+                // Update host L for subsequent steps (read from device)
+                CUDA_CHECK(cudaMemcpy(&nose_hoover.L, npt_scratch.d_L,
+                                      sizeof(float), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(&nose_hoover.inv_L, npt_scratch.d_inv_L,
+                                      sizeof(float), cudaMemcpyDeviceToHost));
             } else {
                 // NVT: fused v-half + KE reduction (writes KE to d_ke_buf on device)
                 CUDA_CHECK(cudaMemsetAsync(d_ke_buf, 0, sizeof(float), 0));
                 launch_nh_nvt_v_half_ke_reduce(sys.vel, sys.force, d_ke_buf,
                                                 params.natoms, hdt);
-            }
 
-            // GPU NH chain thermostat: reads raw KE from d_ke_buf (use_carry=false).
-            // Writes nh_scale and chain_KE_carry (= KE * scale^2) to device state.
-            nh_propagate_chain_kernel<<<1, 32>>>(
-                d_nh_state, d_ke_buf, false,  // use_carry=false
-                nose_hoover.M, nose_hoover.Q1, nose_hoover.Q_rest,
-                hdt, params.natoms);
-            launch_nh_global_scale_vel(sys.vel, d_nh_state, params.natoms);
+                // GPU NH chain thermostat: reads raw KE from d_ke_buf (use_carry=false).
+                // Writes nh_scale and chain_KE_carry (= KE * scale^2) to device state.
+                nh_propagate_chain_kernel<<<1, 32>>>(
+                    d_nh_state, d_ke_buf, false,  // use_carry=false
+                    nose_hoover.M, nose_hoover.Q1, nose_hoover.Q_rest,
+                    hdt, params.natoms);
+                launch_nh_global_scale_vel(sys.vel, d_nh_state, params.natoms);
+            }
         }
 
         CUDA_CHECK(cudaStreamSynchronize(0));
@@ -748,6 +720,9 @@ int main(int argc, char** argv) {
         nose_hoover.free();
         free_nh_device_state(d_nh_state);
         CUDA_CHECK(cudaFree(d_ke_buf));
+    }
+    if (params.ensemble == Ensemble::NPT_NH) {
+        free_npt_scratch(npt_scratch);
     }
     langevin.free();
     verlet.free();
