@@ -192,37 +192,38 @@ __global__ void nh_npt_chain_baro_kernel(
     float* d_V, float* d_L, float* d_inv_L,
     float* d_baro_scale, float* d_exp_vW, float* d_v_eps_W, float* d_v_eps_W_dt)
 {
-    // --- Barostat SY half-step ---
     float total_KE = use_carry ? d_state->chain_KE_carry : (*d_ke_buf * 0.5f);
     float virial_trace_raw = *d_virial_trace;
     float N_f = 3.0f * static_cast<float>(natoms);
     float N_f_inv = 1.0f / N_f;
     float V = V0 * expf(3.0f * d_state->eps);
-    // P_inst matches host formula: KE per-particle, virial trace as stress (÷V)
-    float KE_per_atom = total_KE / static_cast<float>(natoms);
-    float P_inst = (2.0f * KE_per_atom - virial_trace_raw / V) / (3.0f * V);
-
-    // total_KE is used by barostat scaling and chain; keep it as total KE
     float KE = total_KE;
 
-    // Suzuki-Yoshida weights
-    float sy_w[3];
-    sy_w[0] = 1.0f / (2.0f - cbrtf(2.0f));
-    sy_w[1] = -cbrtf(2.0f) / (2.0f - cbrtf(2.0f));
-    sy_w[2] = 1.0f / (2.0f - cbrtf(2.0f));
+    // Barostat variables are only advanced in post-force (use_carry=false).
+    // Pre-force re-uses eps/v_eps from the previous post-force update,
+    // matching the LAMMPS operator splitting: barostat advance happens
+    // after force evaluation, not before.
+    if (!use_carry) {
+        // P_inst = (2*KE + virial_trace) / (3*V) — LAMMPS convention
+        float P_inst = (2.0f * total_KE + virial_trace_raw) / (3.0f * V);
 
-    for (int sy = 0; sy < 3; sy++) {
-        float w = sy_w[sy] * half_dt;
-        float dv_eps = 3.0f * V * (P_inst - d_state->P_target) * w;
-        float v_eps_half = d_state->v_eps + 0.5f * dv_eps;
-        d_state->eps += v_eps_half * w / W;
-        dv_eps = 3.0f * V0 * expf(3.0f * d_state->eps)
-                 * (P_inst - d_state->P_target) * w;
-        d_state->v_eps += dv_eps;
+        float sy_w[3];
+        sy_w[0] = 1.0f / (2.0f - cbrtf(2.0f));
+        sy_w[1] = -cbrtf(2.0f) / (2.0f - cbrtf(2.0f));
+        sy_w[2] = 1.0f / (2.0f - cbrtf(2.0f));
+
+        for (int sy = 0; sy < 3; sy++) {
+            float w = sy_w[sy] * dt;
+            float dv_eps = 3.0f * V * (P_inst - d_state->P_target) * w;
+            float v_eps_half = d_state->v_eps + 0.5f * dv_eps;
+            d_state->eps += v_eps_half * w / W;
+            dv_eps = 3.0f * V0 * expf(3.0f * d_state->eps)
+                     * (P_inst - d_state->P_target) * w;
+            d_state->v_eps += dv_eps;
+        }
+
+        V = V0 * expf(3.0f * d_state->eps);
     }
-
-    // Update volume
-    V = V0 * expf(3.0f * d_state->eps);
     float L = cbrtf(V);
     float inv_L = 1.0f / L;
     *d_V = V;
