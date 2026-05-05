@@ -131,6 +131,12 @@ int main(int argc, char** argv) {
         nose_hoover.init(params);
     }
 
+    NoseHooverDeviceState* d_nh_state = nullptr;
+    if (params.ensemble != Ensemble::Langevin) {
+        allocate_nh_device_state(d_nh_state);
+        init_nh_device_state(nose_hoover, d_nh_state);
+    }
+
     MultipleTauCorrelator correlator;
     if (params.stress_on) {
         correlator.allocate();
@@ -309,13 +315,13 @@ int main(int argc, char** argv) {
         (void)init_thermo;
     }
 
-    float chain_KE = 0.0f;
+    float chain_KE = 0.0f;  // retained for NPT path (TODO: remove in Task 11)
     if (params.ensemble == Ensemble::NVT_NH) {
-        ThermoOutput init_thermo;
-        compute_thermo(sys.vel, sys.force, sys.virial,
-                       params.natoms, params.box_L, &init_thermo,
-                       thermo_bufs, 0, nullptr);
-        chain_KE = init_thermo.kinetic_energy * params.natoms;
+        // Use lightweight KE-only reduction instead of full compute_thermo
+        float init_ke = compute_ke_only(sys.vel, params.natoms, d_ke_buf);
+        float init_carry = init_ke;  // first pre-force uses raw KE (scale=1)
+        CUDA_CHECK(cudaMemcpy(&d_nh_state->chain_KE_carry, &init_carry,
+                              sizeof(float), cudaMemcpyHostToDevice));
     }
 
     float half_dt = 0.5f * params.dt;
@@ -422,15 +428,17 @@ int main(int argc, char** argv) {
                     pos_exp_vW, pos_vW_dt,
                     params.natoms, nose_hoover.L, nose_hoover.inv_L);
             } else {
-                // NVT: host-side NH chain thermostat + fused pre-force
-                float nh_scale;
-                nh_propagate_chain(nose_hoover, chain_KE, hdt, nh_scale);
+                // NVT: GPU chain thermostat (pre-force, reads chain_KE_carry)
+                set_nh_targets_device(d_nh_state, nose_hoover.T_target, 0.0f);
+                nh_propagate_chain_kernel<<<1, 32>>>(
+                    d_nh_state, d_ke_buf, true,  // use_carry=true
+                    nose_hoover.M, nose_hoover.Q1, nose_hoover.Q_rest,
+                    hdt, params.natoms);
 
-                // Fused pre-force: thermostat scale + v-half + position update
                 launch_nh_nvt_pre_force_fused(
                     sys.pos, sys.vel, sys.force,
                     sys.pos_ref, sys.d_max_dr2_int, sys.d_image,
-                    nh_scale, hdt, params.dt,
+                    d_nh_state, hdt, params.dt,
                     params.natoms, nose_hoover.L, nose_hoover.inv_L);
             }
         }
@@ -563,23 +571,19 @@ int main(int argc, char** argv) {
                 nose_hoover.L = cbrtf(nose_hoover.V);
                 nose_hoover.inv_L = 1.0f / nose_hoover.L;
             } else {
-                // NVT: fused v-half + KE reduction (single kernel pass)
+                // NVT: fused v-half + KE reduction (writes KE to d_ke_buf on device)
                 CUDA_CHECK(cudaMemsetAsync(d_ke_buf, 0, sizeof(float), 0));
                 launch_nh_nvt_v_half_ke_reduce(sys.vel, sys.force, d_ke_buf,
                                                 params.natoms, hdt);
-                CUDA_CHECK(cudaMemcpyAsync(&chain_KE2, d_ke_buf, sizeof(float),
-                                            cudaMemcpyDeviceToHost, 0));
-                CUDA_CHECK(cudaStreamSynchronize(0));
-                chain_KE2 *= 0.5f;
             }
 
-            // System-wide NH chain thermostat with current KE
-            float nh_scale2;
-            nh_propagate_chain(nose_hoover, chain_KE2, hdt, nh_scale2);
-            launch_nh_global_scale_vel(sys.vel, nh_scale2, params.natoms);
-
-            // Carry KE forward to next step's pre-force chain thermostat
-            chain_KE = chain_KE2 * nh_scale2 * nh_scale2;
+            // GPU NH chain thermostat: reads raw KE from d_ke_buf (use_carry=false).
+            // Writes nh_scale and chain_KE_carry (= KE * scale^2) to device state.
+            nh_propagate_chain_kernel<<<1, 32>>>(
+                d_nh_state, d_ke_buf, false,  // use_carry=false
+                nose_hoover.M, nose_hoover.Q1, nose_hoover.Q_rest,
+                hdt, params.natoms);
+            launch_nh_global_scale_vel(sys.vel, d_nh_state, params.natoms);
         }
 
         CUDA_CHECK(cudaStreamSynchronize(0));
@@ -742,6 +746,7 @@ int main(int argc, char** argv) {
     if (params.stress_on) correlator.free();
     if (params.ensemble != Ensemble::Langevin) {
         nose_hoover.free();
+        free_nh_device_state(d_nh_state);
         CUDA_CHECK(cudaFree(d_ke_buf));
     }
     langevin.free();
