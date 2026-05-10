@@ -458,7 +458,12 @@ int main(int argc, char** argv) {
                                        np * sizeof(float4),
                                        cudaMemcpyDeviceToDevice));
             }
-            // NPT_NH: pos_ref already updated in nh_update_pos_kernel, skip copy
+            if (params.ensemble == Ensemble::NPT_NH) {
+                // Reset displacement reference after rebuild
+                CUDA_CHECK(cudaMemcpy(sys.pos_ref, sys.pos,
+                                       np * sizeof(float4),
+                                       cudaMemcpyDeviceToDevice));
+            }
 
             float L_v = (params.ensemble != Ensemble::Langevin)
                         ? nose_hoover.L : params.box_L;
