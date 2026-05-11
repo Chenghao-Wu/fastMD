@@ -59,7 +59,8 @@ int main(int argc, char** argv) {
     printf("\n\n");
 
     System sys;
-    sys.allocate(params);
+    const float* masses_ptr = topo.masses.empty() ? nullptr : topo.masses.data();
+    sys.allocate(params, masses_ptr);
     if (topo.bonds.size() > 0) {
         sys.nbonds = static_cast<int>(topo.bonds.size());
         CUDA_CHECK(cudaMalloc(&sys.bonds, sys.nbonds * sizeof(int2)));

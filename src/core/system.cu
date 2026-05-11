@@ -1,6 +1,8 @@
 #include "system.cuh"
 
-void System::allocate(const SimParams& params) {
+__constant__ float c_masses[MAX_TYPES];
+
+void System::allocate(const SimParams& params, const float* h_masses) {
     natoms  = params.natoms;
     ntypes  = params.ntypes;
     ntiles  = div_ceil(natoms, TILE_SIZE);
@@ -43,6 +45,16 @@ void System::allocate(const SimParams& params) {
 
     d_mol_id = nullptr;
     d_image = nullptr;
+
+    float h_default_masses[MAX_TYPES];
+    if (h_masses != nullptr) {
+        CUDA_CHECK(cudaMemcpyToSymbol(c_masses, h_masses,
+                                       ntypes * sizeof(float)));
+    } else {
+        for (int i = 0; i < MAX_TYPES; i++) h_default_masses[i] = 1.0f;
+        CUDA_CHECK(cudaMemcpyToSymbol(c_masses, h_default_masses,
+                                       MAX_TYPES * sizeof(float)));
+    }
 }
 
 void System::free() {

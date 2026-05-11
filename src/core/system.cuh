@@ -3,6 +3,9 @@
 #include "io/table_parser.hpp"
 #include <vector>
 
+static constexpr int MAX_TYPES = 16;
+extern __constant__ float c_masses[MAX_TYPES];
+
 struct System {
     float4* pos;
     float4* vel;
@@ -37,7 +40,7 @@ struct System {
     int     ntiles;
     int     ntypes;
 
-    void allocate(const SimParams& params);
+    void allocate(const SimParams& params, const float* h_masses);
     void free();
     void zero_forces();
     void zero_virial();
