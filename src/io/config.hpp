@@ -24,6 +24,8 @@ struct TopologyData {
     std::vector<int> images;
     float box_L = 0.0f;
 
+    std::vector<float> masses;
+
     std::vector<int>         table_idx;
     std::vector<TableParams> table_params;
     std::vector<float4>      table_data;

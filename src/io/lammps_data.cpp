@@ -51,7 +51,7 @@ void parse_lammps_data(const std::string& path, TopologyData& topo) {
         file.seekg(0);
     }
 
-    enum class Section { None, Atoms, Velocities, Bonds, Angles };
+    enum class Section { None, Atoms, Velocities, Bonds, Angles, Masses };
     Section current = Section::None;
     std::string atom_style = "atomic";  // default
 
@@ -83,10 +83,12 @@ void parse_lammps_data(const std::string& path, TopologyData& topo) {
             } else if (trimmed.find("Angles") == 0) {
                 current = Section::Angles;
                 continue;
+            } else if (trimmed.find("Masses") == 0) {
+                current = Section::Masses;
+                continue;
             } else if (
                 trimmed.find("Dihedrals") == 0 ||
                 trimmed.find("Impropers") == 0 ||
-                trimmed.find("Masses") == 0 ||
                 trimmed.find("Pair Coeffs") == 0 ||
                 trimmed.find("Bond Coeffs") == 0 ||
                 trimmed.find("Angle Coeffs") == 0) {
@@ -179,6 +181,20 @@ void parse_lammps_data(const std::string& path, TopologyData& topo) {
             if (topo.velocities.size() < topo.positions.size())
                 topo.velocities.resize(topo.positions.size(), make_float4(0,0,0,0));
             topo.velocities[it->second] = make_float4(vx, vy, vz, 0);
+        } else if (current == Section::Masses) {
+            int type_id;
+            float mass;
+            iss >> type_id >> mass;
+            if (iss.fail()) continue;
+            if (mass <= 0.0f) {
+                throw std::runtime_error("mass must be > 0 for type " +
+                                         std::to_string(type_id));
+            }
+            size_t tidx = static_cast<size_t>(type_id - 1);
+            if (tidx >= topo.masses.size()) {
+                topo.masses.resize(tidx + 1, 1.0f);
+            }
+            topo.masses[tidx] = mass;
         } else if (current == Section::Bonds) {
             int id, type, atom1, atom2;
             iss >> id >> type >> atom1 >> atom2;
@@ -203,6 +219,13 @@ void parse_lammps_data(const std::string& path, TopologyData& topo) {
                                             type - 1));
         }
     }
+
+    int ntypes = 1;
+    for (const auto& pos : topo.positions) {
+        int t = unpack_type_id(pos.w);
+        if (t + 1 > ntypes) ntypes = t + 1;
+    }
+    topo.masses.resize(ntypes, 1.0f);
 }
 
 void build_exclusions(const TopologyData& in_topo, TopologyData& out_topo) {
