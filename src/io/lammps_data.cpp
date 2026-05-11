@@ -53,6 +53,7 @@ void parse_lammps_data(const std::string& path, TopologyData& topo) {
 
     enum class Section { None, Atoms, Velocities, Bonds, Angles };
     Section current = Section::None;
+    std::string atom_style = "atomic";  // default
 
     std::unordered_map<int, size_t> id_to_idx;
     std::string line;
@@ -66,6 +67,12 @@ void parse_lammps_data(const std::string& path, TopologyData& topo) {
         if (is_section_header(trimmed)) {
             if (trimmed.find("Atoms") == 0) {
                 current = Section::Atoms;
+                // Extract atom style from comment, e.g. "Atoms # full"
+                size_t hash = trimmed.find('#');
+                if (hash != std::string::npos) {
+                    std::istringstream style_ss(trimmed.substr(hash + 1));
+                    style_ss >> atom_style;
+                }
                 continue;
             } else if (trimmed.find("Velocities") == 0) {
                 current = Section::Velocities;
@@ -97,15 +104,68 @@ void parse_lammps_data(const std::string& path, TopologyData& topo) {
         if (current == Section::Atoms) {
             int id, mol, type;
             float x, y, z;
-            iss >> id >> mol >> type >> x >> y >> z;
-            if (iss.fail()) continue;
+            int ix = 0, iy = 0, iz = 0;
+
+            if (atom_style == "atomic") {
+                std::vector<std::string> tokens;
+                std::string tok;
+                while (iss >> tok) tokens.push_back(tok);
+                if (tokens.size() < 5) continue;
+                id = std::stoi(tokens[0]);
+                mol = 1;
+                type = std::stoi(tokens[1]);
+                x = std::stof(tokens[2]);
+                y = std::stof(tokens[3]);
+                z = std::stof(tokens[4]);
+                if (tokens.size() >= 8) {
+                    ix = std::stoi(tokens[5]);
+                    iy = std::stoi(tokens[6]);
+                    iz = std::stoi(tokens[7]);
+                }
+            } else if (atom_style == "molecular") {
+                std::vector<std::string> tokens;
+                std::string tok;
+                while (iss >> tok) tokens.push_back(tok);
+                if (tokens.size() < 6) continue;
+                id = std::stoi(tokens[0]);
+                mol = std::stoi(tokens[1]);
+                type = std::stoi(tokens[2]);
+                x = std::stof(tokens[3]);
+                y = std::stof(tokens[4]);
+                z = std::stof(tokens[5]);
+                if (tokens.size() >= 9) {
+                    ix = std::stoi(tokens[6]);
+                    iy = std::stoi(tokens[7]);
+                    iz = std::stoi(tokens[8]);
+                }
+            } else if (atom_style == "full" || atom_style == "charge") {
+                std::vector<std::string> tokens;
+                std::string tok;
+                while (iss >> tok) tokens.push_back(tok);
+                if (tokens.size() < 7) continue;
+                id = std::stoi(tokens[0]);
+                mol = std::stoi(tokens[1]);
+                type = std::stoi(tokens[2]);
+                x = std::stof(tokens[4]);
+                y = std::stof(tokens[5]);
+                z = std::stof(tokens[6]);
+                if (tokens.size() >= 10) {
+                    ix = std::stoi(tokens[7]);
+                    iy = std::stoi(tokens[8]);
+                    iz = std::stoi(tokens[9]);
+                }
+            } else {
+                // Unspecified style: fall back to original 6-field behavior
+                iss >> id >> mol >> type >> x >> y >> z;
+                if (iss.fail()) continue;
+                iss >> ix >> iy >> iz;
+            }
+
             size_t idx = topo.positions.size();
             id_to_idx[id] = idx;
             topo.mol_ids.push_back(mol);
             topo.positions.push_back(make_float4(x, y, z, pack_type_id(type - 1)));
 
-            int ix = 0, iy = 0, iz = 0;
-            iss >> ix >> iy >> iz;
             topo.images.push_back(ix);
             topo.images.push_back(iy);
             topo.images.push_back(iz);
