@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <vector>
 
 int main(int argc, char** argv) {
     if (argc < 2) {
@@ -338,6 +339,26 @@ int main(int argc, char** argv) {
                              sys.nangles, params.box_L, params.inv_L);
     }
     CUDA_CHECK(cudaDeviceSynchronize());
+
+    if (params.forces_dump_file[0] != '\0') {
+        std::vector<float4> h_force(params.natoms);
+        CUDA_CHECK(cudaMemcpy(h_force.data(), sys.force,
+                              params.natoms * sizeof(float4),
+                              cudaMemcpyDeviceToHost));
+        FILE* fp = fopen(params.forces_dump_file, "w");
+        if (!fp) {
+            fprintf(stderr, "Error: cannot open forces_dump_file %s\n",
+                    params.forces_dump_file);
+            return 1;
+        }
+        fprintf(fp, "# id fx fy fz pe\n");
+        for (int i = 0; i < params.natoms; ++i)
+            fprintf(fp, "%d %.6e %.6e %.6e %.6e\n", i,
+                    h_force[i].x, h_force[i].y, h_force[i].z, h_force[i].w);
+        fclose(fp);
+        printf("Initial forces written to %s\n", params.forces_dump_file);
+        return 0;
+    }
 
     if (params.ensemble == Ensemble::NPT_NH) {
         // Set initial volume on device

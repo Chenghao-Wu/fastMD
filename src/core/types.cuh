@@ -72,6 +72,8 @@ struct SimParams {
     int   rg_freq;
     char  rg_file[256];
 
+    char  forces_dump_file[256];
+
     // Nosé-Hoover
     Ensemble ensemble = Ensemble::Langevin;
     float T_start = 0.0f;

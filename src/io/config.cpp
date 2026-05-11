@@ -119,6 +119,12 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
             if ((int)angle_types_params.size() <= t) angle_types_params.resize(t+1);
             angle_types_params[t] = {k_theta, theta0};
         }
+        else if (key == "forces_dump_file") {
+            std::string val;
+            iss >> val;
+            strncpy(params.forces_dump_file, val.c_str(), 255);
+            params.forces_dump_file[255] = '\0';
+        }
     }
 
     topo.lj_params.resize(params.ntypes * params.ntypes, make_float2(0,0));
