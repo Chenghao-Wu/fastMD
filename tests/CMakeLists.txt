@@ -72,3 +72,11 @@ add_cuda_test(test_config)
 target_sources(test_config PRIVATE
     ${CMAKE_SOURCE_DIR}/src/io/config.cpp
     ${CMAKE_SOURCE_DIR}/src/io/table_parser.cpp)
+
+add_cuda_test(test_table)
+target_sources(test_table PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/force/lj.cu
+    ${CMAKE_SOURCE_DIR}/src/force/table.cu
+    ${CMAKE_SOURCE_DIR}/src/neighbor/verlet_list.cu
+    ${CMAKE_SOURCE_DIR}/src/core/morton.cu
+    ${CMAKE_SOURCE_DIR}/src/io/table_parser.cpp)
