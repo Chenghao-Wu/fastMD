@@ -63,3 +63,7 @@ target_sources(test_nose_hoover PRIVATE
     ${CMAKE_SOURCE_DIR}/src/force/lj.cu
     ${CMAKE_SOURCE_DIR}/src/neighbor/verlet_list.cu
     ${CMAKE_SOURCE_DIR}/src/core/morton.cu)
+
+add_cuda_test(test_table_parser)
+target_sources(test_table_parser PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/io/table_parser.cpp)

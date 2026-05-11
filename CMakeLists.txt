@@ -29,6 +29,7 @@ add_library(core STATIC
     src/analysis/correlator.cu
     src/io/dump.cu
     src/io/lammps_data.cpp
+    src/io/table_parser.cpp
 )
 target_include_directories(core PUBLIC ${CMAKE_SOURCE_DIR}/src)
 set_target_properties(core PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
