@@ -84,3 +84,9 @@ target_sources(test_table PRIVATE
     ${CMAKE_SOURCE_DIR}/src/neighbor/verlet_list.cu
     ${CMAKE_SOURCE_DIR}/src/core/morton.cu
     ${CMAKE_SOURCE_DIR}/src/io/table_parser.cpp)
+
+add_cuda_test(test_mass)
+target_sources(test_mass PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/integrate/langevin.cu
+    ${CMAKE_SOURCE_DIR}/src/analysis/thermo.cu
+    ${CMAKE_SOURCE_DIR}/src/core/system.cu)
