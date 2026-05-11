@@ -5,6 +5,7 @@
 #include "neighbor/verlet_list.cuh"
 #include "neighbor/skin_trigger.cuh"
 #include "force/lj.cuh"
+#include "force/table.cuh"
 #include "force/fene.cuh"
 #include "force/angle.cuh"
 #include "integrate/langevin.cuh"
@@ -99,6 +100,25 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaMemcpy(sys.lj_params, topo.lj_params.data(),
                            params.ntypes * params.ntypes * sizeof(float2),
                            cudaMemcpyHostToDevice));
+
+    if (!topo.table_params.empty()) {
+        CUDA_CHECK(cudaMalloc(&sys.d_table_idx,
+                              params.ntypes * params.ntypes * sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&sys.d_table_params,
+                              topo.table_params.size() * sizeof(TableParams)));
+        CUDA_CHECK(cudaMalloc(&sys.d_table_data,
+                              topo.table_data.size() * sizeof(float4)));
+
+        CUDA_CHECK(cudaMemcpy(sys.d_table_idx, topo.table_idx.data(),
+                              params.ntypes * params.ntypes * sizeof(int),
+                              cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(sys.d_table_params, topo.table_params.data(),
+                              topo.table_params.size() * sizeof(TableParams),
+                              cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(sys.d_table_data, topo.table_data.data(),
+                              topo.table_data.size() * sizeof(float4),
+                              cudaMemcpyHostToDevice));
+    }
 
     FENEParams* d_fene_params = nullptr;
     AngleParams* d_angle_params = nullptr;
@@ -300,6 +320,13 @@ int main(int argc, char** argv) {
                       verlet.neighbors, verlet.num_neighbors,
                       params.natoms, params.ntypes,
                       params.rc2, params.box_L, params.inv_L);
+    if (!topo.table_params.empty()) {
+        launch_table_kernel(sys.pos, sys.force, sys.virial,
+                            sys.d_table_idx, sys.d_table_params, sys.d_table_data,
+                            verlet.neighbors, verlet.num_neighbors,
+                            params.natoms, params.ntypes,
+                            params.rc2, params.box_L, params.inv_L);
+    }
     if (sys.nbonds > 0) {
         launch_fene_kernel(sys.pos, sys.force, sys.virial,
                             sys.bonds, sys.bond_param_idx, d_fene_params,
@@ -492,6 +519,13 @@ int main(int argc, char** argv) {
                           verlet.neighbors, verlet.num_neighbors,
                           params.natoms, params.ntypes,
                           params.rc2, L_f, inv_L_f, stream_lj);
+        if (!topo.table_params.empty()) {
+            launch_table_kernel(sys.pos, sys.force, sys.virial,
+                                sys.d_table_idx, sys.d_table_params, sys.d_table_data,
+                                verlet.neighbors, verlet.num_neighbors,
+                                params.natoms, params.ntypes,
+                                params.rc2, L_f, inv_L_f, stream_lj);
+        }
         CUDA_CHECK(cudaEventRecord(force_done_lj, stream_lj));
         CUDA_CHECK(cudaStreamWaitEvent(stream_bonded, force_done_lj, 0));
         if (sys.nbonds > 0) {
