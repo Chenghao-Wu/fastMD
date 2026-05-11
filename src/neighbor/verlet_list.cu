@@ -1,7 +1,10 @@
 #include "verlet_list.cuh"
 
 void VerletList::allocate(int natoms, float rc_skin, float box_L) {
-    max_neighbors = 256;
+    float density = natoms / (box_L * box_L * box_L);
+    float sphere_vol = (4.0f / 3.0f) * 3.14159265358979323846f * rc_skin * rc_skin * rc_skin;
+    int estimated = int(density * sphere_vol * 3.0f);
+    max_neighbors = max(256, estimated);
     nx = max(1, int(box_L / rc_skin));
     ny = nx;
     nz = nx;
@@ -322,7 +325,7 @@ __global__ void build_verlet_list(
                 }
             }
         }
-        if (active) num_neighbors[i] = count;
+        if (active) num_neighbors[i] = min(count, max_neighbors);
     }
 
     // Track max cell occupancy for diagnostics
