@@ -1,6 +1,7 @@
 #include "nose_hoover.cuh"
 #include "../neighbor/skin_trigger.cuh"
 #include "../core/pbc.cuh"
+#include "../core/system.cuh"
 
 void allocate_nh_device_state(NoseHooverDeviceState*& d_state) {
     CUDA_CHECK(cudaMalloc(&d_state, sizeof(NoseHooverDeviceState)));
@@ -505,6 +506,7 @@ void launch_nh_barostat_vel_half(float4* vel, const float* d_v_eps_W,
 __global__ void nh_v_verlet_half_kernel(
     float4* __restrict__ vel,
     const float4* __restrict__ force,
+    const float4* __restrict__ pos,
     int natoms, float half_dt)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -512,18 +514,25 @@ __global__ void nh_v_verlet_half_kernel(
 
     float4 v = vel[i];
     float4 f = force[i];
-    v.x += half_dt * f.x;
-    v.y += half_dt * f.y;
-    v.z += half_dt * f.z;
+    float4 r = pos[i];
+
+    int type_i = unpack_type_id(r.w);
+    float m_i = c_masses[type_i];
+    float half_dt_over_m = half_dt / m_i;
+
+    v.x += half_dt_over_m * f.x;
+    v.y += half_dt_over_m * f.y;
+    v.z += half_dt_over_m * f.z;
     vel[i] = v;
 }
 
 void launch_nh_v_verlet_half(float4* vel, const float4* force,
+                              const float4* pos,
                               int natoms, float half_dt,
                               cudaStream_t stream) {
     int blocks = div_ceil(natoms, 256);
     nh_v_verlet_half_kernel<<<blocks, 256, 0, stream>>>(
-        vel, force, natoms, half_dt);
+        vel, force, pos, natoms, half_dt);
 }
 
 // --- Position update with barostat scaling ---
@@ -614,15 +623,19 @@ __global__ void nh_nvt_pre_force_fused_kernel(
     float4 v = vel[i];
     float4 f = force[i];
 
+    int type_i = unpack_type_id(r.w);
+    float m_i = c_masses[type_i];
+    float half_dt_over_m = half_dt / m_i;
+
     // Thermostat velocity scaling
     v.x *= nh_scale;
     v.y *= nh_scale;
     v.z *= nh_scale;
 
     // Velocity Verlet half-kick
-    v.x += half_dt * f.x;
-    v.y += half_dt * f.y;
-    v.z += half_dt * f.z;
+    v.x += half_dt_over_m * f.x;
+    v.y += half_dt_over_m * f.y;
+    v.z += half_dt_over_m * f.z;
 
     // Position update (NVT: no barostat)
     r.x += dt * v.x;
@@ -694,6 +707,10 @@ __global__ void nh_npt_pre_force_fused_kernel(
     float4 f = force[i];
     float4 r_ref = pos_ref[i];
 
+    int type_i = unpack_type_id(r.w);
+    float m_i = c_masses[type_i];
+    float half_dt_over_m = half_dt / m_i;
+
     // Combined thermostat + barostat velocity scaling
     float scale = nh_scale * baro_scale;
     v.x *= scale;
@@ -701,9 +718,9 @@ __global__ void nh_npt_pre_force_fused_kernel(
     v.z *= scale;
 
     // Velocity Verlet half-kick
-    v.x += half_dt * f.x;
-    v.y += half_dt * f.y;
-    v.z += half_dt * f.z;
+    v.x += half_dt_over_m * f.x;
+    v.y += half_dt_over_m * f.y;
+    v.z += half_dt_over_m * f.z;
 
     // Position update with barostat
     float half_vW_dt = 0.5f * v_eps_W_dt;
@@ -763,6 +780,7 @@ void launch_nh_npt_pre_force_fused(float4* pos, float4* vel, const float4* force
 __global__ void nh_npt_ke_virial_trace_kernel(
     const float4* __restrict__ vel,
     const float* __restrict__ virial,
+    const float4* __restrict__ pos,
     float* __restrict__ d_ke_out,
     float* __restrict__ d_virial_trace_out,
     int natoms)
@@ -774,7 +792,10 @@ __global__ void nh_npt_ke_virial_trace_kernel(
     float v2 = 0.0f;
     if (i < natoms) {
         float4 v = vel[i];
-        v2 = v.x * v.x + v.y * v.y + v.z * v.z;
+        float4 r = pos[i];
+        int type_i = unpack_type_id(r.w);
+        float m_i = c_masses[type_i];
+        v2 = m_i * (v.x * v.x + v.y * v.y + v.z * v.z);
     }
 
     for (int offset = 16; offset > 0; offset >>= 1) {
@@ -805,6 +826,7 @@ __global__ void nh_npt_ke_virial_trace_kernel(
 
 void launch_nh_npt_ke_and_virial_trace(
     const float4* vel, const float* virial,
+    const float4* pos,
     float* d_ke_out, float* d_virial_trace_out,
     int natoms, cudaStream_t stream)
 {
@@ -812,7 +834,7 @@ void launch_nh_npt_ke_and_virial_trace(
     CUDA_CHECK(cudaMemsetAsync(d_virial_trace_out, 0, sizeof(float), stream));
     int blocks = div_ceil(natoms, 256);
     nh_npt_ke_virial_trace_kernel<<<blocks, 256, 0, stream>>>(
-        vel, virial, d_ke_out, d_virial_trace_out, natoms);
+        vel, virial, pos, d_ke_out, d_virial_trace_out, natoms);
 }
 
 // --- Fused NVT post-force v-half + KE reduction kernel ---
@@ -821,6 +843,7 @@ void launch_nh_npt_ke_and_virial_trace(
 __global__ void nh_nvt_v_half_ke_reduce_kernel(
     float4* __restrict__ vel,
     const float4* __restrict__ force,
+    const float4* __restrict__ pos,
     float* __restrict__ ke_out,
     int natoms, float half_dt)
 {
@@ -832,11 +855,17 @@ __global__ void nh_nvt_v_half_ke_reduce_kernel(
     if (i < natoms) {
         float4 v = vel[i];
         float4 f = force[i];
-        v.x += half_dt * f.x;
-        v.y += half_dt * f.y;
-        v.z += half_dt * f.z;
+        float4 r = pos[i];
+
+        int type_i = unpack_type_id(r.w);
+        float m_i = c_masses[type_i];
+        float half_dt_over_m = half_dt / m_i;
+
+        v.x += half_dt_over_m * f.x;
+        v.y += half_dt_over_m * f.y;
+        v.z += half_dt_over_m * f.z;
         vel[i] = v;
-        v2 = v.x * v.x + v.y * v.y + v.z * v.z;
+        v2 = m_i * (v.x * v.x + v.y * v.y + v.z * v.z);
     }
 
     for (int offset = 16; offset > 0; offset >>= 1) {
@@ -860,11 +889,12 @@ __global__ void nh_nvt_v_half_ke_reduce_kernel(
 }
 
 void launch_nh_nvt_v_half_ke_reduce(float4* vel, const float4* force,
+                                     const float4* pos,
                                      float* ke_out, int natoms, float half_dt,
                                      cudaStream_t stream) {
     int blocks = div_ceil(natoms, 256);
     nh_nvt_v_half_ke_reduce_kernel<<<blocks, 256, 0, stream>>>(
-        vel, force, ke_out, natoms, half_dt);
+        vel, force, pos, ke_out, natoms, half_dt);
 }
 
 // --- Lightweight KE-only reduction ---
@@ -872,6 +902,7 @@ void launch_nh_nvt_v_half_ke_reduce(float4* vel, const float4* force,
 // Used for NH chain thermostat where only total KE is needed.
 
 __global__ void ke_reduce_kernel(const float4* __restrict__ vel,
+                                  const float4* __restrict__ pos,
                                   float* __restrict__ ke_out,
                                   int natoms) {
     __shared__ float sdata[32];
@@ -881,7 +912,10 @@ __global__ void ke_reduce_kernel(const float4* __restrict__ vel,
     float v2 = 0.0f;
     if (i < natoms) {
         float4 v = vel[i];
-        v2 = v.x * v.x + v.y * v.y + v.z * v.z;
+        float4 r = pos[i];
+        int type_i = unpack_type_id(r.w);
+        float m_i = c_masses[type_i];
+        v2 = m_i * (v.x * v.x + v.y * v.y + v.z * v.z);
     }
 
     for (int offset = 16; offset > 0; offset >>= 1) {
@@ -904,11 +938,11 @@ __global__ void ke_reduce_kernel(const float4* __restrict__ vel,
     }
 }
 
-float compute_ke_only(const float4* vel, int natoms,
+float compute_ke_only(const float4* vel, const float4* pos, int natoms,
                       float* d_ke_buf, cudaStream_t stream) {
     CUDA_CHECK(cudaMemsetAsync(d_ke_buf, 0, sizeof(float), stream));
     int blocks = div_ceil(natoms, 256);
-    ke_reduce_kernel<<<blocks, 256, 0, stream>>>(vel, d_ke_buf, natoms);
+    ke_reduce_kernel<<<blocks, 256, 0, stream>>>(vel, pos, d_ke_buf, natoms);
     float ke_total;
     CUDA_CHECK(cudaMemcpyAsync(&ke_total, d_ke_buf, sizeof(float),
                                 cudaMemcpyDeviceToHost, stream));

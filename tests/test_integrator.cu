@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "test_utils.cuh"
+#include "core/system.cuh"
 #include "integrate/langevin.cuh"
 #include "force/lj.cuh"
 #include "neighbor/verlet_list.cuh"
@@ -43,6 +44,11 @@ TEST(Integrator, NVEEnergyConservation) {
     float4* d_vel = to_device(h_vel);
     float4* d_force;
     CUDA_CHECK(cudaMalloc(&d_force, np * sizeof(float4)));
+
+    // Initialize masses to default 1.0
+    float h_masses[16];
+    for (int i = 0; i < 16; i++) h_masses[i] = 1.0f;
+    CUDA_CHECK(cudaMemcpyToSymbol(c_masses, h_masses, 16 * sizeof(float)));
     float4* d_pos_ref;
     CUDA_CHECK(cudaMalloc(&d_pos_ref, np * sizeof(float4)));
     int* d_max_dr2;
@@ -100,7 +106,7 @@ TEST(Integrator, NVEEnergyConservation) {
                           verlet.neighbors, verlet.num_neighbors,
                           N, ntypes, rc2, L, inv_L);
 
-        launch_integrator_post_force(d_vel, d_force, N, lang.half_dt);
+        launch_integrator_post_force(d_vel, d_force, d_pos, N, lang.half_dt);
         CUDA_CHECK(cudaDeviceSynchronize());
     }
 

@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "test_utils.cuh"
+#include "core/system.cuh"
 #include "integrate/nose_hoover.cuh"
 #include "force/lj.cuh"
 #include "neighbor/verlet_list.cuh"
@@ -77,6 +78,11 @@ TEST(NoseHoover, NVTLimitEnergyConservation) {
 
     float4* d_pos   = to_device(h_pos);
     float4* d_vel   = to_device(h_vel);
+
+    float h_masses[16];
+    for (int i = 0; i < 16; i++) h_masses[i] = 1.0f;
+    CUDA_CHECK(cudaMemcpyToSymbol(c_masses, h_masses, 16 * sizeof(float)));
+
     float4* d_force;
     CUDA_CHECK(cudaMalloc(&d_force, np * sizeof(float4)));
     float4* d_pos_ref;
@@ -138,7 +144,7 @@ TEST(NoseHoover, NVTLimitEnergyConservation) {
         set_nh_scale_device(d_state, nh_scale);
         launch_nh_global_scale_vel(d_vel, d_state, N);
 
-        launch_nh_v_verlet_half(d_vel, d_force, N, hdt);
+        launch_nh_v_verlet_half(d_vel, d_force, d_pos, N, hdt);
         launch_nh_update_pos(d_pos, d_vel, d_pos_ref,
                               nullptr, d_max_dr2,
                               N, L, inv_L, 1.0f, 0.0f, dt);
@@ -155,7 +161,7 @@ TEST(NoseHoover, NVTLimitEnergyConservation) {
                           verlet.neighbors, verlet.num_neighbors,
                           N, ntypes, rc2, L, inv_L);
 
-        launch_nh_v_verlet_half(d_vel, d_force, N, hdt);
+        launch_nh_v_verlet_half(d_vel, d_force, d_pos, N, hdt);
 
         total_ke = compute_total_ke(to_host(d_vel, N), N);
         nh_propagate_chain(nh, total_ke, hdt, nh_scale);
@@ -219,6 +225,11 @@ TEST(NoseHoover, NVTReachesTargetTemperature) {
 
     float4* d_pos   = to_device(h_pos);
     float4* d_vel   = to_device(h_vel);
+
+    float h_masses[16];
+    for (int i = 0; i < 16; i++) h_masses[i] = 1.0f;
+    CUDA_CHECK(cudaMemcpyToSymbol(c_masses, h_masses, 16 * sizeof(float)));
+
     float4* d_force;
     CUDA_CHECK(cudaMalloc(&d_force, np * sizeof(float4)));
     float4* d_pos_ref;
@@ -279,7 +290,7 @@ TEST(NoseHoover, NVTReachesTargetTemperature) {
         set_nh_scale_device(d_state, nh_scale);
         launch_nh_global_scale_vel(d_vel, d_state, N);
 
-        launch_nh_v_verlet_half(d_vel, d_force, N, hdt);
+        launch_nh_v_verlet_half(d_vel, d_force, d_pos, N, hdt);
         launch_nh_update_pos(d_pos, d_vel, d_pos_ref,
                               nullptr, d_max_dr2,
                               N, L, inv_L, 1.0f, 0.0f, dt);
@@ -296,7 +307,7 @@ TEST(NoseHoover, NVTReachesTargetTemperature) {
                           verlet.neighbors, verlet.num_neighbors,
                           N, ntypes, rc2, L, inv_L);
 
-        launch_nh_v_verlet_half(d_vel, d_force, N, hdt);
+        launch_nh_v_verlet_half(d_vel, d_force, d_pos, N, hdt);
 
         total_ke = compute_total_ke(to_host(d_vel, N), N);
         nh_propagate_chain(nh, total_ke, hdt, nh_scale);

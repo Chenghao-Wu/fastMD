@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "test_utils.cuh"
+#include "core/system.cuh"
 #include "analysis/thermo.cuh"
 
 TEST(Thermo, KineticEnergyAndTemperature) {
@@ -14,6 +15,13 @@ TEST(Thermo, KineticEnergyAndTemperature) {
 
     float4* d_vel = to_device(h_vel);
 
+    std::vector<float4> h_pos(N, make_float4(0,0,0, pack_type_id(0)));
+    float4* d_pos = to_device(h_pos);
+
+    float h_masses[16];
+    for (int i = 0; i < 16; i++) h_masses[i] = 1.0f;
+    CUDA_CHECK(cudaMemcpyToSymbol(c_masses, h_masses, 16 * sizeof(float)));
+
     float4* d_force;
     CUDA_CHECK(cudaMalloc(&d_force, np * sizeof(float4)));
     CUDA_CHECK(cudaMemset(d_force, 0, np * sizeof(float4)));
@@ -24,7 +32,7 @@ TEST(Thermo, KineticEnergyAndTemperature) {
     ThermoBuffers bufs;
     bufs.allocate();
     ThermoOutput output;
-    compute_thermo(d_vel, d_force, d_virial, N, L, &output, bufs, 0, nullptr);
+    compute_thermo(d_vel, d_pos, d_force, d_virial, N, L, &output, bufs, 0, nullptr);
 
     EXPECT_NEAR(output.kinetic_energy, 0.5f, 0.01f);
     EXPECT_NEAR(output.temperature, 1.0f/3.0f, 0.001f);

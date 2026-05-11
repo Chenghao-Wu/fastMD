@@ -1,4 +1,5 @@
 #include "thermo.cuh"
+#include "../core/system.cuh"
 #include <cub/cub.cuh>
 #include <cstring>
 
@@ -85,6 +86,7 @@ void ThermoBuffers::close_file() {
 }
 
 __global__ void kinetic_stress_kernel(const float4* __restrict__ vel,
+                                        const float4* __restrict__ pos,
                                         float* __restrict__ kin_stress,
                                         int natoms) {
     __shared__ float sdata[6 * 32];
@@ -92,12 +94,16 @@ __global__ void kinetic_stress_kernel(const float4* __restrict__ vel,
     int tid = threadIdx.x;
 
     float vx = 0, vy = 0, vz = 0;
+    float m_i = 1.0f;
     if (i < natoms) {
         float4 v = vel[i];
         vx = v.x; vy = v.y; vz = v.z;
+        int type_i = unpack_type_id(pos[i].w);
+        m_i = c_masses[type_i];
     }
 
-    float s[6] = {vx*vx, vx*vy, vx*vz, vy*vy, vy*vz, vz*vz};
+    float s[6] = {m_i * vx*vx, m_i * vx*vy, m_i * vx*vz,
+                  m_i * vy*vy, m_i * vy*vz, m_i * vz*vz};
 
     for (int offset = 16; offset > 0; offset >>= 1) {
         for (int c = 0; c < 6; c++)
@@ -131,7 +137,7 @@ __global__ void sum_pe_kernel(const float4* __restrict__ force,
     }
 }
 
-void compute_thermo(const float4* vel, const float4* force,
+void compute_thermo(const float4* vel, const float4* pos, const float4* force,
                      const float* virial, int natoms, float box_L,
                      ThermoOutput* h_output, ThermoBuffers& bufs,
                      int step, FILE* fp,
@@ -142,7 +148,7 @@ void compute_thermo(const float4* vel, const float4* force,
     CUDA_CHECK(cudaMemsetAsync(bufs.d_max_force, 0, 2 * sizeof(float), stream));
 
     int blocks = div_ceil(natoms, 256);
-    kinetic_stress_kernel<<<blocks, 256, 0, stream>>>(vel, bufs.d_kin_stress, natoms);
+    kinetic_stress_kernel<<<blocks, 256, 0, stream>>>(vel, pos, bufs.d_kin_stress, natoms);
     sum_pe_kernel<<<blocks, 256, 0, stream>>>(force, bufs.d_pe, natoms);
     max_vel_force_kernel<<<blocks, 256, 0, stream>>>(vel, force, bufs.d_max_vel, bufs.d_max_force, natoms);
 

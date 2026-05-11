@@ -371,7 +371,7 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaMemcpy(npt_scratch.d_inv_L, &inv_L0, sizeof(float), cudaMemcpyHostToDevice));
 
         // Initialize chain_KE_carry for first pre-force step
-        float init_ke = compute_ke_only(sys.vel, params.natoms, d_ke_buf);
+        float init_ke = compute_ke_only(sys.vel, sys.pos, params.natoms, d_ke_buf);
         float init_carry = init_ke;
         CUDA_CHECK(cudaMemcpy(&d_nh_state->chain_KE_carry, &init_carry,
                               sizeof(float), cudaMemcpyHostToDevice));
@@ -379,7 +379,7 @@ int main(int argc, char** argv) {
 
     if (params.ensemble == Ensemble::NVT_NH) {
         // Use lightweight KE-only reduction instead of full compute_thermo
-        float init_ke = compute_ke_only(sys.vel, params.natoms, d_ke_buf);
+        float init_ke = compute_ke_only(sys.vel, sys.pos, params.natoms, d_ke_buf);
         float init_carry = init_ke;  // first pre-force uses raw KE (scale=1)
         CUDA_CHECK(cudaMemcpy(&d_nh_state->chain_KE_carry, &init_carry,
                               sizeof(float), cudaMemcpyHostToDevice));
@@ -434,7 +434,7 @@ int main(int argc, char** argv) {
 
                 // Lightweight KE + virial trace
                 launch_nh_npt_ke_and_virial_trace(
-                    sys.vel, sys.virial,
+                    sys.vel, sys.virial, sys.pos,
                     d_ke_buf, npt_scratch.d_virial_trace,
                     params.natoms);
 
@@ -569,7 +569,7 @@ int main(int argc, char** argv) {
 
         if (params.ensemble == Ensemble::Langevin) {
             // --- Existing Langevin post-force (unchanged) ---
-            launch_integrator_post_force(sys.vel, sys.force,
+            launch_integrator_post_force(sys.vel, sys.force, sys.pos,
                                           params.natoms, half_dt);
         } else {
             // --- NH post-force ---
@@ -577,11 +577,11 @@ int main(int argc, char** argv) {
 
             if (nose_hoover.is_npt) {
                 // Velocity Verlet half-step
-                launch_nh_v_verlet_half(sys.vel, sys.force, params.natoms, hdt);
+                launch_nh_v_verlet_half(sys.vel, sys.force, sys.pos, params.natoms, hdt);
 
                 // Lightweight KE + virial trace
                 launch_nh_npt_ke_and_virial_trace(
-                    sys.vel, sys.virial,
+                    sys.vel, sys.virial, sys.pos,
                     d_ke_buf, npt_scratch.d_virial_trace,
                     params.natoms);
 
@@ -612,7 +612,7 @@ int main(int argc, char** argv) {
             } else {
                 // NVT: fused v-half + KE reduction (writes KE to d_ke_buf on device)
                 CUDA_CHECK(cudaMemsetAsync(d_ke_buf, 0, sizeof(float), 0));
-                launch_nh_nvt_v_half_ke_reduce(sys.vel, sys.force, d_ke_buf,
+                launch_nh_nvt_v_half_ke_reduce(sys.vel, sys.force, sys.pos, d_ke_buf,
                                                 params.natoms, hdt);
 
                 // GPU NH chain thermostat: reads raw KE from d_ke_buf (use_carry=false).
@@ -634,7 +634,7 @@ int main(int argc, char** argv) {
             float thermo_L = (params.ensemble != Ensemble::Langevin)
                             ? nose_hoover.L : params.box_L;
             ThermoOutput thermo;
-            compute_thermo(sys.vel, sys.force, sys.virial,
+            compute_thermo(sys.vel, sys.pos, sys.force, sys.virial,
                             params.natoms, thermo_L, &thermo,
                             thermo_bufs, step, thermo_bufs.fp);
 

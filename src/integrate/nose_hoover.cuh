@@ -127,6 +127,7 @@ void free_npt_scratch(NoseHooverNPTScratch& s);
 // Replaces the heavy compute_thermo in the NPT inner loop.
 void launch_nh_npt_ke_and_virial_trace(
     const float4* vel, const float* virial,
+    const float4* pos,
     float* d_ke_out, float* d_virial_trace_out,
     int natoms, cudaStream_t stream = 0);
 
@@ -150,6 +151,7 @@ __global__ void nh_npt_chain_baro_kernel(
 // --- Fused post-force kernel ---
 // NVT: velocity half-step + KE reduction in a single pass
 void launch_nh_nvt_v_half_ke_reduce(float4* vel, const float4* force,
+                                     const float4* pos,
                                      float* ke_out, int natoms, float half_dt,
                                      cudaStream_t stream = 0);
 
@@ -164,6 +166,7 @@ void launch_nh_barostat_vel_half(float4* vel, const float* d_v_eps_W,
                                   cudaStream_t stream = 0);
 
 void launch_nh_v_verlet_half(float4* vel, const float4* force,
+                              const float4* pos,
                               int natoms, float half_dt,
                               cudaStream_t stream = 0);
 
@@ -174,5 +177,5 @@ void launch_nh_update_pos(float4* pos, float4* vel, float4* pos_ref,
                            cudaStream_t stream = 0);
 
 // Lightweight KE-only reduction: single kernel + single D2H copy + sync.
-float compute_ke_only(const float4* vel, int natoms,
+float compute_ke_only(const float4* vel, const float4* pos, int natoms,
                       float* d_ke_buf, cudaStream_t stream = 0);

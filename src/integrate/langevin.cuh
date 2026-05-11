@@ -23,5 +23,6 @@ void launch_integrator_pre_force(float4* pos, float4* vel, const float4* force,
                                   cudaStream_t stream = 0);
 
 void launch_integrator_post_force(float4* vel, const float4* force,
+                                   const float4* pos,
                                    int natoms, float half_dt,
                                    cudaStream_t stream = 0);

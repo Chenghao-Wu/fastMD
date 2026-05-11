@@ -27,7 +27,7 @@ struct ThermoBuffers {
     void close_file();
 };
 
-void compute_thermo(const float4* vel, const float4* force,
+void compute_thermo(const float4* vel, const float4* pos, const float4* force,
                      const float* virial,
                      int natoms, float box_L,
                      ThermoOutput* h_output,

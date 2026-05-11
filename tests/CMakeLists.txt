@@ -36,7 +36,8 @@ target_sources(test_integrator PRIVATE
     ${CMAKE_SOURCE_DIR}/src/integrate/langevin.cu
     ${CMAKE_SOURCE_DIR}/src/force/lj.cu
     ${CMAKE_SOURCE_DIR}/src/neighbor/verlet_list.cu
-    ${CMAKE_SOURCE_DIR}/src/core/morton.cu)
+    ${CMAKE_SOURCE_DIR}/src/core/morton.cu
+    ${CMAKE_SOURCE_DIR}/src/core/system.cu)
 target_link_libraries(test_integrator CUDA::curand)
 
 add_cuda_test(test_fene)
@@ -46,7 +47,9 @@ add_cuda_test(test_angle)
 target_sources(test_angle PRIVATE ${CMAKE_SOURCE_DIR}/src/force/angle.cu)
 
 add_cuda_test(test_thermo)
-target_sources(test_thermo PRIVATE ${CMAKE_SOURCE_DIR}/src/analysis/thermo.cu)
+target_sources(test_thermo PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/analysis/thermo.cu
+    ${CMAKE_SOURCE_DIR}/src/core/system.cu)
 
 add_cuda_test(test_correlator)
 target_sources(test_correlator PRIVATE ${CMAKE_SOURCE_DIR}/src/analysis/correlator.cu)
@@ -62,7 +65,8 @@ target_sources(test_nose_hoover PRIVATE
     ${CMAKE_SOURCE_DIR}/src/integrate/nose_hoover.cu
     ${CMAKE_SOURCE_DIR}/src/force/lj.cu
     ${CMAKE_SOURCE_DIR}/src/neighbor/verlet_list.cu
-    ${CMAKE_SOURCE_DIR}/src/core/morton.cu)
+    ${CMAKE_SOURCE_DIR}/src/core/morton.cu
+    ${CMAKE_SOURCE_DIR}/src/core/system.cu)
 
 add_cuda_test(test_table_parser)
 target_sources(test_table_parser PRIVATE
