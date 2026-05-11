@@ -153,16 +153,23 @@ pe_i += 0.5f * e;
 
 ## Parser Specification
 
-Supported header style (first version):
+Supported header styles:
 
+**Style A — explicit range:**
 ```
 KEYWORD
 N 1000 R 0.5 10.0
 ```
 
+**Style B — `N` only (inferred range):**
+```
+KEYWORD
+N 500
+```
+
 - `KEYWORD`: arbitrary alphanumeric section name.
 - `N`: number of data points.
-- `R`: linear spacing in `r`. `rlo` and `rhi` define the range.
+- `R`: optional; linear spacing in `r`. If present, `rlo` and `rhi` define the range.
 
 Data lines:
 ```
@@ -177,7 +184,8 @@ Each line contains: `index r energy force`
 Validation performed by the parser:
 - `r` values must be strictly monotonically increasing.
 - Exact line count must match `N`.
-- `rlo` must equal the first point's `r`; `rhi` must equal the last point's `r`.
+- If `R` is present, `rlo` must equal the first point's `r` and `rhi` must equal the last point's `r`.
+- If `R` is omitted, `rlo` and `rhi` are inferred from the first and last data points, and spacing is assumed linear (`R`).
 
 `RSQ` spacing style may be added in a future iteration without kernel changes.
 
@@ -216,6 +224,46 @@ Validation performed by the parser:
 ### Integration / benchmark
 - Add a benchmark config that replaces `lj` with an equivalent `table` for all pairs.
 - Verify thermodynamic output matches the analytical LJ benchmark within tolerance.
+
+## Verification Example: CG Water
+
+The repository contains a real LAMMPS example at `data/CG_water/`.
+
+### LAMMPS input (`data/CG_water/input.lmp`)
+
+```
+pair_style table linear 500
+pair_modify shift yes
+pair_coeff 1 1 pair_table.txt PAIR_0 15.0000
+```
+
+Table file (`data/CG_water/pair_table.txt`) uses the `N`-only header style:
+
+```
+PAIR_0
+N 500
+
+1 5.0000000000e-01 4.0144398396e+05 5.0230768226e+06
+...
+500 1.5000000000e+01 0.0000000000e+00 3.0711357611e-08
+```
+
+### Equivalent fastMD config snippet
+
+```
+ntypes 1
+rc 15.0
+skin 0.3
+table 0 0 data/CG_water/pair_table.txt PAIR_0
+# ... other params (dt, nsteps, ensemble, etc.)
+```
+
+### Verification procedure
+
+1. Run LAMMPS with `data/CG_water/input.lmp` for a short trajectory (e.g., 100 steps).
+2. Run fastMD with the equivalent config for the same 100 steps.
+3. Compare the thermodynamic outputs (`step, pe, ke, etotal, T, Pxx`) column by column.
+4. Acceptable tolerance: `|PE_fastMD - PE_LAMMPS| / |PE_LAMMPS| < 1e-4` (linear interpolation introduces small differences).
 
 ## Performance Notes
 
