@@ -1,5 +1,6 @@
 #pragma once
 #include "types.cuh"
+#include "io/table_parser.hpp"
 #include <vector>
 
 struct System {
@@ -23,6 +24,10 @@ struct System {
 
     float2* lj_params;
     float*  virial;
+
+    int*         d_table_idx;
+    TableParams* d_table_params;
+    float4*      d_table_data;
 
     int*    d_max_dr2_int;
     int*    h_rebuild_flag;

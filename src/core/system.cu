@@ -22,6 +22,10 @@ void System::allocate(const SimParams& params) {
 
     CUDA_CHECK(cudaMalloc(&virial, 6 * sizeof(float)));
 
+    d_table_idx = nullptr;
+    d_table_params = nullptr;
+    d_table_data = nullptr;
+
     CUDA_CHECK(cudaMalloc(&d_max_dr2_int, sizeof(int)));
     CUDA_CHECK(cudaHostAlloc(&h_rebuild_flag, sizeof(int),
                               cudaHostAllocMapped));
@@ -48,6 +52,11 @@ void System::free() {
     CUDA_CHECK(cudaFree(pos_ref));
     CUDA_CHECK(cudaFree(lj_params));
     CUDA_CHECK(cudaFree(virial));
+
+    if (d_table_idx)     CUDA_CHECK(cudaFree(d_table_idx));
+    if (d_table_params)  CUDA_CHECK(cudaFree(d_table_params));
+    if (d_table_data)    CUDA_CHECK(cudaFree(d_table_data));
+
     CUDA_CHECK(cudaFree(d_max_dr2_int));
     CUDA_CHECK(cudaFreeHost(h_rebuild_flag));
     if (bonds) CUDA_CHECK(cudaFree(bonds));
