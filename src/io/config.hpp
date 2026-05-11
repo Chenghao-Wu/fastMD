@@ -2,6 +2,7 @@
 #include "../core/types.cuh"
 #include "../force/fene.cuh"
 #include "../force/angle.cuh"
+#include "table_parser.hpp"
 #include <string>
 #include <vector>
 
@@ -22,6 +23,10 @@ struct TopologyData {
     std::vector<int> mol_ids;
     std::vector<int> images;
     float box_L = 0.0f;
+
+    std::vector<int>         table_idx;
+    std::vector<TableParams> table_params;
+    std::vector<float4>      table_data;
 };
 
 void finalize_params(SimParams& params);

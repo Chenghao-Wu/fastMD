@@ -1,15 +1,18 @@
 #include "config.hpp"
+#include "table_parser.hpp"
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
 #include <cmath>
 #include <tuple>
+#include <map>
 
 SimParams parse_config(const std::string& filename, TopologyData& topo) {
     SimParams params = {};
     params.restart_freq = -1;
     std::string coords_file;
     std::vector<std::tuple<int,int,float,float>> lj_entries;
+    std::vector<std::tuple<int,int,std::string,std::string>> table_entries;
 
     struct BondType { float k, R0, eps, sig; };
     struct AngleType { float k_theta, theta0; };
@@ -99,6 +102,11 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
             iss >> ti >> tj >> eps >> sig;
             lj_entries.push_back({ti, tj, eps, sig});
         }
+        else if (key == "table") {
+            int ti, tj; std::string filename, keyword;
+            iss >> ti >> tj >> filename >> keyword;
+            table_entries.push_back({ti, tj, filename, keyword});
+        }
         else if (key == "bond_type") {
             int t; float k, R0, eps, sig;
             iss >> t >> k >> R0 >> eps >> sig;
@@ -117,6 +125,35 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
     for (auto& [ti, tj, eps, sig] : lj_entries) {
         topo.lj_params[ti * params.ntypes + tj] = make_float2(eps, sig);
         topo.lj_params[tj * params.ntypes + ti] = make_float2(eps, sig);
+    }
+
+    topo.table_idx.resize(params.ntypes * params.ntypes, -1);
+
+    std::map<std::pair<std::string,std::string>, int> file_keyword_to_idx;
+    for (auto& [ti, tj, filename, keyword] : table_entries) {
+        if (ti < 0 || ti >= params.ntypes || tj < 0 || tj >= params.ntypes)
+            throw std::runtime_error("table type index out of range");
+
+        float2 lj_p = topo.lj_params[ti * params.ntypes + tj];
+        if (lj_p.x != 0.0f || lj_p.y != 0.0f)
+            throw std::runtime_error("Both lj and table defined for pair (" +
+                                      std::to_string(ti) + "," + std::to_string(tj) + ")");
+
+        auto fk = std::make_pair(filename, keyword);
+        int idx;
+        auto it = file_keyword_to_idx.find(fk);
+        if (it == file_keyword_to_idx.end()) {
+            TableFileData tfd = parse_table_file(filename, keyword);
+            idx = (int)topo.table_params.size();
+            file_keyword_to_idx[fk] = idx;
+            topo.table_params.push_back(tfd.params[0]);
+            topo.table_data.insert(topo.table_data.end(),
+                                    tfd.data.begin(), tfd.data.end());
+        } else {
+            idx = it->second;
+        }
+        topo.table_idx[ti * params.ntypes + tj] = idx;
+        topo.table_idx[tj * params.ntypes + ti] = idx;
     }
 
     topo.bond_params.resize(bond_types_params.size());

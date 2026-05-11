@@ -67,3 +67,8 @@ target_sources(test_nose_hoover PRIVATE
 add_cuda_test(test_table_parser)
 target_sources(test_table_parser PRIVATE
     ${CMAKE_SOURCE_DIR}/src/io/table_parser.cpp)
+
+add_cuda_test(test_config)
+target_sources(test_config PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/io/config.cpp
+    ${CMAKE_SOURCE_DIR}/src/io/table_parser.cpp)
