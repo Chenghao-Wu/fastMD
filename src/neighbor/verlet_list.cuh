@@ -22,8 +22,6 @@ struct VerletList {
     size_t cub_temp_bytes;
     int*  h_cell_max;
     int   max_cell_atoms;
-    int*  h_max_nneigh;    // pinned host: max num_neighbors after each build
-    int   max_nneigh;
 
     void allocate(int natoms, float rc_skin, float box_L);
     void free();

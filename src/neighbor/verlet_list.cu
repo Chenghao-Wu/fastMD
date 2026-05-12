@@ -371,4 +371,6 @@ void VerletList::build(const float4* pos, int natoms, float box_L, float inv_L,
         rc_skin2, box_L, inv_L,
         max_neighbors, dedup_needed ? 1 : 0,
         h_cell_max);
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    max_cell_atoms = *h_cell_max;
 }

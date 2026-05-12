@@ -521,8 +521,8 @@ int main(int argc, char** argv) {
             verlet.build(sys.pos, params.natoms, L_v, inv_L_v,
                          sys.exclusion_offsets, sys.exclusion_list,
                          params.rc + params.skin);
-            printf("  [step %d] verlet rebuild: max_nneigh=%d max_cell=%d ncells=%d nx=%d\n",
-                   step, verlet.max_nneigh, verlet.max_cell_atoms, verlet.ncells, verlet.nx);
+            printf("  [step %d] verlet rebuild: max_cell=%d ncells=%d nx=%d\n",
+                   step, verlet.max_cell_atoms, verlet.ncells, verlet.nx);
         }
 
         // --- Force computation (common to both paths) ---

@@ -9,6 +9,8 @@ __pycache__/
 *.nsys-rep
 *.sqlite
 
+docs
+
 # Simulation output
 *.data
 *.log
