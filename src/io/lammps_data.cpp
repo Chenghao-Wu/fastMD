@@ -274,6 +274,7 @@ void write_lammps_data(const std::string& path,
                        const int2*   d_bonds,
                        const int*    d_bond_types,
                        const int4*   d_angles,
+                       const float*  masses,
                        int natoms, int nbonds, int nangles,
                        int ntypes, int nbond_types, int nangle_types,
                        float box_L,
@@ -335,18 +336,20 @@ void write_lammps_data(const std::string& path,
     fprintf(fp, "\n");
 
     fprintf(fp, "Masses\n\n");
-    for (int i = 0; i < ntypes; i++)
-        fprintf(fp, "%d 1.0\n", i + 1);
+    for (int i = 0; i < ntypes; i++) {
+        float m = (masses && i < ntypes) ? masses[i] : 1.0f;
+        fprintf(fp, "%d %.6g\n", i + 1, m);
+    }
     fprintf(fp, "\n");
 
-    fprintf(fp, "Atoms\n\n");
+    fprintf(fp, "Atoms # full\n\n");
     for (int i = 0; i < natoms; i++) {
         int mol = d_mol_id ? h_mol_id[i] : 1;
         int type = unpack_type_id(h_pos[i].w) + 1;
         int ix = d_image ? h_image[i * 3] : 0;
         int iy = d_image ? h_image[i * 3 + 1] : 0;
         int iz = d_image ? h_image[i * 3 + 2] : 0;
-        fprintf(fp, "%d %d %d %.6f %.6f %.6f %d %d %d\n",
+        fprintf(fp, "%d %d %d 0.0 %.6f %.6f %.6f %d %d %d\n",
                 i + 1, mol, type,
                 h_pos[i].x, h_pos[i].y, h_pos[i].z,
                 ix, iy, iz);
