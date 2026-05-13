@@ -1,6 +1,8 @@
 #include "table.cuh"
 #include "../core/pbc.cuh"
 
+#define TABLE_MAX_SHARED 2048
+
 __global__ void table_verlet_kernel(
     const float4* __restrict__ pos,
     float4* __restrict__ force,
@@ -13,6 +15,9 @@ __global__ void table_verlet_kernel(
     int natoms, int ntypes,
     float rc2, float L, float inv_L)
 {
+    __shared__ float4 s_table[TABLE_MAX_SHARED];
+    extern __shared__ float s_virial[];
+
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     int lane = threadIdx.x & 31;
 
@@ -20,10 +25,36 @@ __global__ void table_verlet_kernel(
     float vir_xx = 0.0f, vir_xy = 0.0f, vir_xz = 0.0f;
     float vir_yy = 0.0f, vir_yz = 0.0f, vir_zz = 0.0f;
 
+    // --- Cooperative table load (once per block) ---
+    int first = blockIdx.x * blockDim.x;
+    int rep_type = __float_as_int(pos[first].w);
+    int tidx_rep = __ldg(&table_idx[rep_type * ntypes + rep_type]);
+    bool use_smem = false;
+    float rmin_s = 0.0f, rmax_s = 0.0f, dr_s = 0.0f, inv_dr_s = 0.0f;
+    int npoints_s = 0;
+
+    if (tidx_rep >= 0) {
+        TableParams tp = table_params[tidx_rep];
+        if (tp.npoints <= TABLE_MAX_SHARED) {
+            rmin_s   = tp.rmin;
+            rmax_s   = tp.rmax;
+            dr_s     = tp.dr;
+            inv_dr_s = tp.inv_dr;
+            npoints_s = tp.npoints;
+            use_smem  = true;
+        }
+    }
+    if (use_smem) {
+        for (int t = threadIdx.x; t < npoints_s; t += blockDim.x)
+            s_table[t] = __ldg(&table_data[table_params[tidx_rep].data_offset + t]);
+    }
+    __syncthreads();
+
     if (i < natoms) {
         float4 pos_i = pos[i];
         int type_i = __float_as_int(pos_i.w);
         int nneigh = __ldg(&num_neighbors[i]);
+        int type_i_offset = type_i * ntypes;
 
         #pragma unroll 8
         for (int k = 0; k < nneigh; k++) {
@@ -37,20 +68,37 @@ __global__ void table_verlet_kernel(
             float r2 = dx*dx + dy*dy + dz*dz;
 
             if (r2 < rc2 && r2 > 1e-10f) {
-                int tidx = __ldg(&table_idx[type_i * ntypes + type_j]);
+                int tidx = __ldg(&table_idx[type_i_offset + type_j]);
                 if (tidx >= 0) {
-                    TableParams tp = table_params[tidx];
+                    // Choose shared memory if the table matches, else global
+                    const float4* tbl;
+                    float rmin, rmax, dr, inv_dr;
+                    int npoints;
+
+                    if (use_smem && tidx == tidx_rep) {
+                        tbl = s_table;
+                        rmin = rmin_s; rmax = rmax_s;
+                        dr = dr_s; inv_dr = inv_dr_s;
+                        npoints = npoints_s;
+                    } else {
+                        TableParams tp = table_params[tidx];
+                        tbl = table_data + tp.data_offset;
+                        rmin = tp.rmin; rmax = tp.rmax;
+                        dr = tp.dr; inv_dr = tp.inv_dr;
+                        npoints = tp.npoints;
+                    }
+
                     float r = sqrtf(r2);
-                    if (r < tp.rmin) r = tp.rmin;
-                    if (r > tp.rmax) r = tp.rmax;
+                    if (r < rmin) r = rmin;
+                    if (r > rmax) r = rmax;
 
-                    int idx = (int)((r - tp.rmin) * tp.inv_dr);
+                    int idx = (int)((r - rmin) * inv_dr);
                     if (idx < 0) idx = 0;
-                    if (idx >= tp.npoints - 1) idx = tp.npoints - 2;
+                    if (idx >= npoints - 1) idx = npoints - 2;
 
-                    float t = (r - (tp.rmin + idx * tp.dr)) * tp.inv_dr;
-                    float4 p0 = __ldg(&table_data[tp.data_offset + idx]);
-                    float4 p1 = __ldg(&table_data[tp.data_offset + idx + 1]);
+                    float t = (r - (rmin + idx * dr)) * inv_dr;
+                    float4 p0 = tbl[idx];
+                    float4 p1 = tbl[idx + 1];
 
                     float f_scalar = p0.y + t * (p1.y - p0.y);
                     float e = p0.z + t * (p1.z - p0.z);
@@ -85,7 +133,6 @@ __global__ void table_verlet_kernel(
         vir_zz += __shfl_down_sync(0xFFFFFFFF, vir_zz, offset);
     }
 
-    extern __shared__ float s_virial[];
     if (lane == 0) {
         int wid = threadIdx.x >> 5;
         s_virial[wid * 6 + 0] = vir_xx;
