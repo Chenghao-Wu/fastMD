@@ -682,6 +682,7 @@ int main(int argc, char** argv) {
             std::string fname = build_restart_filename(params.restart_file, step);
             write_lammps_data(fname, sys.pos, sys.vel, sys.d_image, sys.d_mol_id,
                               sys.bonds, sys.bond_param_idx, sys.angles,
+                              topo.masses.empty() ? nullptr : topo.masses.data(),
                               params.natoms, sys.nbonds, sys.nangles,
                               params.ntypes, (int)topo.bond_params.size(), (int)topo.angle_params.size(),
                               restart_L, step);
@@ -738,6 +739,7 @@ int main(int argc, char** argv) {
         std::string fname = build_restart_final_filename(params.restart_file);
         write_lammps_data(fname, sys.pos, sys.vel, sys.d_image, sys.d_mol_id,
                           sys.bonds, sys.bond_param_idx, sys.angles,
+                          topo.masses.empty() ? nullptr : topo.masses.data(),
                           params.natoms, sys.nbonds, sys.nangles,
                           params.ntypes, (int)topo.bond_params.size(), (int)topo.angle_params.size(),
                           final_L, params.nsteps);
