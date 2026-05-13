@@ -13,6 +13,9 @@ add_compile_options(
     $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
 )
 
+# CMake does not auto-add -DNDEBUG for CUDA release builds
+set(CMAKE_CUDA_FLAGS_RELEASE "${CMAKE_CUDA_FLAGS_RELEASE} -DNDEBUG")
+
 # Core library
 add_library(core STATIC
     src/core/system.cu
