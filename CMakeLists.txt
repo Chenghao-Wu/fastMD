@@ -45,3 +45,7 @@ target_link_libraries(fastMD core CUDA::cudart CUDA::curand)
 set_target_properties(fastMD PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
 add_subdirectory(tests)
+
+# Install the fastMD binary into the Python package for scikit-build-core wheel packaging
+set_target_properties(fastMD PROPERTIES OUTPUT_NAME fastmd)
+install(TARGETS fastMD DESTINATION python/fastmd/_binary)
