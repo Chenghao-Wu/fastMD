@@ -21,3 +21,4 @@ Homepage = "https://github.com/Chenghao-Wu/fastMD"
 [tool.scikit-build]
 cmake.args = ["-DCMAKE_BUILD_TYPE=Release"]
 wheel.packages = ["python/fastmd"]
+build.pre_configure = ["python _check_cuda.py"]
