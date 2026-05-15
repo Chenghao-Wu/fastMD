@@ -4,6 +4,7 @@ Provides ``get_binary_path()`` to locate the compiled fastmd binary
 installed alongside this package.
 """
 
+import sysconfig
 from pathlib import Path
 
 
@@ -17,10 +18,19 @@ def get_binary_path() -> str:
         FileNotFoundError: If the binary is missing (indicates a broken
             installation — reinstall the package).
     """
-    binary = Path(__file__).parent / "_binary" / "fastmd"
-    if not binary.is_file():
-        raise FileNotFoundError(
-            f"fastmd binary not found at {binary}. "
-            f"Reinstall the fastmd package: pip uninstall fastmd && pip install fastmd"
-        )
-    return str(binary)
+    binary_rel = Path("_binary") / "fastmd"
+
+    # Non-editable install: binary is next to __init__.py
+    candidate = Path(__file__).parent / binary_rel
+    if candidate.is_file():
+        return str(candidate)
+
+    # Editable install: binary lands under platlib/python/fastmd/
+    candidate = Path(sysconfig.get_path("platlib")) / "python" / "fastmd" / binary_rel
+    if candidate.is_file():
+        return str(candidate)
+
+    raise FileNotFoundError(
+        f"fastmd binary not found. "
+        f"Reinstall the fastmd package: pip uninstall fastmd && pip install fastmd"
+    )
