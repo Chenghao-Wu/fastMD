@@ -3,7 +3,7 @@ requires = ["scikit-build-core>=0.9"]
 build-backend = "scikit_build_core.build"
 
 [project]
-name = "fastmd"
+name = "fast-molecular-dynamics"
 version = "0.2.0"
 description = "GPU-accelerated molecular dynamics simulator"
 readme = "README.md"
