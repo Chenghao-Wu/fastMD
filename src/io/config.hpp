@@ -29,6 +29,13 @@ struct TopologyData {
     std::vector<int>         table_idx;
     std::vector<TableParams> table_params;
     std::vector<float4>      table_data;
+
+    std::vector<int>         bond_table_idx;
+    std::vector<TableParams> bond_table_params;
+    std::vector<float4>      bond_table_data;
+    std::vector<int>         angle_table_idx;
+    std::vector<TableParams> angle_table_params;
+    std::vector<float4>      angle_table_data;
 };
 
 void finalize_params(SimParams& params);

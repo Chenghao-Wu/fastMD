@@ -13,6 +13,8 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
     std::string coords_file;
     std::vector<std::tuple<int,int,float,float>> lj_entries;
     std::vector<std::tuple<int,int,std::string,std::string>> table_entries;
+    std::vector<std::tuple<int,std::string,std::string>> bond_table_entries;
+    std::vector<std::tuple<int,std::string,std::string>> angle_table_entries;
 
     struct BondType { float k, R0, eps, sig; };
     struct AngleType { float k_theta, theta0; };
@@ -119,6 +121,16 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
             if ((int)angle_types_params.size() <= t) angle_types_params.resize(t+1);
             angle_types_params[t] = {k_theta, theta0};
         }
+        else if (key == "bond_table") {
+            int t; std::string filename, keyword;
+            iss >> t >> filename >> keyword;
+            bond_table_entries.push_back({t, filename, keyword});
+        }
+        else if (key == "angle_table") {
+            int t; std::string filename, keyword;
+            iss >> t >> filename >> keyword;
+            angle_table_entries.push_back({t, filename, keyword});
+        }
         else if (key == "forces_dump_file") {
             std::string val;
             iss >> val;
@@ -152,7 +164,9 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
             TableFileData tfd = parse_table_file(filename, keyword);
             idx = (int)topo.table_params.size();
             file_keyword_to_idx[fk] = idx;
-            topo.table_params.push_back(tfd.params[0]);
+            TableParams tp = tfd.params[0];
+            tp.data_offset = (int)topo.table_data.size();
+            topo.table_params.push_back(tp);
             topo.table_data.insert(topo.table_data.end(),
                                     tfd.data.begin(), tfd.data.end());
         } else {
@@ -174,6 +188,29 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
     for (size_t i = 0; i < angle_types_params.size(); ++i) {
         topo.angle_params[i] = {angle_types_params[i].k_theta,
                                 angle_types_params[i].theta0 * 3.14159265358979323846f / 180.0f};
+    }
+
+    for (auto& [t, filename, keyword] : bond_table_entries) {
+        TableFileData tfd = parse_table_file(filename, keyword);
+        TableParams tp = tfd.params[0];
+        tp.data_offset = (int)topo.bond_table_data.size();
+        int idx = (int)topo.bond_table_params.size();
+        topo.bond_table_params.push_back(tp);
+        topo.bond_table_data.insert(topo.bond_table_data.end(),
+                                    tfd.data.begin(), tfd.data.end());
+        if ((int)topo.bond_table_idx.size() <= t) topo.bond_table_idx.resize(t+1, -1);
+        topo.bond_table_idx[t] = idx;
+    }
+    for (auto& [t, filename, keyword] : angle_table_entries) {
+        TableFileData tfd = parse_table_file(filename, keyword);
+        TableParams tp = tfd.params[0];
+        tp.data_offset = (int)topo.angle_table_data.size();
+        int idx = (int)topo.angle_table_params.size();
+        topo.angle_table_params.push_back(tp);
+        topo.angle_table_data.insert(topo.angle_table_data.end(),
+                                     tfd.data.begin(), tfd.data.end());
+        if ((int)topo.angle_table_idx.size() <= t) topo.angle_table_idx.resize(t+1, -1);
+        topo.angle_table_idx[t] = idx;
     }
 
     if (!coords_file.empty()) {

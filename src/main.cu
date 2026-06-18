@@ -8,6 +8,8 @@
 #include "force/table.cuh"
 #include "force/fene.cuh"
 #include "force/angle.cuh"
+#include "force/bond_table.cuh"
+#include "force/angle_table.cuh"
 #include "integrate/langevin.cuh"
 #include "integrate/nose_hoover.cuh"
 #include "analysis/thermo.cuh"
@@ -137,6 +139,29 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaMemcpy(d_angle_params, topo.angle_params.data(),
                               topo.angle_params.size() * sizeof(AngleParams),
                               cudaMemcpyHostToDevice));
+    }
+
+    int* d_bond_table_idx = nullptr;
+    TableParams* d_bond_table_params = nullptr;
+    float4* d_bond_table_data = nullptr;
+    if (!topo.bond_table_data.empty()) {
+        CUDA_CHECK(cudaMalloc(&d_bond_table_idx, topo.bond_table_idx.size() * sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&d_bond_table_params, topo.bond_table_params.size() * sizeof(TableParams)));
+        CUDA_CHECK(cudaMalloc(&d_bond_table_data, topo.bond_table_data.size() * sizeof(float4)));
+        CUDA_CHECK(cudaMemcpy(d_bond_table_idx, topo.bond_table_idx.data(), topo.bond_table_idx.size()*sizeof(int), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_bond_table_params, topo.bond_table_params.data(), topo.bond_table_params.size()*sizeof(TableParams), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_bond_table_data, topo.bond_table_data.data(), topo.bond_table_data.size()*sizeof(float4), cudaMemcpyHostToDevice));
+    }
+    int* d_angle_table_idx = nullptr;
+    TableParams* d_angle_table_params = nullptr;
+    float4* d_angle_table_data = nullptr;
+    if (!topo.angle_table_data.empty()) {
+        CUDA_CHECK(cudaMalloc(&d_angle_table_idx, topo.angle_table_idx.size() * sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&d_angle_table_params, topo.angle_table_params.size() * sizeof(TableParams)));
+        CUDA_CHECK(cudaMalloc(&d_angle_table_data, topo.angle_table_data.size() * sizeof(float4)));
+        CUDA_CHECK(cudaMemcpy(d_angle_table_idx, topo.angle_table_idx.data(), topo.angle_table_idx.size()*sizeof(int), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_angle_table_params, topo.angle_table_params.data(), topo.angle_table_params.size()*sizeof(TableParams), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_angle_table_data, topo.angle_table_data.data(), topo.angle_table_data.size()*sizeof(float4), cudaMemcpyHostToDevice));
     }
 
     MortonSorter morton;
@@ -329,12 +354,22 @@ int main(int argc, char** argv) {
                             params.natoms, params.ntypes,
                             params.rc2, params.box_L, params.inv_L);
     }
-    if (sys.nbonds > 0) {
+    if (sys.nbonds > 0 && d_bond_table_data) {
+        launch_bond_table_kernel(sys.pos, sys.force, sys.virial,
+                            sys.bonds, sys.bond_param_idx, d_bond_table_idx,
+                            d_bond_table_params, d_bond_table_data,
+                            sys.nbonds, params.box_L, params.inv_L);
+    } else if (sys.nbonds > 0) {
         launch_fene_kernel(sys.pos, sys.force, sys.virial,
                             sys.bonds, sys.bond_param_idx, d_fene_params,
                             sys.nbonds, 1, params.box_L, params.inv_L);
     }
-    if (sys.nangles > 0) {
+    if (sys.nangles > 0 && d_angle_table_data) {
+        launch_angle_table_kernel(sys.pos, sys.force, sys.virial,
+                             sys.angles, d_angle_table_idx,
+                             d_angle_table_params, d_angle_table_data,
+                             sys.nangles, params.box_L, params.inv_L);
+    } else if (sys.nangles > 0) {
         launch_angle_kernel(sys.pos, sys.force, sys.virial,
                              sys.angles, d_angle_params,
                              sys.nangles, params.box_L, params.inv_L);
@@ -552,13 +587,23 @@ int main(int argc, char** argv) {
         }
         CUDA_CHECK(cudaEventRecord(force_done_lj, stream_lj));
         CUDA_CHECK(cudaStreamWaitEvent(stream_bonded, force_done_lj, 0));
-        if (sys.nbonds > 0) {
+        if (sys.nbonds > 0 && d_bond_table_data) {
+            launch_bond_table_kernel(sys.pos, sys.force, sys.virial,
+                                sys.bonds, sys.bond_param_idx, d_bond_table_idx,
+                                d_bond_table_params, d_bond_table_data,
+                                sys.nbonds, L_f, inv_L_f, stream_bonded);
+        } else if (sys.nbonds > 0) {
             launch_fene_kernel(sys.pos, sys.force, sys.virial,
                                 sys.bonds, sys.bond_param_idx, d_fene_params,
                                 sys.nbonds, 1, L_f, inv_L_f,
                                 stream_bonded);
         }
-        if (sys.nangles > 0) {
+        if (sys.nangles > 0 && d_angle_table_data) {
+            launch_angle_table_kernel(sys.pos, sys.force, sys.virial,
+                                 sys.angles, d_angle_table_idx,
+                                 d_angle_table_params, d_angle_table_data,
+                                 sys.nangles, L_f, inv_L_f, stream_bonded);
+        } else if (sys.nangles > 0) {
             launch_angle_kernel(sys.pos, sys.force, sys.virial,
                                  sys.angles, d_angle_params,
                                  sys.nangles, L_f, inv_L_f,
