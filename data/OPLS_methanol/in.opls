@@ -1,0 +1,28 @@
+units real
+atom_style full
+boundary p p p
+read_data /home/zhenghaowu/fastMD/data/OPLS_methanol/methanol.data
+pair_style lj/cut/coul/long 10.0
+pair_modify mix geometric
+kspace_style ewald 0.0001
+special_bonds lj 0.0 0.0 0.5 coul 0.0 0.0 0.5
+bond_style harmonic
+bond_coeff 1 320.0 1.41
+bond_coeff 2 340.0 1.09
+bond_coeff 3 553.0 0.945
+angle_style harmonic
+angle_coeff 1 35.0 109.5
+angle_coeff 2 33.0 107.8
+angle_coeff 3 55.0 108.5
+dihedral_style opls
+dihedral_coeff 1 0.0 0.0 0.45 0.0
+pair_coeff 1 1 0.066 3.5
+pair_coeff 2 2 0.17 3.12
+pair_coeff 3 3 0.0 0.0
+pair_coeff 4 4 0.03 2.5
+neighbor 2.0 bin
+neigh_modify delay 0 every 1 check no
+compute peratom all pe/atom pair bond angle dihedral kspace
+dump 1 all custom 1 forces.lmp id fx fy fz
+run 0
+print "ETOT: $(pe)"

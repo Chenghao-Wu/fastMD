@@ -83,4 +83,14 @@ struct SimParams {
     float P_stop  = 0.0f;
     float Pdamp   = 0.0f;
     int   nh_chain_length = 3;
+
+    // Ewald / OPLS Coulomb
+    int   ewald_on   = 0;
+    float ewald_alpha = 0.0f;
+    int   ewald_kmax = 0;
+    float coul_const = 138.9354576f;  // e^2/(4 pi eps0) N_A in kJ*nm/(mol e^2)
+    float ewald14_coul = 0.5f;        // OPLS 1-4 scaling
+    float lj14 = 0.5f;
+    float ewald_self_offset = 0.0f;   // total self-energy, PE correction
+    int   ewald_kcount = 0;           // number of k-vectors (half-shell)
 };

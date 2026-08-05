@@ -141,7 +141,8 @@ void compute_thermo(const float4* vel, const float4* pos, const float4* force,
                      const float* virial, int natoms, float box_L,
                      ThermoOutput* h_output, ThermoBuffers& bufs,
                      int step, FILE* fp,
-                     cudaStream_t stream) {
+                     cudaStream_t stream,
+                     float pe_offset_per_atom) {
     CUDA_CHECK(cudaMemsetAsync(bufs.d_kin_stress, 0, 6 * sizeof(float), stream));
     CUDA_CHECK(cudaMemsetAsync(bufs.d_pe, 0, sizeof(float), stream));
     CUDA_CHECK(cudaMemsetAsync(bufs.d_max_vel, 0, 2 * sizeof(float), stream));
@@ -174,7 +175,7 @@ void compute_thermo(const float4* vel, const float4* pos, const float4* force,
 
     float inv_n = 1.0f / natoms;
     h_output->kinetic_energy = ke * inv_n;
-    h_output->potential_energy = h_pe * inv_n;
+    h_output->potential_energy = h_pe * inv_n + pe_offset_per_atom;
     h_output->temperature = 2.0f * h_output->kinetic_energy / 3.0f;
 
     h_output->max_vel = sqrtf(h_max_vel[0]);

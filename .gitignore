@@ -31,3 +31,6 @@ tests/integration/bonded_ring/thermo_*.dat
 
 # CTest
 Testing/
+
+# Packaging
+dist/

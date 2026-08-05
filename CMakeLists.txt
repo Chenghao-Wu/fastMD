@@ -38,6 +38,11 @@ add_library(core STATIC
     src/neighbor/tile_list.cu
     src/neighbor/verlet_list.cu
     src/force/lj.cu
+    src/force/lj_coul_long.cu
+    src/force/ewald_recip.cu
+    src/force/ewald_excl.cu
+    src/force/bond_harmonic.cu
+    src/force/dihedral_opls.cu
     src/force/table.cu
     src/force/fene.cu
     src/force/angle.cu

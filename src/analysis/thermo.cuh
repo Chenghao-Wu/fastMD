@@ -33,4 +33,5 @@ void compute_thermo(const float4* vel, const float4* pos, const float4* force,
                      ThermoOutput* h_output,
                      ThermoBuffers& bufs,
                      int step, FILE* fp,
-                     cudaStream_t stream = 0);
+                     cudaStream_t stream = 0,
+                     float pe_offset_per_atom = 0.0f);

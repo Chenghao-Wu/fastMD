@@ -1,0 +1,28 @@
+units real
+atom_style full
+boundary p p p
+pair_style lj/cut/coul/long 10.0
+pair_modify mix geometric
+bond_style harmonic
+angle_style harmonic
+dihedral_style opls
+read_data equil.data
+kspace_style ewald 1e-4
+special_bonds lj 0.0 0.0 0.5 coul 0.0 0.0 0.5
+bond_coeff 1 320.0 1.410
+bond_coeff 2 340.0 1.090
+bond_coeff 3 553.0 0.945
+angle_coeff 1 35.0 109.5
+angle_coeff 2 33.0 107.8
+angle_coeff 3 55.0 108.5
+dihedral_coeff 1 0.0 0.0 0.450 0.0
+pair_coeff 1 1 0.066 3.50
+pair_coeff 2 2 0.170 3.12
+pair_coeff 3 3 0.0 0.0
+pair_coeff 4 4 0.030 2.50
+neighbor 2.0 bin
+neigh_modify delay 0 every 1 check no
+fix 1 all nvt temp 300.0 300.0 100.0
+timestep 1.0
+thermo 20000
+run 20000

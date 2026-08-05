@@ -1,0 +1,8 @@
+tolerance 2.000000
+filetype pdb
+output methanol_box.pdb
+pbc 0. 0. 0. 20.334263 20.334263 20.334263
+structure methanol_template.pdb
+  number 125
+  inside box 0. 0. 0. 20.334263 20.334263 20.334263
+end structure

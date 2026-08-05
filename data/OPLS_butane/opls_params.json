@@ -1,0 +1,64 @@
+{
+  "units": "real",
+  "atom_types": [
+    {
+      "name": "CT",
+      "eps": 0.066,
+      "sig": 3.5
+    },
+    {
+      "name": "HC",
+      "eps": 0.03,
+      "sig": 2.5
+    }
+  ],
+  "bond_types": [
+    {
+      "K": 340.0,
+      "r0": 1.09,
+      "desc": "CT-HC"
+    },
+    {
+      "K": 268.0,
+      "r0": 1.529,
+      "desc": "CT-CT"
+    }
+  ],
+  "angle_types": [
+    {
+      "K": 33.0,
+      "theta0": 107.8,
+      "desc": "HC-CT-HC"
+    },
+    {
+      "K": 58.35,
+      "theta0": 112.7,
+      "desc": "CT-CT-CT"
+    },
+    {
+      "K": 37.5,
+      "theta0": 110.7,
+      "desc": "CT-CT-HC"
+    }
+  ],
+  "dihedral_types": [
+    {
+      "V": [
+        1.3,
+        -0.05,
+        0.6,
+        0.0
+      ],
+      "desc": "CT-CT-CT-CT"
+    },
+    {
+      "V": [
+        0.0,
+        0.0,
+        0.318,
+        0.0
+      ],
+      "desc": "X-CT-CT-X"
+    }
+  ]
+}

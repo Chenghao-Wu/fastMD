@@ -36,12 +36,28 @@ void System::allocate(const SimParams& params, const float* h_masses) {
     bonds = nullptr;
     bond_param_idx = nullptr;
     angles = nullptr;
+    dihedrals = nullptr;
+    dihedral_param_idx = nullptr;
     nbonds = 0;
     nangles = 0;
+    ndihedrals = 0;
 
     exclusion_offsets = nullptr;
     exclusion_list = nullptr;
     nexclusions = 0;
+
+    excl13_offsets = nullptr;
+    excl13_list = nullptr;
+    nexcl13 = 0;
+
+    pairs14 = nullptr;
+    npairs14 = 0;
+
+    charges = nullptr;
+    ewald_kvecs = nullptr;
+    ewald_sfac = nullptr;
+    ewald_ek = nullptr;
+    ewald_kcount = 0;
 
     d_mol_id = nullptr;
     d_image = nullptr;
@@ -74,8 +90,17 @@ void System::free() {
     if (bonds) CUDA_CHECK(cudaFree(bonds));
     if (bond_param_idx) CUDA_CHECK(cudaFree(bond_param_idx));
     if (angles) CUDA_CHECK(cudaFree(angles));
+    if (dihedrals) CUDA_CHECK(cudaFree(dihedrals));
+    if (dihedral_param_idx) CUDA_CHECK(cudaFree(dihedral_param_idx));
     if (exclusion_offsets) CUDA_CHECK(cudaFree(exclusion_offsets));
     if (exclusion_list) CUDA_CHECK(cudaFree(exclusion_list));
+    if (excl13_offsets) CUDA_CHECK(cudaFree(excl13_offsets));
+    if (excl13_list) CUDA_CHECK(cudaFree(excl13_list));
+    if (pairs14) CUDA_CHECK(cudaFree(pairs14));
+    if (charges) CUDA_CHECK(cudaFree(charges));
+    if (ewald_kvecs) CUDA_CHECK(cudaFree(ewald_kvecs));
+    if (ewald_sfac) CUDA_CHECK(cudaFree(ewald_sfac));
+    if (ewald_ek) CUDA_CHECK(cudaFree(ewald_ek));
     if (d_mol_id) CUDA_CHECK(cudaFree(d_mol_id));
     if (d_image) CUDA_CHECK(cudaFree(d_image));
 }

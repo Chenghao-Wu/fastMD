@@ -5,6 +5,11 @@
 #include "neighbor/verlet_list.cuh"
 #include "neighbor/skin_trigger.cuh"
 #include "force/lj.cuh"
+#include "force/lj_coul_long.cuh"
+#include "force/ewald_recip.cuh"
+#include "force/ewald_excl.cuh"
+#include "force/bond_harmonic.cuh"
+#include "force/dihedral_opls.cuh"
 #include "force/table.cuh"
 #include "force/fene.cuh"
 #include "force/angle.cuh"
@@ -41,7 +46,13 @@ int main(int argc, char** argv) {
            params.natoms, params.box_L, params.rc, params.dt, params.nsteps);
     if (topo.bonds.size() > 0) printf("  bonds=%zu", topo.bonds.size());
     if (topo.angles.size() > 0) printf("  angles=%zu", topo.angles.size());
+    if (topo.dihedrals.size() > 0) printf("  dihedrals=%zu", topo.dihedrals.size());
     printf("\n");
+    if (params.ewald_on) {
+        printf("[setup]  coulomb=ewald  alpha=%.4f  kmax=%d  coul_const=%.4f  lj14=%.2f  coul14=%.2f\n",
+               params.ewald_alpha, params.ewald_kmax, params.coul_const,
+               params.lj14, params.ewald14_coul);
+    }
 
     if (params.ensemble != Ensemble::Langevin) {
         printf("[setup]  ensemble=%s  T_start=%.2f  T_stop=%.2f  Tdamp=%.2f  chain=%d",
@@ -63,6 +74,26 @@ int main(int argc, char** argv) {
     System sys;
     const float* masses_ptr = topo.masses.empty() ? nullptr : topo.masses.data();
     sys.allocate(params, masses_ptr);
+
+    // OPLS exclusion scheme (1-2,1-3 fully excluded; 1-4 excluded from the
+    // neighbor list and re-added scaled by the pair14 kernel) applies
+    // whenever the system has dihedrals — not only in Ewald mode.
+    bool opls_mode = params.ewald_on || !topo.dihedrals.empty();
+
+    // charges
+    if (!topo.charges.empty()) {
+        CUDA_CHECK(cudaMalloc(&sys.charges, sys.natoms_padded * sizeof(float)));
+        std::vector<float> q_pad(sys.natoms_padded, 0.0f);
+        std::copy(topo.charges.begin(), topo.charges.end(), q_pad.begin());
+        CUDA_CHECK(cudaMemcpy(sys.charges, q_pad.data(),
+                              sys.natoms_padded * sizeof(float),
+                              cudaMemcpyHostToDevice));
+    } else if (opls_mode) {
+        // zero-charge buffer so the pair14 kernel always has a valid pointer
+        CUDA_CHECK(cudaMalloc(&sys.charges, sys.natoms_padded * sizeof(float)));
+        CUDA_CHECK(cudaMemset(sys.charges, 0, sys.natoms_padded * sizeof(float)));
+    }
+
     if (topo.bonds.size() > 0) {
         sys.nbonds = static_cast<int>(topo.bonds.size());
         CUDA_CHECK(cudaMalloc(&sys.bonds, sys.nbonds * sizeof(int2)));
@@ -71,8 +102,15 @@ int main(int argc, char** argv) {
                               sys.nbonds * sizeof(int2), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(sys.bond_param_idx, topo.bond_types.data(),
                               sys.nbonds * sizeof(int), cudaMemcpyHostToDevice));
+    }
 
+    // exclusions: OPLS mode (1-2,1-3,1-4 + scaled pair list) or legacy 1-2 only
+    if (opls_mode) {
+        build_exclusions_opls(topo, topo);
+    } else if (sys.nbonds > 0) {
         build_exclusions(topo, topo);
+    }
+    if (!topo.exclusion_offsets.empty()) {
         sys.nexclusions = static_cast<int>(topo.exclusion_list.size());
         if (sys.nexclusions > 0) {
             CUDA_CHECK(cudaMalloc(&sys.exclusion_offsets,
@@ -84,6 +122,35 @@ int main(int argc, char** argv) {
             CUDA_CHECK(cudaMemcpy(sys.exclusion_list, topo.exclusion_list.data(),
                                   sys.nexclusions * sizeof(int), cudaMemcpyHostToDevice));
         }
+    }
+    if (opls_mode) {
+        sys.nexcl13 = static_cast<int>(topo.excl13_list.size());
+        if (sys.nexcl13 > 0) {
+            CUDA_CHECK(cudaMalloc(&sys.excl13_offsets,
+                                  (params.natoms + 1) * sizeof(int)));
+            CUDA_CHECK(cudaMalloc(&sys.excl13_list,
+                                  sys.nexcl13 * sizeof(int)));
+            CUDA_CHECK(cudaMemcpy(sys.excl13_offsets, topo.excl13_offsets.data(),
+                                  (params.natoms + 1) * sizeof(int), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(sys.excl13_list, topo.excl13_list.data(),
+                                  sys.nexcl13 * sizeof(int), cudaMemcpyHostToDevice));
+        }
+        sys.npairs14 = static_cast<int>(topo.pairs14.size());
+        if (sys.npairs14 > 0) {
+            CUDA_CHECK(cudaMalloc(&sys.pairs14, sys.npairs14 * sizeof(int2)));
+            CUDA_CHECK(cudaMemcpy(sys.pairs14, topo.pairs14.data(),
+                                  sys.npairs14 * sizeof(int2), cudaMemcpyHostToDevice));
+        }
+    }
+
+    if (topo.dihedrals.size() > 0) {
+        sys.ndihedrals = static_cast<int>(topo.dihedrals.size());
+        CUDA_CHECK(cudaMalloc(&sys.dihedrals, sys.ndihedrals * sizeof(int4)));
+        CUDA_CHECK(cudaMalloc(&sys.dihedral_param_idx, sys.ndihedrals * sizeof(int)));
+        CUDA_CHECK(cudaMemcpy(sys.dihedrals, topo.dihedrals.data(),
+                              sys.ndihedrals * sizeof(int4), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(sys.dihedral_param_idx, topo.dihedral_types.data(),
+                              sys.ndihedrals * sizeof(int), cudaMemcpyHostToDevice));
     }
     if (topo.angles.size() > 0) {
         sys.nangles = static_cast<int>(topo.angles.size());
@@ -124,13 +191,52 @@ int main(int argc, char** argv) {
                               cudaMemcpyHostToDevice));
     }
 
+    // Ewald setup: k-vector list, structure factor buffer, self-energy offset
+    if (params.ewald_on) {
+        std::vector<int3> kvecs = ewald_build_kvectors(
+            params.ewald_kmax, params.box_L, params.ewald_alpha);
+        params.ewald_kcount = (int)kvecs.size();
+        sys.ewald_kcount = params.ewald_kcount;
+        printf("[setup]  ewald kcount=%d\n", params.ewald_kcount);
+
+        CUDA_CHECK(cudaMalloc(&sys.ewald_kvecs, kvecs.size() * sizeof(int3)));
+        CUDA_CHECK(cudaMemcpy(sys.ewald_kvecs, kvecs.data(),
+                              kvecs.size() * sizeof(int3), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMalloc(&sys.ewald_sfac, 2 * kvecs.size() * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&sys.ewald_ek,
+                              sys.natoms_padded * 3 * sizeof(float)));
+
+        if (topo.charges.empty())
+            throw std::runtime_error("coulomb ewald requires charges (Atoms # full)");
+        params.ewald_self_offset = ewald_self_offset(
+            topo.charges, params.coul_const, params.ewald_alpha, params.box_L);
+        printf("[setup]  ewald self-energy offset=%.4f (total, not per-atom)\n",
+               params.ewald_self_offset);
+    }
+
     FENEParams* d_fene_params = nullptr;
     AngleParams* d_angle_params = nullptr;
+    BondHarmonicParams* d_hbond_params = nullptr;
+    OPLSDihedralParams* d_dihedral_params = nullptr;
     if (topo.bond_params.size() > 0) {
         CUDA_CHECK(cudaMalloc(&d_fene_params,
                               topo.bond_params.size() * sizeof(FENEParams)));
         CUDA_CHECK(cudaMemcpy(d_fene_params, topo.bond_params.data(),
                               topo.bond_params.size() * sizeof(FENEParams),
+                              cudaMemcpyHostToDevice));
+    }
+    if (topo.hbond_params.size() > 0) {
+        CUDA_CHECK(cudaMalloc(&d_hbond_params,
+                              topo.hbond_params.size() * sizeof(BondHarmonicParams)));
+        CUDA_CHECK(cudaMemcpy(d_hbond_params, topo.hbond_params.data(),
+                              topo.hbond_params.size() * sizeof(BondHarmonicParams),
+                              cudaMemcpyHostToDevice));
+    }
+    if (topo.dihedral_params.size() > 0) {
+        CUDA_CHECK(cudaMalloc(&d_dihedral_params,
+                              topo.dihedral_params.size() * sizeof(OPLSDihedralParams)));
+        CUDA_CHECK(cudaMemcpy(d_dihedral_params, topo.dihedral_params.data(),
+                              topo.dihedral_params.size() * sizeof(OPLSDihedralParams),
                               cudaMemcpyHostToDevice));
     }
     if (topo.angle_params.size() > 0) {
@@ -262,6 +368,16 @@ int main(int argc, char** argv) {
                 a.y = inv_perm[a.y];
                 a.z = inv_perm[a.z];
             }
+            for (auto& d : topo.dihedrals) {
+                d.x = inv_perm[d.x];
+                d.y = inv_perm[d.y];
+                d.z = inv_perm[d.z];
+                d.w = inv_perm[d.w];
+            }
+            // Rebuild pairs14 with remapped indices
+            if (opls_mode) {
+                build_exclusions_opls(topo, topo);
+            }
 
             // Re-upload sorted data to GPU
             std::copy(topo.positions.begin(), topo.positions.end(), pos_pad.begin());
@@ -281,8 +397,10 @@ int main(int argc, char** argv) {
                                       sys.nangles * sizeof(int4), cudaMemcpyHostToDevice));
             }
             // Also rebuild exclusions since indices changed
-            if (sys.nbonds > 0) {
-                build_exclusions(topo, topo);
+            if (sys.nbonds > 0 || opls_mode) {
+                if (!opls_mode) build_exclusions(topo, topo);
+                // (OPLS exclusions were already rebuilt above via
+                //  build_exclusions_opls; here re-upload whichever CSR is live)
                 sys.nexclusions = static_cast<int>(topo.exclusion_list.size());
                 if (sys.nexclusions > 0) {
                     CUDA_CHECK(cudaFree(sys.exclusion_offsets));
@@ -295,6 +413,32 @@ int main(int argc, char** argv) {
                                           (params.natoms + 1) * sizeof(int), cudaMemcpyHostToDevice));
                     CUDA_CHECK(cudaMemcpy(sys.exclusion_list, topo.exclusion_list.data(),
                                           sys.nexclusions * sizeof(int), cudaMemcpyHostToDevice));
+                }
+                if (opls_mode) {
+                    sys.nexcl13 = static_cast<int>(topo.excl13_list.size());
+                    if (sys.nexcl13 > 0) {
+                        CUDA_CHECK(cudaFree(sys.excl13_offsets));
+                        CUDA_CHECK(cudaFree(sys.excl13_list));
+                        CUDA_CHECK(cudaMalloc(&sys.excl13_offsets,
+                                              (params.natoms + 1) * sizeof(int)));
+                        CUDA_CHECK(cudaMalloc(&sys.excl13_list,
+                                              sys.nexcl13 * sizeof(int)));
+                        CUDA_CHECK(cudaMemcpy(sys.excl13_offsets, topo.excl13_offsets.data(),
+                                              (params.natoms + 1) * sizeof(int), cudaMemcpyHostToDevice));
+                        CUDA_CHECK(cudaMemcpy(sys.excl13_list, topo.excl13_list.data(),
+                                              sys.nexcl13 * sizeof(int), cudaMemcpyHostToDevice));
+                    }
+                    sys.npairs14 = static_cast<int>(topo.pairs14.size());
+                    if (sys.npairs14 > 0) {
+                        CUDA_CHECK(cudaFree(sys.pairs14));
+                        CUDA_CHECK(cudaMalloc(&sys.pairs14, sys.npairs14 * sizeof(int2)));
+                        CUDA_CHECK(cudaMemcpy(sys.pairs14, topo.pairs14.data(),
+                                              sys.npairs14 * sizeof(int2), cudaMemcpyHostToDevice));
+                    }
+                    if (sys.ndihedrals > 0) {
+                        CUDA_CHECK(cudaMemcpy(sys.dihedrals, topo.dihedrals.data(),
+                                              sys.ndihedrals * sizeof(int4), cudaMemcpyHostToDevice));
+                    }
                 }
             }
 
@@ -333,7 +477,7 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaEventCreate(&force_done_bonded));
     CUDA_CHECK(cudaEventCreate(&pos_ready));
 
-    if (sys.nbonds == 0 && sys.nangles == 0)
+    if (sys.nbonds == 0 && sys.nangles == 0 && sys.ndihedrals == 0 && !params.ewald_on)
         morton.sort_and_permute(sys.pos, sys.vel, params.natoms, params.inv_L);
     CUDA_CHECK(cudaMemcpy(sys.pos_ref, sys.pos, np * sizeof(float4),
                            cudaMemcpyDeviceToDevice));
@@ -343,10 +487,42 @@ int main(int argc, char** argv) {
                  params.rc + params.skin);
 
     sys.zero_virial();
-    launch_lj_kernel(sys.pos, sys.force, sys.virial, sys.lj_params,
-                      verlet.neighbors, verlet.num_neighbors,
-                      params.natoms, params.ntypes,
-                      params.rc2, params.box_L, params.inv_L);
+    if (params.ewald_on) {
+        // fused LJ + real-space erfc Coulomb (overwrites force, like lj.cu)
+        launch_lj_coul_long_kernel(sys.pos, sys.charges, sys.force, sys.virial,
+                                   sys.lj_params,
+                                   verlet.neighbors, verlet.num_neighbors,
+                                   params.natoms, params.ntypes,
+                                   params.coul_const, params.ewald_alpha,
+                                   params.rc2, params.box_L, params.inv_L);
+        launch_ewald_sf_kernel(sys.pos, sys.charges, sys.ewald_kvecs,
+                               sys.ewald_sfac, params.natoms,
+                               sys.ewald_kcount, params.box_L);
+        launch_ewald_recip_kernel(sys.pos, sys.charges, sys.ewald_kvecs,
+                                  sys.ewald_sfac, sys.force, sys.virial,
+                                  params.natoms, sys.ewald_kcount,
+                                  params.coul_const, params.ewald_alpha,
+                                  params.box_L);
+        launch_ewald_excl_kernel(sys.pos, sys.charges, sys.force, sys.virial,
+                                 sys.excl13_offsets, sys.excl13_list,
+                                 params.natoms, sys.nexcl13,
+                                 params.coul_const, params.ewald_alpha,
+                                 params.box_L, params.inv_L);
+    } else {
+        launch_lj_kernel(sys.pos, sys.force, sys.virial, sys.lj_params,
+                          verlet.neighbors, verlet.num_neighbors,
+                          params.natoms, params.ntypes,
+                          params.rc2, params.box_L, params.inv_L);
+    }
+    if (sys.npairs14 > 0) {
+        // scaled 1-4 pairs: runs in both Ewald and plain-cutoff OPLS modes
+        launch_pair14_kernel(sys.pos, sys.charges, sys.force, sys.virial,
+                             sys.pairs14, sys.lj_params,
+                             sys.npairs14, params.ntypes,
+                             params.coul_const, params.ewald_alpha,
+                             params.lj14, params.ewald14_coul,
+                             params.box_L, params.inv_L);
+    }
     if (!topo.table_params.empty()) {
         launch_table_kernel(sys.pos, sys.force, sys.virial,
                             sys.d_table_idx, sys.d_table_params, sys.d_table_data,
@@ -359,20 +535,44 @@ int main(int argc, char** argv) {
                             sys.bonds, sys.bond_param_idx, d_bond_table_idx,
                             d_bond_table_params, d_bond_table_data,
                             sys.nbonds, params.box_L, params.inv_L);
-    } else if (sys.nbonds > 0) {
+    } else if (sys.nbonds > 0 && d_hbond_params) {
+        launch_bond_harmonic_kernel(sys.pos, sys.force, sys.virial,
+                            sys.bonds, sys.bond_param_idx, d_hbond_params,
+                            sys.nbonds, params.box_L, params.inv_L);
+    } else if (sys.nbonds > 0 && d_fene_params) {
         launch_fene_kernel(sys.pos, sys.force, sys.virial,
                             sys.bonds, sys.bond_param_idx, d_fene_params,
                             sys.nbonds, 1, params.box_L, params.inv_L);
+    } else if (sys.nbonds > 0) {
+        fprintf(stderr, "Warning: %d bonds in data file but no bond params "
+                        "— skipping bond forces\n", sys.nbonds);
     }
     if (sys.nangles > 0 && d_angle_table_data) {
         launch_angle_table_kernel(sys.pos, sys.force, sys.virial,
                              sys.angles, d_angle_table_idx,
                              d_angle_table_params, d_angle_table_data,
                              sys.nangles, params.box_L, params.inv_L);
-    } else if (sys.nangles > 0) {
+    } else if (sys.nangles > 0 && d_angle_params) {
         launch_angle_kernel(sys.pos, sys.force, sys.virial,
                              sys.angles, d_angle_params,
                              sys.nangles, params.box_L, params.inv_L);
+    } else if (sys.nangles > 0) {
+        fprintf(stderr, "Warning: %d angles in data file but no angle params "
+                        "— skipping angle forces\n", sys.nangles);
+    }
+    if (sys.ndihedrals > 0 && d_dihedral_params) {
+        launch_dihedral_opls_kernel(sys.pos, sys.force, sys.virial,
+                             sys.dihedrals, sys.dihedral_param_idx,
+                             d_dihedral_params,
+                             sys.ndihedrals, params.box_L, params.inv_L);
+    } else if (sys.ndihedrals > 0) {
+        static bool warned = false;
+        if (!warned) {
+            fprintf(stderr, "Warning: %d dihedrals in data file but no "
+                            "dihedral_opls params — skipping dihedral forces\n",
+                    sys.ndihedrals);
+            warned = true;
+        }
     }
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -531,7 +731,7 @@ int main(int argc, char** argv) {
             steps_since_rebuild = 0;
 
             if (params.ensemble == Ensemble::Langevin) {
-                if (sys.nbonds == 0 && sys.nangles == 0)
+                if (sys.nbonds == 0 && sys.nangles == 0 && sys.ndihedrals == 0 && !params.ewald_on)
                     morton.sort_and_permute(sys.pos, sys.vel, params.natoms,
                                              params.inv_L);
                 CUDA_CHECK(cudaMemcpy(sys.pos_ref, sys.pos,
@@ -574,10 +774,41 @@ int main(int argc, char** argv) {
         float inv_L_f = (params.ensemble != Ensemble::Langevin)
                         ? nose_hoover.inv_L : params.inv_L;
 
-        launch_lj_kernel(sys.pos, sys.force, sys.virial, sys.lj_params,
-                          verlet.neighbors, verlet.num_neighbors,
-                          params.natoms, params.ntypes,
-                          params.rc2, L_f, inv_L_f, stream_lj);
+        if (params.ewald_on) {
+            launch_lj_coul_long_kernel(sys.pos, sys.charges, sys.force, sys.virial,
+                                       sys.lj_params,
+                                       verlet.neighbors, verlet.num_neighbors,
+                                       params.natoms, params.ntypes,
+                                       params.coul_const, params.ewald_alpha,
+                                       params.rc2, L_f, inv_L_f, stream_lj);
+            launch_ewald_sf_kernel(sys.pos, sys.charges, sys.ewald_kvecs,
+                                   sys.ewald_sfac, params.natoms,
+                                   sys.ewald_kcount, L_f, stream_lj);
+            launch_ewald_recip_kernel(sys.pos, sys.charges, sys.ewald_kvecs,
+                                      sys.ewald_sfac, sys.force, sys.virial,
+                                      params.natoms, sys.ewald_kcount,
+                                      params.coul_const, params.ewald_alpha,
+                                      L_f, stream_lj);
+            launch_ewald_excl_kernel(sys.pos, sys.charges, sys.force, sys.virial,
+                                     sys.excl13_offsets, sys.excl13_list,
+                                     params.natoms, sys.nexcl13,
+                                     params.coul_const, params.ewald_alpha,
+                                     L_f, inv_L_f, stream_lj);
+        } else {
+            launch_lj_kernel(sys.pos, sys.force, sys.virial, sys.lj_params,
+                              verlet.neighbors, verlet.num_neighbors,
+                              params.natoms, params.ntypes,
+                              params.rc2, L_f, inv_L_f, stream_lj);
+        }
+        if (sys.npairs14 > 0) {
+            // scaled 1-4 pairs: runs in both Ewald and plain-cutoff OPLS modes
+            launch_pair14_kernel(sys.pos, sys.charges, sys.force, sys.virial,
+                                 sys.pairs14, sys.lj_params,
+                                 sys.npairs14, params.ntypes,
+                                 params.coul_const, params.ewald_alpha,
+                                 params.lj14, params.ewald14_coul,
+                                 L_f, inv_L_f, stream_lj);
+        }
         if (!topo.table_params.empty()) {
             launch_table_kernel(sys.pos, sys.force, sys.virial,
                                 sys.d_table_idx, sys.d_table_params, sys.d_table_data,
@@ -592,7 +823,11 @@ int main(int argc, char** argv) {
                                 sys.bonds, sys.bond_param_idx, d_bond_table_idx,
                                 d_bond_table_params, d_bond_table_data,
                                 sys.nbonds, L_f, inv_L_f, stream_bonded);
-        } else if (sys.nbonds > 0) {
+        } else if (sys.nbonds > 0 && d_hbond_params) {
+            launch_bond_harmonic_kernel(sys.pos, sys.force, sys.virial,
+                                sys.bonds, sys.bond_param_idx, d_hbond_params,
+                                sys.nbonds, L_f, inv_L_f, stream_bonded);
+        } else if (sys.nbonds > 0 && d_fene_params) {
             launch_fene_kernel(sys.pos, sys.force, sys.virial,
                                 sys.bonds, sys.bond_param_idx, d_fene_params,
                                 sys.nbonds, 1, L_f, inv_L_f,
@@ -603,11 +838,17 @@ int main(int argc, char** argv) {
                                  sys.angles, d_angle_table_idx,
                                  d_angle_table_params, d_angle_table_data,
                                  sys.nangles, L_f, inv_L_f, stream_bonded);
-        } else if (sys.nangles > 0) {
+        } else if (sys.nangles > 0 && d_angle_params) {
             launch_angle_kernel(sys.pos, sys.force, sys.virial,
                                  sys.angles, d_angle_params,
                                  sys.nangles, L_f, inv_L_f,
                                  stream_bonded);
+        }
+        if (sys.ndihedrals > 0 && d_dihedral_params) {
+            launch_dihedral_opls_kernel(sys.pos, sys.force, sys.virial,
+                                 sys.dihedrals, sys.dihedral_param_idx,
+                                 d_dihedral_params,
+                                 sys.ndihedrals, L_f, inv_L_f, stream_bonded);
         }
 
         CUDA_CHECK(cudaEventRecord(force_done_bonded, stream_bonded));
@@ -683,7 +924,9 @@ int main(int argc, char** argv) {
             ThermoOutput thermo;
             compute_thermo(sys.vel, sys.pos, sys.force, sys.virial,
                             params.natoms, thermo_L, &thermo,
-                            thermo_bufs, step, thermo_bufs.fp);
+                            thermo_bufs, step, thermo_bufs.fp, 0,
+                            params.ewald_on
+                                ? params.ewald_self_offset / params.natoms : 0.0f);
 
             if (need_thermo) {
                 float etot = thermo.kinetic_energy + thermo.potential_energy;
@@ -730,8 +973,10 @@ int main(int argc, char** argv) {
             write_lammps_data(fname, sys.pos, sys.vel, sys.d_image, sys.d_mol_id,
                               sys.bonds, sys.bond_param_idx, sys.angles,
                               topo.masses.empty() ? nullptr : topo.masses.data(),
-                              params.natoms, sys.nbonds, sys.nangles,
-                              params.ntypes, (int)topo.bond_params.size(), (int)topo.angle_params.size(),
+                              sys.charges, sys.dihedrals, sys.dihedral_param_idx,
+                              params.natoms, sys.nbonds, sys.nangles, sys.ndihedrals,
+                              params.ntypes, (int)topo.bond_params.size() + (int)topo.hbond_params.size(),
+                              (int)topo.angle_params.size(), (int)topo.dihedral_params.size(),
                               restart_L, step);
         }
 
@@ -787,15 +1032,17 @@ int main(int argc, char** argv) {
         write_lammps_data(fname, sys.pos, sys.vel, sys.d_image, sys.d_mol_id,
                           sys.bonds, sys.bond_param_idx, sys.angles,
                           topo.masses.empty() ? nullptr : topo.masses.data(),
-                          params.natoms, sys.nbonds, sys.nangles,
-                          params.ntypes, (int)topo.bond_params.size(), (int)topo.angle_params.size(),
+                          sys.charges, sys.dihedrals, sys.dihedral_param_idx,
+                          params.natoms, sys.nbonds, sys.nangles, sys.ndihedrals,
+                          params.ntypes, (int)topo.bond_params.size() + (int)topo.hbond_params.size(),
+                          (int)topo.angle_params.size(), (int)topo.dihedral_params.size(),
                           final_L, params.nsteps);
     }
 
     auto t_end = std::chrono::steady_clock::now();
     double elapsed = std::chrono::duration<double>(t_end - t_start).count();
     double steps_per_sec = params.nsteps / elapsed;
-    double ns_per_day = (params.nsteps * params.dt) / (elapsed / 86400.0);
+    double ns_per_day = (params.nsteps * params.dt / 1000.0) / (elapsed / 86400.0);
 
     printf("Wall time: %.3f s  |  Steps/s: %.1f  |  ns/day: %.3f\n",
            elapsed, steps_per_sec, ns_per_day);
@@ -843,6 +1090,10 @@ int main(int argc, char** argv) {
     langevin.free();
     verlet.free();
     morton.free();
+    if (d_fene_params) CUDA_CHECK(cudaFree(d_fene_params));
+    if (d_angle_params) CUDA_CHECK(cudaFree(d_angle_params));
+    if (d_hbond_params) CUDA_CHECK(cudaFree(d_hbond_params));
+    if (d_dihedral_params) CUDA_CHECK(cudaFree(d_dihedral_params));
     sys.free();
     CUDA_CHECK(cudaEventDestroy(force_done_lj));
     CUDA_CHECK(cudaEventDestroy(force_done_bonded));

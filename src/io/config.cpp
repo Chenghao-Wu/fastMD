@@ -21,6 +21,10 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
     std::vector<BondType> bond_types_params;
     std::vector<AngleType> angle_types_params;
 
+    std::vector<std::tuple<int,float,float>> lj_type_entries;
+    std::vector<std::tuple<int,float,float>> bond_harmonic_entries;
+    std::vector<std::tuple<int,float,float,float,float>> dihedral_entries;
+
     std::ifstream in(filename);
     if (!in.is_open()) throw std::runtime_error("Cannot open config: " + filename);
 
@@ -104,6 +108,36 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
             iss >> ti >> tj >> eps >> sig;
             lj_entries.push_back({ti, tj, eps, sig});
         }
+        else if (key == "lj_type") {
+            int t; float eps, sig;
+            iss >> t >> eps >> sig;
+            lj_type_entries.push_back({t, eps, sig});
+        }
+        else if (key == "coulomb") {
+            std::string style;
+            iss >> style;
+            if (style == "ewald") {
+                params.ewald_on = 1;
+                iss >> params.ewald_alpha >> params.ewald_kmax;
+            } else {
+                throw std::runtime_error("coulomb: unknown style '" + style +
+                                         "' (supported: ewald)");
+            }
+        }
+        else if (key == "coulomb_const") iss >> params.coul_const;
+        else if (key == "special_bonds_14") {
+            iss >> params.lj14 >> params.ewald14_coul;
+        }
+        else if (key == "bond_harmonic") {
+            int t; float k, r0;
+            iss >> t >> k >> r0;
+            bond_harmonic_entries.push_back({t, k, r0});
+        }
+        else if (key == "dihedral_opls") {
+            int t; float k1, k2, k3, k4;
+            iss >> t >> k1 >> k2 >> k3 >> k4;
+            dihedral_entries.push_back({t, k1, k2, k3, k4});
+        }
         else if (key == "table") {
             int ti, tj; std::string filename, keyword;
             iss >> ti >> tj >> filename >> keyword;
@@ -140,9 +174,36 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
     }
 
     topo.lj_params.resize(params.ntypes * params.ntypes, make_float2(0,0));
+    // geometric mixing from per-type lj_type entries (OPLS)
+    if (!lj_type_entries.empty()) {
+        if (!lj_entries.empty())
+            throw std::runtime_error("lj_type and lj cannot both be used");
+        std::vector<float2> lp(params.ntypes, make_float2(0,0));
+        for (auto& [t, eps, sig] : lj_type_entries) {
+            if (t < 0 || t >= params.ntypes)
+                throw std::runtime_error("lj_type index out of range");
+            lp[t] = make_float2(eps, sig);
+        }
+        for (int ti = 0; ti < params.ntypes; ti++)
+            for (int tj = 0; tj < params.ntypes; tj++)
+                topo.lj_params[ti * params.ntypes + tj] =
+                    make_float2(sqrtf(lp[ti].x * lp[tj].x),
+                                sqrtf(lp[ti].y * lp[tj].y));
+    }
     for (auto& [ti, tj, eps, sig] : lj_entries) {
         topo.lj_params[ti * params.ntypes + tj] = make_float2(eps, sig);
         topo.lj_params[tj * params.ntypes + ti] = make_float2(eps, sig);
+    }
+
+    for (auto& [t, k, r0] : bond_harmonic_entries) {
+        if ((int)topo.hbond_params.size() <= t)
+            topo.hbond_params.resize(t + 1, {0, 0});
+        topo.hbond_params[t] = {k, r0};
+    }
+    for (auto& [t, k1, k2, k3, k4] : dihedral_entries) {
+        if ((int)topo.dihedral_params.size() <= t)
+            topo.dihedral_params.resize(t + 1, {0, 0, 0, 0});
+        topo.dihedral_params[t] = {k1, k2, k3, k4};
     }
 
     topo.table_idx.resize(params.ntypes * params.ntypes, -1);
@@ -245,6 +306,18 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
     if (params.ensemble == Ensemble::NPT_NH && params.Pdamp <= 0.0f) {
         throw std::runtime_error("Pdamp must be > 0 for npt_nh");
     }
+
+    if (params.ewald_on) {
+        if (params.ewald_alpha <= 0.0f)
+            throw std::runtime_error("coulomb ewald: alpha must be > 0 [1/length]");
+        if (params.ewald_kmax < 1 || params.ewald_kmax > 12)
+            throw std::runtime_error("coulomb ewald: kmax must be in [1, 12]");
+        if (!topo.hbond_params.empty() && !bond_types_params.empty())
+            throw std::runtime_error("bond_harmonic and bond_type (FENE) cannot both be used");
+    }
+    if (!topo.dihedral_params.empty() && !params.ewald_on)
+        fprintf(stderr, "Warning: dihedral_opls defined without coulomb ewald — "
+                        "1-4 LJ/Coulomb pairs will not be scaled\n");
 
     return params;
 }
