@@ -4,6 +4,7 @@
 
 void parse_lammps_data(const std::string& path, TopologyData& topo);
 void build_exclusions(const TopologyData& in_topo, TopologyData& out_topo);
+void build_exclusions_opls(const TopologyData& in_topo, TopologyData& out_topo);
 
 void write_lammps_data(const std::string& path,
                        const float4* d_pos,
@@ -14,8 +15,11 @@ void write_lammps_data(const std::string& path,
                        const int*    d_bond_types,
                        const int4*   d_angles,
                        const float*  masses,
-                       int natoms, int nbonds, int nangles,
-                       int ntypes, int nbond_types, int nangle_types,
+                       const float*  d_charges,
+                       const int4*   d_dihedrals,
+                       const int*    d_dihedral_types,
+                       int natoms, int nbonds, int nangles, int ndihedrals,
+                       int ntypes, int nbond_types, int nangle_types, int ndihedral_types,
                        float box_L,
                        int64_t step,
                        cudaStream_t stream = 0);

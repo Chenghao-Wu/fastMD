@@ -6,6 +6,7 @@
 #include <cctype>
 #include <string>
 #include <unordered_map>
+#include <set>
 #include <algorithm>
 #include <vector>
 #include <cmath>
@@ -51,7 +52,7 @@ void parse_lammps_data(const std::string& path, TopologyData& topo) {
         file.seekg(0);
     }
 
-    enum class Section { None, Atoms, Velocities, Bonds, Angles, Masses };
+    enum class Section { None, Atoms, Velocities, Bonds, Angles, Masses, Dihedrals };
     Section current = Section::None;
     std::string atom_style = "atomic";  // default
 
@@ -83,11 +84,13 @@ void parse_lammps_data(const std::string& path, TopologyData& topo) {
             } else if (trimmed.find("Angles") == 0) {
                 current = Section::Angles;
                 continue;
+            } else if (trimmed.find("Dihedrals") == 0) {
+                current = Section::Dihedrals;
+                continue;
             } else if (trimmed.find("Masses") == 0) {
                 current = Section::Masses;
                 continue;
             } else if (
-                trimmed.find("Dihedrals") == 0 ||
                 trimmed.find("Impropers") == 0 ||
                 trimmed.find("Pair Coeffs") == 0 ||
                 trimmed.find("Bond Coeffs") == 0 ||
@@ -148,9 +151,11 @@ void parse_lammps_data(const std::string& path, TopologyData& topo) {
                 id = std::stoi(tokens[0]);
                 mol = std::stoi(tokens[1]);
                 type = std::stoi(tokens[2]);
+                float q = std::stof(tokens[3]);
                 x = std::stof(tokens[4]);
                 y = std::stof(tokens[5]);
                 z = std::stof(tokens[6]);
+                topo.charges.push_back(q);
                 if (tokens.size() >= 10) {
                     ix = std::stoi(tokens[7]);
                     iy = std::stoi(tokens[8]);
@@ -217,6 +222,21 @@ void parse_lammps_data(const std::string& path, TopologyData& topo) {
                                             static_cast<int>(it2->second),
                                             static_cast<int>(it3->second),
                                             type - 1));
+        } else if (current == Section::Dihedrals) {
+            int id, type, atom1, atom2, atom3, atom4;
+            iss >> id >> type >> atom1 >> atom2 >> atom3 >> atom4;
+            if (iss.fail()) continue;
+            auto it1 = id_to_idx.find(atom1);
+            auto it2 = id_to_idx.find(atom2);
+            auto it3 = id_to_idx.find(atom3);
+            auto it4 = id_to_idx.find(atom4);
+            if (it1 == id_to_idx.end() || it2 == id_to_idx.end() ||
+                it3 == id_to_idx.end() || it4 == id_to_idx.end()) continue;
+            topo.dihedrals.push_back(make_int4(static_cast<int>(it1->second),
+                                               static_cast<int>(it2->second),
+                                               static_cast<int>(it3->second),
+                                               static_cast<int>(it4->second)));
+            topo.dihedral_types.push_back(type - 1);
         }
     }
 
@@ -252,6 +272,75 @@ void build_exclusions(const TopologyData& in_topo, TopologyData& out_topo) {
     out_topo.exclusion_offsets[natoms] = static_cast<int>(out_topo.exclusion_list.size());
 }
 
+// OPLS mode (special_bonds 0 0 0.5):
+//  - exclusion CSR gets 1-2, 1-3 and 1-4 (the pair14 kernel re-adds scaled 1-4)
+//  - excl13 CSR gets 1-2 and 1-3 only (Ewald real-space erf subtraction)
+//  - pairs14: unique (i < j) dihedral end-pairs
+void build_exclusions_opls(const TopologyData& in_topo, TopologyData& out_topo) {
+    int natoms = static_cast<int>(in_topo.positions.size());
+    std::vector<std::vector<int>> bond_adj(natoms);
+    for (const auto& b : in_topo.bonds) {
+        bond_adj[b.x].push_back(b.y);
+        bond_adj[b.y].push_back(b.x);
+    }
+    for (auto& adj : bond_adj) {
+        std::sort(adj.begin(), adj.end());
+        adj.erase(std::unique(adj.begin(), adj.end()), adj.end());
+    }
+
+    // 1-2 and 1-3 set per atom
+    std::vector<std::vector<int>> ex13(natoms);
+    for (int i = 0; i < natoms; i++) {
+        ex13[i] = bond_adj[i];  // 1-2
+        for (int j : bond_adj[i])
+            for (int k : bond_adj[j])
+                if (k != i) ex13[i].push_back(k);  // 1-3
+        std::sort(ex13[i].begin(), ex13[i].end());
+        ex13[i].erase(std::unique(ex13[i].begin(), ex13[i].end()), ex13[i].end());
+    }
+
+    // 1-4 pairs from dihedral end atoms (unique, i < j)
+    std::set<std::pair<int,int>> p14set;
+    for (const auto& d : in_topo.dihedrals) {
+        int i = d.x, l = d.w;
+        if (i == l) continue;
+        if (i > l) std::swap(i, l);
+        // skip if the "1-4" pair is actually 1-2 or 1-3 (cyclic topology)
+        if (std::binary_search(ex13[i].begin(), ex13[i].end(), l)) continue;
+        p14set.insert({i, l});
+    }
+    out_topo.pairs14.clear();
+    for (auto& pr : p14set)
+        out_topo.pairs14.push_back(make_int2(pr.first, pr.second));
+
+    // full exclusion CSR = 1-2,1-3,1-4
+    out_topo.exclusion_offsets.resize(natoms + 1, 0);
+    out_topo.exclusion_list.clear();
+    for (int i = 0; i < natoms; i++) {
+        std::vector<int> all = ex13[i];
+        for (auto& pr : p14set) {
+            if (pr.first == i) all.push_back(pr.second);
+            else if (pr.second == i) all.push_back(pr.first);
+        }
+        std::sort(all.begin(), all.end());
+        all.erase(std::unique(all.begin(), all.end()), all.end());
+        out_topo.exclusion_offsets[i] = static_cast<int>(out_topo.exclusion_list.size());
+        out_topo.exclusion_list.insert(out_topo.exclusion_list.end(),
+                                       all.begin(), all.end());
+    }
+    out_topo.exclusion_offsets[natoms] = static_cast<int>(out_topo.exclusion_list.size());
+
+    // 1-2/1-3-only CSR (Ewald real-space correction)
+    out_topo.excl13_offsets.resize(natoms + 1, 0);
+    out_topo.excl13_list.clear();
+    for (int i = 0; i < natoms; i++) {
+        out_topo.excl13_offsets[i] = static_cast<int>(out_topo.excl13_list.size());
+        out_topo.excl13_list.insert(out_topo.excl13_list.end(),
+                                    ex13[i].begin(), ex13[i].end());
+    }
+    out_topo.excl13_offsets[natoms] = static_cast<int>(out_topo.excl13_list.size());
+}
+
 std::string build_restart_filename(const std::string& base, int64_t step) {
     size_t dot = base.rfind('.');
     if (dot != std::string::npos)
@@ -275,8 +364,11 @@ void write_lammps_data(const std::string& path,
                        const int*    d_bond_types,
                        const int4*   d_angles,
                        const float*  masses,
-                       int natoms, int nbonds, int nangles,
-                       int ntypes, int nbond_types, int nangle_types,
+                       const float*  d_charges,
+                       const int4*   d_dihedrals,
+                       const int*    d_dihedral_types,
+                       int natoms, int nbonds, int nangles, int ndihedrals,
+                       int ntypes, int nbond_types, int nangle_types, int ndihedral_types,
                        float box_L,
                        int64_t step,
                        cudaStream_t stream) {
@@ -288,6 +380,8 @@ void write_lammps_data(const std::string& path,
     std::vector<int2> h_bonds(nbonds);
     std::vector<int> h_bond_types(nbonds);
     std::vector<int4> h_angles(nangles);
+    std::vector<int4> h_dihedrals(ndihedrals);
+    std::vector<int> h_dihedral_types(ndihedrals);
 
     CUDA_CHECK(cudaMemcpyAsync(h_pos.data(), d_pos,
                                 natoms * sizeof(float4),
@@ -315,6 +409,20 @@ void write_lammps_data(const std::string& path,
         CUDA_CHECK(cudaMemcpyAsync(h_angles.data(), d_angles,
                                     nangles * sizeof(int4),
                                     cudaMemcpyDeviceToHost, stream));
+    if (ndihedrals > 0) {
+        CUDA_CHECK(cudaMemcpyAsync(h_dihedrals.data(), d_dihedrals,
+                                    ndihedrals * sizeof(int4),
+                                    cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaMemcpyAsync(h_dihedral_types.data(), d_dihedral_types,
+                                    ndihedrals * sizeof(int),
+                                    cudaMemcpyDeviceToHost, stream));
+    }
+
+    std::vector<float> charges_h(natoms, 0.0f);
+    if (d_charges)
+        CUDA_CHECK(cudaMemcpyAsync(charges_h.data(), d_charges,
+                                    natoms * sizeof(float),
+                                    cudaMemcpyDeviceToHost, stream));
 
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
@@ -329,6 +437,7 @@ void write_lammps_data(const std::string& path,
     fprintf(fp, "%d atom types\n", ntypes);
     if (nbonds > 0) { fprintf(fp, "%d bonds\n", nbonds); fprintf(fp, "%d bond types\n", nbond_types); }
     if (nangles > 0) { fprintf(fp, "%d angles\n", nangles); fprintf(fp, "%d angle types\n", nangle_types); }
+    if (ndihedrals > 0) { fprintf(fp, "%d dihedrals\n", ndihedrals); fprintf(fp, "%d dihedral types\n", ndihedral_types); }
     fprintf(fp, "\n");
     fprintf(fp, "0.000000 %.6f xlo xhi\n", box_L);
     fprintf(fp, "0.000000 %.6f ylo yhi\n", box_L);
@@ -346,11 +455,12 @@ void write_lammps_data(const std::string& path,
     for (int i = 0; i < natoms; i++) {
         int mol = d_mol_id ? h_mol_id[i] : 1;
         int type = unpack_type_id(h_pos[i].w) + 1;
+        float q = (i < (int)charges_h.size()) ? charges_h[i] : 0.0f;
         int ix = d_image ? h_image[i * 3] : 0;
         int iy = d_image ? h_image[i * 3 + 1] : 0;
         int iz = d_image ? h_image[i * 3 + 2] : 0;
-        fprintf(fp, "%d %d %d 0.0 %.6f %.6f %.6f %d %d %d\n",
-                i + 1, mol, type,
+        fprintf(fp, "%d %d %d %.6f %.6f %.6f %.6f %d %d %d\n",
+                i + 1, mol, type, q,
                 h_pos[i].x, h_pos[i].y, h_pos[i].z,
                 ix, iy, iz);
     }
@@ -377,6 +487,16 @@ void write_lammps_data(const std::string& path,
                     i + 1, h_angles[i].w + 1,
                     h_angles[i].x + 1, h_angles[i].y + 1,
                     h_angles[i].z + 1);
+        }
+    }
+
+    if (ndihedrals > 0) {
+        fprintf(fp, "\nDihedrals\n\n");
+        for (int i = 0; i < ndihedrals; i++) {
+            fprintf(fp, "%d %d %d %d %d %d\n",
+                    i + 1, h_dihedral_types[i] + 1,
+                    h_dihedrals[i].x + 1, h_dihedrals[i].y + 1,
+                    h_dihedrals[i].z + 1, h_dihedrals[i].w + 1);
         }
     }
 

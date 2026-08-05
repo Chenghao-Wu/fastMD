@@ -1,0 +1,8 @@
+tolerance 2.000000
+filetype pdb
+output butane_box.pdb
+pbc 0. 0. 0. 21.753937 21.753937 21.753937
+structure butane_template.pdb
+  number 64
+  inside box 0. 0. 0. 21.753937 21.753937 21.753937
+end structure

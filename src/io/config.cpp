@@ -13,11 +13,17 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
     std::string coords_file;
     std::vector<std::tuple<int,int,float,float>> lj_entries;
     std::vector<std::tuple<int,int,std::string,std::string>> table_entries;
+    std::vector<std::tuple<int,std::string,std::string>> bond_table_entries;
+    std::vector<std::tuple<int,std::string,std::string>> angle_table_entries;
 
     struct BondType { float k, R0, eps, sig; };
     struct AngleType { float k_theta, theta0; };
     std::vector<BondType> bond_types_params;
     std::vector<AngleType> angle_types_params;
+
+    std::vector<std::tuple<int,float,float>> lj_type_entries;
+    std::vector<std::tuple<int,float,float>> bond_harmonic_entries;
+    std::vector<std::tuple<int,float,float,float,float>> dihedral_entries;
 
     std::ifstream in(filename);
     if (!in.is_open()) throw std::runtime_error("Cannot open config: " + filename);
@@ -102,6 +108,36 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
             iss >> ti >> tj >> eps >> sig;
             lj_entries.push_back({ti, tj, eps, sig});
         }
+        else if (key == "lj_type") {
+            int t; float eps, sig;
+            iss >> t >> eps >> sig;
+            lj_type_entries.push_back({t, eps, sig});
+        }
+        else if (key == "coulomb") {
+            std::string style;
+            iss >> style;
+            if (style == "ewald") {
+                params.ewald_on = 1;
+                iss >> params.ewald_alpha >> params.ewald_kmax;
+            } else {
+                throw std::runtime_error("coulomb: unknown style '" + style +
+                                         "' (supported: ewald)");
+            }
+        }
+        else if (key == "coulomb_const") iss >> params.coul_const;
+        else if (key == "special_bonds_14") {
+            iss >> params.lj14 >> params.ewald14_coul;
+        }
+        else if (key == "bond_harmonic") {
+            int t; float k, r0;
+            iss >> t >> k >> r0;
+            bond_harmonic_entries.push_back({t, k, r0});
+        }
+        else if (key == "dihedral_opls") {
+            int t; float k1, k2, k3, k4;
+            iss >> t >> k1 >> k2 >> k3 >> k4;
+            dihedral_entries.push_back({t, k1, k2, k3, k4});
+        }
         else if (key == "table") {
             int ti, tj; std::string filename, keyword;
             iss >> ti >> tj >> filename >> keyword;
@@ -119,6 +155,16 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
             if ((int)angle_types_params.size() <= t) angle_types_params.resize(t+1);
             angle_types_params[t] = {k_theta, theta0};
         }
+        else if (key == "bond_table") {
+            int t; std::string filename, keyword;
+            iss >> t >> filename >> keyword;
+            bond_table_entries.push_back({t, filename, keyword});
+        }
+        else if (key == "angle_table") {
+            int t; std::string filename, keyword;
+            iss >> t >> filename >> keyword;
+            angle_table_entries.push_back({t, filename, keyword});
+        }
         else if (key == "forces_dump_file") {
             std::string val;
             iss >> val;
@@ -128,9 +174,36 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
     }
 
     topo.lj_params.resize(params.ntypes * params.ntypes, make_float2(0,0));
+    // geometric mixing from per-type lj_type entries (OPLS)
+    if (!lj_type_entries.empty()) {
+        if (!lj_entries.empty())
+            throw std::runtime_error("lj_type and lj cannot both be used");
+        std::vector<float2> lp(params.ntypes, make_float2(0,0));
+        for (auto& [t, eps, sig] : lj_type_entries) {
+            if (t < 0 || t >= params.ntypes)
+                throw std::runtime_error("lj_type index out of range");
+            lp[t] = make_float2(eps, sig);
+        }
+        for (int ti = 0; ti < params.ntypes; ti++)
+            for (int tj = 0; tj < params.ntypes; tj++)
+                topo.lj_params[ti * params.ntypes + tj] =
+                    make_float2(sqrtf(lp[ti].x * lp[tj].x),
+                                sqrtf(lp[ti].y * lp[tj].y));
+    }
     for (auto& [ti, tj, eps, sig] : lj_entries) {
         topo.lj_params[ti * params.ntypes + tj] = make_float2(eps, sig);
         topo.lj_params[tj * params.ntypes + ti] = make_float2(eps, sig);
+    }
+
+    for (auto& [t, k, r0] : bond_harmonic_entries) {
+        if ((int)topo.hbond_params.size() <= t)
+            topo.hbond_params.resize(t + 1, {0, 0});
+        topo.hbond_params[t] = {k, r0};
+    }
+    for (auto& [t, k1, k2, k3, k4] : dihedral_entries) {
+        if ((int)topo.dihedral_params.size() <= t)
+            topo.dihedral_params.resize(t + 1, {0, 0, 0, 0});
+        topo.dihedral_params[t] = {k1, k2, k3, k4};
     }
 
     topo.table_idx.resize(params.ntypes * params.ntypes, -1);
@@ -152,7 +225,9 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
             TableFileData tfd = parse_table_file(filename, keyword);
             idx = (int)topo.table_params.size();
             file_keyword_to_idx[fk] = idx;
-            topo.table_params.push_back(tfd.params[0]);
+            TableParams tp = tfd.params[0];
+            tp.data_offset = (int)topo.table_data.size();
+            topo.table_params.push_back(tp);
             topo.table_data.insert(topo.table_data.end(),
                                     tfd.data.begin(), tfd.data.end());
         } else {
@@ -174,6 +249,29 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
     for (size_t i = 0; i < angle_types_params.size(); ++i) {
         topo.angle_params[i] = {angle_types_params[i].k_theta,
                                 angle_types_params[i].theta0 * 3.14159265358979323846f / 180.0f};
+    }
+
+    for (auto& [t, filename, keyword] : bond_table_entries) {
+        TableFileData tfd = parse_table_file(filename, keyword);
+        TableParams tp = tfd.params[0];
+        tp.data_offset = (int)topo.bond_table_data.size();
+        int idx = (int)topo.bond_table_params.size();
+        topo.bond_table_params.push_back(tp);
+        topo.bond_table_data.insert(topo.bond_table_data.end(),
+                                    tfd.data.begin(), tfd.data.end());
+        if ((int)topo.bond_table_idx.size() <= t) topo.bond_table_idx.resize(t+1, -1);
+        topo.bond_table_idx[t] = idx;
+    }
+    for (auto& [t, filename, keyword] : angle_table_entries) {
+        TableFileData tfd = parse_table_file(filename, keyword);
+        TableParams tp = tfd.params[0];
+        tp.data_offset = (int)topo.angle_table_data.size();
+        int idx = (int)topo.angle_table_params.size();
+        topo.angle_table_params.push_back(tp);
+        topo.angle_table_data.insert(topo.angle_table_data.end(),
+                                     tfd.data.begin(), tfd.data.end());
+        if ((int)topo.angle_table_idx.size() <= t) topo.angle_table_idx.resize(t+1, -1);
+        topo.angle_table_idx[t] = idx;
     }
 
     if (!coords_file.empty()) {
@@ -208,6 +306,18 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
     if (params.ensemble == Ensemble::NPT_NH && params.Pdamp <= 0.0f) {
         throw std::runtime_error("Pdamp must be > 0 for npt_nh");
     }
+
+    if (params.ewald_on) {
+        if (params.ewald_alpha <= 0.0f)
+            throw std::runtime_error("coulomb ewald: alpha must be > 0 [1/length]");
+        if (params.ewald_kmax < 1 || params.ewald_kmax > 12)
+            throw std::runtime_error("coulomb ewald: kmax must be in [1, 12]");
+        if (!topo.hbond_params.empty() && !bond_types_params.empty())
+            throw std::runtime_error("bond_harmonic and bond_type (FENE) cannot both be used");
+    }
+    if (!topo.dihedral_params.empty() && !params.ewald_on)
+        fprintf(stderr, "Warning: dihedral_opls defined without coulomb ewald — "
+                        "1-4 LJ/Coulomb pairs will not be scaled\n");
 
     return params;
 }

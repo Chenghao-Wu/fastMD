@@ -1,0 +1,24 @@
+{
+  "timestamp": "2026-08-05T01:07:29Z",
+  "gpu": "NVIDIA GeForce RTX 4090 D",
+  "system": "data/OPLS_butane_x10/equil.data (640 butane molecules)",
+  "n_atoms": 8960,
+  "nsteps": 20000,
+  "ensemble": "NVT 300 K, dt=1 fs, OPLS-AA + Ewald/PPPM (rc=10 A)",
+  "fastMD": {
+    "wall_time_s": 20.21,
+    "ns_per_day": 85.5,
+    "kspace": "direct Ewald, kmax=11, alpha from LAMMPS log"
+  },
+  "lammps_gpu": {
+    "wall_time_s": 100.21,
+    "ns_per_day": 17.2,
+    "kspace": "pppm/gpu 1e-4 (FFT on host), bonded on CPU"
+  },
+  "speedup": 4.96,
+  "validation": {
+    "passed": true,
+    "rel_temp_diff_pct": 0.006,
+    "rel_pe_diff_pct": 0.108
+  }
+}

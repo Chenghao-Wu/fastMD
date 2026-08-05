@@ -90,3 +90,19 @@ target_sources(test_mass PRIVATE
     ${CMAKE_SOURCE_DIR}/src/integrate/langevin.cu
     ${CMAKE_SOURCE_DIR}/src/analysis/thermo.cu
     ${CMAKE_SOURCE_DIR}/src/core/system.cu)
+
+add_cuda_test(test_bond_harmonic)
+target_sources(test_bond_harmonic PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/force/bond_harmonic.cu)
+
+add_cuda_test(test_dihedral_opls)
+target_sources(test_dihedral_opls PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/force/dihedral_opls.cu)
+
+add_cuda_test(test_ewald)
+target_sources(test_ewald PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/force/lj_coul_long.cu
+    ${CMAKE_SOURCE_DIR}/src/force/ewald_recip.cu
+    ${CMAKE_SOURCE_DIR}/src/force/ewald_excl.cu
+    ${CMAKE_SOURCE_DIR}/src/neighbor/verlet_list.cu
+    ${CMAKE_SOURCE_DIR}/src/core/morton.cu)

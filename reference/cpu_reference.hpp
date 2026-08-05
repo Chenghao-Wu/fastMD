@@ -297,4 +297,362 @@ inline AngleResult brute_force_angle(
     return res;
 }
 
+// --- OPLS additions ---------------------------------------------------------
+
+inline BondResult brute_force_harmonic_bond(
+    const std::vector<float4>& pos,
+    const std::vector<int2>& bonds,
+    const std::vector<int>& bond_types,
+    const std::vector<float>& bond_k,
+    const std::vector<float>& bond_r0,
+    float L, float inv_L)
+{
+    int N = pos.size();
+    BondResult res;
+    res.fx.resize(N, 0); res.fy.resize(N, 0); res.fz.resize(N, 0);
+    res.pe.resize(N, 0);
+    memset(res.virial, 0, sizeof(res.virial));
+
+    for (size_t b = 0; b < bonds.size(); b++) {
+        int i = bonds[b].x, j = bonds[b].y;
+        int t = bond_types[b];
+        float k = bond_k[t], r0 = bond_r0[t];
+
+        float dx = min_image(pos[i].x - pos[j].x, L, inv_L);
+        float dy = min_image(pos[i].y - pos[j].y, L, inv_L);
+        float dz = min_image(pos[i].z - pos[j].z, L, inv_L);
+        float r = sqrtf(dx*dx + dy*dy + dz*dz);
+        float dr = r - r0;
+
+        float ff = -2.0f * k * dr / r;
+        float fix = ff * dx, fiy = ff * dy, fiz = ff * dz;
+
+        res.fx[i] += fix;  res.fy[i] += fiy;  res.fz[i] += fiz;
+        res.fx[j] -= fix;  res.fy[j] -= fiy;  res.fz[j] -= fiz;
+
+        float pe = k * dr * dr;
+        res.pe[i] += 0.5f * pe;
+        res.pe[j] += 0.5f * pe;
+
+        res.virial[0] += fix * dx;
+        res.virial[1] += fix * dy;
+        res.virial[2] += fix * dz;
+        res.virial[3] += fiy * dy;
+        res.virial[4] += fiy * dz;
+        res.virial[5] += fiz * dz;
+    }
+    return res;
+}
+
+struct DihedralResult {
+    std::vector<float> fx, fy, fz;
+    std::vector<float> pe;
+    float virial[6];
+};
+
+// OPLS dihedral: 0.5*K1(1+c) + 0.5*K2(1-cos2) + 0.5*K3(1+cos3) + 0.5*K4(1-cos4)
+// Gradient as polynomial in c = cos(phi) — mirrors LAMMPS dihedral_opls.cpp.
+inline DihedralResult brute_force_opls_dihedral(
+    const std::vector<float4>& pos,
+    const std::vector<int4>& dihedrals,
+    const std::vector<int>& dihedral_types,
+    const std::vector<float>& K1, const std::vector<float>& K2,
+    const std::vector<float>& K3, const std::vector<float>& K4,
+    float L, float inv_L)
+{
+    int N = pos.size();
+    DihedralResult res;
+    res.fx.resize(N, 0); res.fy.resize(N, 0); res.fz.resize(N, 0);
+    res.pe.resize(N, 0);
+    memset(res.virial, 0, sizeof(res.virial));
+
+    for (size_t dd = 0; dd < dihedrals.size(); dd++) {
+        int i1 = dihedrals[dd].x, i2 = dihedrals[dd].y;
+        int i3 = dihedrals[dd].z, i4 = dihedrals[dd].w;
+        int t = dihedral_types[dd];
+        float k1 = 0.5f * K1[t], k2 = 0.5f * K2[t];
+        float k3 = 0.5f * K3[t], k4 = 0.5f * K4[t];
+
+        float vb1x = min_image(pos[i1].x - pos[i2].x, L, inv_L);
+        float vb1y = min_image(pos[i1].y - pos[i2].y, L, inv_L);
+        float vb1z = min_image(pos[i1].z - pos[i2].z, L, inv_L);
+        float vb2x = min_image(pos[i3].x - pos[i2].x, L, inv_L);
+        float vb2y = min_image(pos[i3].y - pos[i2].y, L, inv_L);
+        float vb2z = min_image(pos[i3].z - pos[i2].z, L, inv_L);
+        float vb3x = min_image(pos[i4].x - pos[i3].x, L, inv_L);
+        float vb3y = min_image(pos[i4].y - pos[i3].y, L, inv_L);
+        float vb3z = min_image(pos[i4].z - pos[i3].z, L, inv_L);
+
+        float sb1 = 1.0f / (vb1x*vb1x + vb1y*vb1y + vb1z*vb1z);
+        float sb2 = 1.0f / (vb2x*vb2x + vb2y*vb2y + vb2z*vb2z);
+        float sb3 = 1.0f / (vb3x*vb3x + vb3y*vb3y + vb3z*vb3z);
+        float rb1 = sqrtf(sb1), rb3 = sqrtf(sb3);
+        float c0 = (vb1x*vb3x + vb1y*vb3y + vb1z*vb3z) * rb1 * rb3;
+
+        float b1mag = 1.0f / rb1, b2mag = 1.0f / sqrtf(sb2), b3mag = 1.0f / rb3;
+        float r12c1 = 1.0f / (b1mag * b2mag);
+        float c1mag = (vb1x*vb2x + vb1y*vb2y + vb1z*vb2z) * r12c1;
+        float r12c2 = 1.0f / (b2mag * b3mag);
+        float c2mag = (-vb2x*vb3x - vb2y*vb3y - vb2z*vb3z) * r12c2;
+
+        float sc1 = fmaxf(sqrtf(fmaxf(1.0f - c1mag*c1mag, 0.0f)), 1e-6f);
+        float sc2 = fmaxf(sqrtf(fmaxf(1.0f - c2mag*c2mag, 0.0f)), 1e-6f);
+        sc1 = 1.0f / sc1; sc2 = 1.0f / sc2;
+        float s1 = sc1 * sc1, s2 = sc2 * sc2, s12 = sc1 * sc2;
+        float c = (c0 + c1mag * c2mag) * s12;
+        c = fminf(fmaxf(c, -1.0f), 1.0f);
+
+        float c2 = 2.0f * c * c - 1.0f;
+        float c3 = 4.0f * c * c * c - 3.0f * c;
+        float c4 = 8.0f * c * c * c * c - 8.0f * c * c + 1.0f;
+        float pe = k1 * (1.0f + c) + k2 * (1.0f - c2) +
+                   k3 * (1.0f + c3) + k4 * (1.0f - c4);
+        float pd = k1 - 2.0f * k2 * 2.0f * c
+                      + 3.0f * k3 * (4.0f * c * c - 1.0f)
+                      - 4.0f * k4 * 4.0f * c * (2.0f * c * c - 1.0f);
+
+        float a = pd;
+        c = c * a;
+        s12 = s12 * a;
+        float a11 = c * sb1 * s1;
+        float a22 = -sb2 * (2.0f * c0 * s12 - c * (s1 + s2));
+        float a33 = c * sb3 * s2;
+        float a12 = -r12c1 * (c1mag * c * s1 + c2mag * s12);
+        float a13 = -rb1 * rb3 * s12;
+        float a23 = r12c2 * (c2mag * c * s2 + c1mag * s12);
+
+        float sx2 = a12*vb1x + a22*vb2x + a23*vb3x;
+        float sy2 = a12*vb1y + a22*vb2y + a23*vb3y;
+        float sz2 = a12*vb1z + a22*vb2z + a23*vb3z;
+
+        float f1x = a11*vb1x + a12*vb2x + a13*vb3x;
+        float f1y = a11*vb1y + a12*vb2y + a13*vb3y;
+        float f1z = a11*vb1z + a12*vb2z + a13*vb3z;
+        float f2x = -sx2 - f1x, f2y = -sy2 - f1y, f2z = -sz2 - f1z;
+        float f4x = a13*vb1x + a23*vb2x + a33*vb3x;
+        float f4y = a13*vb1y + a23*vb2y + a33*vb3y;
+        float f4z = a13*vb1z + a23*vb2z + a33*vb3z;
+        float f3x = sx2 - f4x, f3y = sy2 - f4y, f3z = sz2 - f4z;
+
+        res.fx[i1] += f1x; res.fy[i1] += f1y; res.fz[i1] += f1z;
+        res.fx[i2] += f2x; res.fy[i2] += f2y; res.fz[i2] += f2z;
+        res.fx[i3] += f3x; res.fy[i3] += f3y; res.fz[i3] += f3z;
+        res.fx[i4] += f4x; res.fy[i4] += f4y; res.fz[i4] += f4z;
+
+        float pe4 = 0.25f * pe;
+        res.pe[i1] += pe4; res.pe[i2] += pe4;
+        res.pe[i3] += pe4; res.pe[i4] += pe4;
+
+        res.virial[0] += vb1x * f1x + vb2x * f3x + (vb3x + vb2x) * f4x;
+        res.virial[1] += vb1x * f1y + vb2x * f3y + (vb3x + vb2x) * f4y;
+        res.virial[2] += vb1x * f1z + vb2x * f3z + (vb3x + vb2x) * f4z;
+        res.virial[3] += vb1y * f1y + vb2y * f3y + (vb3y + vb2y) * f4y;
+        res.virial[4] += vb1y * f1z + vb2y * f3z + (vb3y + vb2y) * f4z;
+        res.virial[5] += vb1z * f1z + vb2z * f3z + (vb3z + vb2z) * f4z;
+    }
+    return res;
+}
+
+// Full OPLS pair potential: LJ + erfc real-space + reciprocal Ewald +
+// 1-2/1-3 erf subtraction + scaled 1-4 + self-energy. Brute force O(N^2),
+// intended for small validation systems only.
+inline double erfc_ref(double x) { return std::erfc(x); }
+inline double erf_ref(double x) { return std::erf(x); }
+
+struct EwaldRefResult {
+    std::vector<double> fx, fy, fz;
+    double pe;          // total (not per atom)
+    double virial[6];
+};
+
+inline EwaldRefResult brute_force_opls_full(
+    const std::vector<float4>& pos,
+    const std::vector<float>& charges,
+    const std::vector<float2>& lj_params,   // ntypes*ntypes
+    int ntypes, float coul_const, float alpha, int kmax,
+    const std::vector<int>& excl13_offsets, // 1-2/1-3 CSR
+    const std::vector<int>& excl13_list,
+    const std::vector<int2>& pairs14,
+    float lj14, float coul14,
+    float rc, float L, float inv_L)
+{
+    int N = pos.size();
+    EwaldRefResult res;
+    res.fx.assign(N, 0.0); res.fy.assign(N, 0.0); res.fz.assign(N, 0.0);
+    res.pe = 0.0;
+    memset(res.virial, 0, sizeof(res.virial));
+    double rc2 = (double)rc * rc;
+
+    auto type_of = [&](int i) { int t; memcpy(&t, &pos[i].w, 4); return t; };
+
+    // exclusion set: 1-2/1-3 (from CSR) plus 1-4 pairs — all omitted from
+    // real-space erfc and LJ, exactly like the Verlet list with exclusions.
+    std::vector<std::vector<int>> excluded(N);
+    for (int i = 0; i < N; i++)
+        for (int e = excl13_offsets[i]; e < excl13_offsets[i + 1]; e++)
+            excluded[i].push_back(excl13_list[e]);
+    for (auto& pr : pairs14) {
+        excluded[pr.x].push_back(pr.y);
+        excluded[pr.y].push_back(pr.x);
+    }
+    for (auto& v : excluded) {
+        std::sort(v.begin(), v.end());
+        v.erase(std::unique(v.begin(), v.end()), v.end());
+    }
+
+    // --- real-space: LJ + erfc Coulomb over non-excluded i < j within rc ---
+    for (int i = 0; i < N; i++) {
+        for (int j = i + 1; j < N; j++) {
+            if (std::binary_search(excluded[i].begin(), excluded[i].end(), j))
+                continue;
+            double dx = min_image(pos[i].x - pos[j].x, L, inv_L);
+            double dy = min_image(pos[i].y - pos[j].y, L, inv_L);
+            double dz = min_image(pos[i].z - pos[j].z, L, inv_L);
+            double r2 = dx*dx + dy*dy + dz*dz;
+            if (r2 >= rc2 || r2 < 1e-12) continue;
+            double r = sqrt(r2);
+
+            int ti = type_of(i), tj = type_of(j);
+            double eps = lj_params[ti * ntypes + tj].x;
+            double sig = lj_params[ti * ntypes + tj].y;
+            double sr2 = sig * sig / r2;
+            double sr6 = sr2 * sr2 * sr2;
+            double sr12 = sr6 * sr6;
+            double lj_ff = 24.0 * eps * (2.0 * sr12 - sr6) / r2;
+            double lj_pe = 4.0 * eps * (sr12 - sr6);
+
+            double qiqj = coul_const * (double)charges[i] * charges[j];
+            double ar = alpha * r;
+            double erfc_ar = erfc_ref(ar);
+            double expm2 = exp(-ar * ar);
+            double coul_pe = qiqj * erfc_ar / r;
+            double coul_ff = qiqj / (r * r * r) * (erfc_ar + 1.1283791670955126 * ar * expm2);
+
+            double ff = lj_ff + coul_ff;
+            double fx = ff * dx, fy = ff * dy, fz = ff * dz;
+            res.fx[i] += fx; res.fy[i] += fy; res.fz[i] += fz;
+            res.fx[j] -= fx; res.fy[j] -= fy; res.fz[j] -= fz;
+            res.pe += lj_pe + coul_pe;
+            res.virial[0] += fx * dx;
+            res.virial[1] += fx * dy;
+            res.virial[2] += fx * dz;
+            res.virial[3] += fy * dy;
+            res.virial[4] += fy * dz;
+            res.virial[5] += fz * dz;
+        }
+    }
+
+    // --- reciprocal space (half shell) ---
+    double unitk = 2.0 * M_PI / L;
+    double V = (double)L * L * L;
+    double preu = 4.0 * M_PI / V;
+    double inv4a2 = 0.25 / (alpha * alpha);
+    for (int nx = 0; nx <= kmax; nx++)
+        for (int ny = -kmax; ny <= kmax; ny++)
+            for (int nz = -kmax; nz <= kmax; nz++) {
+                int n2 = nx*nx + ny*ny + nz*nz;
+                if (n2 == 0 || n2 > kmax * kmax) continue;
+                // half shell: keep only one of (n, -n)
+                if (nx == 0 && ny < 0) continue;
+                if (nx == 0 && ny == 0 && nz < 0) continue;
+                double kx = unitk * nx, ky = unitk * ny, kz = unitk * nz;
+                double k2 = kx*kx + ky*ky + kz*kz;
+                double ug = preu * exp(-k2 * inv4a2) / k2;
+                double sf_rl = 0, sf_im = 0;
+                for (int i = 0; i < N; i++) {
+                    double ph = kx * pos[i].x + ky * pos[i].y + kz * pos[i].z;
+                    sf_rl += charges[i] * cos(ph);
+                    sf_im += charges[i] * sin(ph);
+                }
+                res.pe += coul_const * ug * (sf_rl*sf_rl + sf_im*sf_im);
+                double vterm = -2.0 * (1.0 / k2 + inv4a2);
+                double uk = coul_const * ug * (sf_rl*sf_rl + sf_im*sf_im);
+                res.virial[0] += uk * (1.0 + vterm * kx * kx);
+                res.virial[1] += uk * vterm * kx * ky;
+                res.virial[2] += uk * vterm * kx * kz;
+                res.virial[3] += uk * (1.0 + vterm * ky * ky);
+                res.virial[4] += uk * vterm * ky * kz;
+                res.virial[5] += uk * (1.0 + vterm * kz * kz);
+                for (int i = 0; i < N; i++) {
+                    double ph = kx * pos[i].x + ky * pos[i].y + kz * pos[i].z;
+                    double s = sin(ph), c = cos(ph);
+                    double partial = s * sf_rl - c * sf_im;
+                    res.fx[i] += coul_const * charges[i] * partial * 2.0 * kx * ug;
+                    res.fy[i] += coul_const * charges[i] * partial * 2.0 * ky * ug;
+                    res.fz[i] += coul_const * charges[i] * partial * 2.0 * kz * ug;
+                }
+            }
+
+    // --- self energy ---
+    double qsq = 0, qsum = 0;
+    for (int i = 0; i < N; i++) { qsq += (double)charges[i] * charges[i]; qsum += charges[i]; }
+    res.pe += -coul_const * alpha / sqrt(M_PI) * qsq
+              - coul_const * M_PI_2 * qsum * qsum / (alpha * alpha * V);
+
+    // --- 1-2/1-3 erf subtraction ---
+    for (int i = 0; i < N; i++) {
+        for (int e = excl13_offsets[i]; e < excl13_offsets[i + 1]; e++) {
+            int j = excl13_list[e];
+            if (j <= i) continue;
+            double dx = min_image(pos[i].x - pos[j].x, L, inv_L);
+            double dy = min_image(pos[i].y - pos[j].y, L, inv_L);
+            double dz = min_image(pos[i].z - pos[j].z, L, inv_L);
+            double r = sqrt(dx*dx + dy*dy + dz*dz);
+            double qiqj = coul_const * (double)charges[i] * charges[j];
+            double ar = alpha * r;
+            double erf_ar = erf_ref(ar);
+            double expm2 = exp(-ar * ar);
+            double ff = qiqj / (r * r * r) * (1.1283791670955126 * ar * expm2 - erf_ar);
+            double fx = ff * dx, fy = ff * dy, fz = ff * dz;
+            res.fx[i] += fx; res.fy[i] += fy; res.fz[i] += fz;
+            res.fx[j] -= fx; res.fy[j] -= fy; res.fz[j] -= fz;
+            res.pe += -qiqj * erf_ar / r;
+            res.virial[0] += fx * dx;
+            res.virial[1] += fx * dy;
+            res.virial[2] += fx * dz;
+            res.virial[3] += fy * dy;
+            res.virial[4] += fy * dz;
+            res.virial[5] += fz * dz;
+        }
+    }
+
+    // --- scaled 1-4 pairs ---
+    for (auto& pr : pairs14) {
+        int i = pr.x, j = pr.y;
+        double dx = min_image(pos[i].x - pos[j].x, L, inv_L);
+        double dy = min_image(pos[i].y - pos[j].y, L, inv_L);
+        double dz = min_image(pos[i].z - pos[j].z, L, inv_L);
+        double r = sqrt(dx*dx + dy*dy + dz*dz);
+        int ti = type_of(i), tj = type_of(j);
+        double eps = lj_params[ti * ntypes + tj].x;
+        double sig = lj_params[ti * ntypes + tj].y;
+        double sr2 = sig * sig / (r * r);
+        double sr6 = sr2 * sr2 * sr2;
+        double sr12 = sr6 * sr6;
+        double lj_ff = lj14 * 24.0 * eps * (2.0 * sr12 - sr6) / (r * r);
+        double lj_pe = lj14 * 4.0 * eps * (sr12 - sr6);
+
+        double qiqj = coul_const * (double)charges[i] * charges[j];
+        double ar = alpha * r;
+        double erf_ar = erf_ref(ar);
+        double expm2 = exp(-ar * ar);
+        double coul_pe = qiqj * (coul14 - erf_ar) / r;
+        double coul_ff = qiqj / (r * r * r) * (coul14 - erf_ar + 1.1283791670955126 * ar * expm2);
+
+        double ff = lj_ff + coul_ff;
+        double fx = ff * dx, fy = ff * dy, fz = ff * dz;
+        res.fx[i] += fx; res.fy[i] += fy; res.fz[i] += fz;
+        res.fx[j] -= fx; res.fy[j] -= fy; res.fz[j] -= fz;
+        res.pe += lj_pe + coul_pe;
+        res.virial[0] += fx * dx;
+        res.virial[1] += fx * dy;
+        res.virial[2] += fx * dz;
+        res.virial[3] += fy * dy;
+        res.virial[4] += fy * dz;
+        res.virial[5] += fz * dz;
+    }
+
+    return res;
+}
+
 } // namespace ref
