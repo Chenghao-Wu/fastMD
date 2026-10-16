@@ -15,8 +15,9 @@ __device__ inline float erf_poly(float x) {
 // ---------------------------------------------------------------------------
 // Fully-excluded pairs: subtract C q_i q_j erf(alpha r)/r (short-range part of
 // the Ewald sum that must NOT be counted for excluded neighbors).
-// CSR: thread handles (i, excl_list[off..off+1]).
-// PE split 0.5/0.5 because both (i,j) and (j,i) rows exist.
+// CSR in tag space: thread t handles entry t of the row of tag ti, i.e. the
+// pair (ti, excl_list[t]); indices are recovered through rank[] (nullptr =
+// identity). Each pair appears in both rows and is handled once (tj > ti).
 // ---------------------------------------------------------------------------
 __global__ void ewald_excl_kernel(
     const float4* __restrict__ pos,
@@ -25,6 +26,7 @@ __global__ void ewald_excl_kernel(
     float* __restrict__ virial,
     const int* __restrict__ excl_offsets,
     const int* __restrict__ excl_list,
+    const int* __restrict__ rank,
     int natoms, int nexcl,
     float coul_const, float alpha,
     float L, float inv_L)
@@ -42,9 +44,11 @@ __global__ void ewald_excl_kernel(
             if (excl_offsets[mid + 1] <= t) lo = mid + 1;
             else hi = mid;
         }
-        int i = lo;
-        int j = excl_list[t];
-        if (j > i) {   // each pair stored twice in CSR; handle once
+        int ti = lo;
+        int tj = excl_list[t];
+        if (tj > ti) {   // each pair stored twice in CSR; handle once
+            int i = rank ? rank[ti] : ti;
+            int j = rank ? rank[tj] : tj;
             float4 ri = pos[i];
             float4 rj = pos[j];
             float dx = min_image(ri.x - rj.x, L, inv_L);
@@ -234,6 +238,7 @@ __global__ void pair14_kernel(
 void launch_ewald_excl_kernel(const float4* pos, const float* charges,
                                float4* force, float* virial,
                                const int* excl_offsets, const int* excl_list,
+                               const int* rank,
                                int natoms, int nexcl,
                                float coul_const, float alpha,
                                float L, float inv_L,
@@ -242,7 +247,7 @@ void launch_ewald_excl_kernel(const float4* pos, const float* charges,
     int blocks = div_ceil(nexcl, 256);
     int smem = 256 * 6 * sizeof(float);
     ewald_excl_kernel<<<blocks, 256, smem, stream>>>(
-        pos, charges, force, virial, excl_offsets, excl_list,
+        pos, charges, force, virial, excl_offsets, excl_list, rank,
         natoms, nexcl, coul_const, alpha, L, inv_L);
 }
 

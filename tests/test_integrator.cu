@@ -91,8 +91,8 @@ TEST(Integrator, NVEEnergyConservation) {
 
     for (int step = 0; step < nsteps; step++) {
         launch_integrator_pre_force(d_pos, d_vel, d_force, d_pos_ref,
-                                     d_max_dr2, nullptr, lang, N, L, inv_L,
-                                     lang.half_dt);
+                                     d_max_dr2, nullptr, nullptr, (uint64_t)step,
+                                     lang, N, L, inv_L, lang.half_dt);
 
         if (check_and_reset_trigger(d_max_dr2, skin)) {
             CUDA_CHECK(cudaMemcpy(d_pos_ref, d_pos, np * sizeof(float4),

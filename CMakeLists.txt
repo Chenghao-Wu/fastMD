@@ -68,6 +68,8 @@ set(CMAKE_CUDA_FLAGS_RELEASE "${CMAKE_CUDA_FLAGS_RELEASE} -DNDEBUG")
 # Core library
 add_library(core STATIC
     src/core/system.cu
+    src/core/particles.cu
+    src/core/topology.cu
     src/core/morton.cu
     src/neighbor/tile_list.cu
     src/neighbor/verlet_list.cu
@@ -91,6 +93,7 @@ add_library(core STATIC
     src/io/config.cpp
     src/io/lammps_data.cpp
     src/io/table_parser.cpp
+    src/sim/simulation.cu
 )
 target_include_directories(core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 # PUBLIC so host-only translation units (config.cpp, lammps_data.cpp) and

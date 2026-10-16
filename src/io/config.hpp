@@ -36,7 +36,11 @@ struct TopologyData {
 
     std::vector<int> mol_ids;
     std::vector<int> images;
+    std::vector<int> atom_ids;   // atom id from the data file, per tag
     float box_L = 0.0f;
+    float3 box_lo = {0.0f, 0.0f, 0.0f};  // box origin in the input file
+    // type counts declared by the data file (0 when absent)
+    int n_atom_types = 0, n_bond_types = 0, n_angle_types = 0, n_dihedral_types = 0;
 
     std::vector<float> masses;
 

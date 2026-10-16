@@ -62,18 +62,26 @@ void MortonSorter::free() {
     CUDA_CHECK(cudaFree(d_cub_temp));
 }
 
+const int* MortonSorter::compute_order(const float4* pos, int natoms, float inv_L,
+                                       cudaStream_t stream) {
+    int np = div_ceil(natoms, TILE_SIZE) * TILE_SIZE;
+    int blocks = div_ceil(np, 256);
+    compute_morton_keys<<<blocks, 256, 0, stream>>>(pos, d_keys, d_indices, natoms, inv_L);
+    // 32 key bits: padding keys are 0xFFFFFFFF and must stay behind all
+    // 30-bit Morton keys (stable sort keeps padding in its original order).
+    cub::DeviceRadixSort::SortPairs(d_cub_temp, cub_temp_bytes,
+                                     d_keys, d_keys_sorted,
+                                     d_indices, d_indices_sorted,
+                                     np, 0, 32, stream);
+    return d_indices_sorted;
+}
+
 void MortonSorter::sort_and_permute(float4* pos, float4* vel,
                                      int natoms, float inv_L,
                                      cudaStream_t stream) {
     int np = div_ceil(natoms, TILE_SIZE) * TILE_SIZE;
     int blocks = div_ceil(np, 256);
-
-    compute_morton_keys<<<blocks, 256, 0, stream>>>(pos, d_keys, d_indices, natoms, inv_L);
-
-    cub::DeviceRadixSort::SortPairs(d_cub_temp, cub_temp_bytes,
-                                     d_keys, d_keys_sorted,
-                                     d_indices, d_indices_sorted,
-                                     np, 0, 30, stream);
+    compute_order(pos, natoms, inv_L, stream);
 
     gather_float4<<<blocks, 256, 0, stream>>>(d_temp, pos, d_indices_sorted, np);
     CUDA_CHECK(cudaMemcpyAsync(pos, d_temp, np * sizeof(float4),

@@ -121,7 +121,7 @@ TEST(EwaldOPLS, SmallClusterMatchesBruteForce) {
     int* d_ex13_off = to_device(ex13_off);
     int* d_ex13_list = to_device(ex13_list);
     launch_ewald_excl_kernel(d_pos, d_q, d_force, d_virial,
-                              d_ex13_off, d_ex13_list,
+                              d_ex13_off, d_ex13_list, nullptr,
                               N, (int)ex13_list.size(),
                               coul_const, alpha, L, inv_L);
 

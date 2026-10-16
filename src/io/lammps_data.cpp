@@ -10,242 +10,324 @@
 #include <algorithm>
 #include <vector>
 #include <cmath>
+#include <cstdio>
 
-static bool is_section_header(const std::string& line) {
-    if (line.empty()) return false;
-    return std::isupper(static_cast<unsigned char>(line[0]));
+namespace {
+
+std::vector<std::string> split_ws(const std::string& line) {
+    std::vector<std::string> tok;
+    std::istringstream iss(line);
+    std::string t;
+    while (iss >> t) {
+        if (t[0] == '#') break;
+        tok.push_back(t);
+    }
+    return tok;
 }
+
+[[noreturn]] void data_error(const std::string& path, int lineno, const std::string& msg) {
+    throw std::runtime_error(path + ":" + std::to_string(lineno) + ": " + msg);
+}
+
+int to_int(const std::string& s, const std::string& path, int lineno) {
+    size_t pos = 0;
+    long v = 0;
+    try { v = std::stol(s, &pos); } catch (...) { pos = 0; }
+    if (pos != s.size()) data_error(path, lineno, "expected an integer, got '" + s + "'");
+    return (int)v;
+}
+
+float to_float(const std::string& s, const std::string& path, int lineno) {
+    size_t pos = 0;
+    float v = 0;
+    try { v = std::stof(s, &pos); } catch (...) { pos = 0; }
+    if (pos != s.size() || !std::isfinite(v))
+        data_error(path, lineno, "expected a finite number, got '" + s + "'");
+    return v;
+}
+
+// Column layout of supported atom styles: (has_mol, has_q, ncols without images)
+struct StyleLayout { bool mol; bool q; int ncols; };
+bool style_layout(const std::string& style, StyleLayout& out) {
+    if (style == "atomic")    { out = {false, false, 5}; return true; }
+    if (style == "charge")    { out = {false, true,  6}; return true; }
+    if (style == "molecular" || style == "bond" || style == "angle")
+                              { out = {true,  false, 6}; return true; }
+    if (style == "full")      { out = {true,  true,  7}; return true; }
+    return false;
+}
+
+}  // namespace
 
 void parse_lammps_data(const std::string& path, TopologyData& topo) {
     std::ifstream file(path);
-    if (!file.is_open()) {
-        throw std::runtime_error("Cannot open LAMMPS data file: " + path);
-    }
+    if (!file.is_open()) throw std::runtime_error("Cannot open LAMMPS data file: " + path);
 
-    // Parse box dimensions from header
-    float box_Lx = 0, box_Ly = 0, box_Lz = 0;
-    int box_count = 0;
-    {
-        std::string line;
-        while (std::getline(file, line) && box_count < 3) {
-            size_t start = line.find_first_not_of(" \t\r\n");
-            if (start == std::string::npos) continue;
-            if (line[start] == '#') continue;
+    long n_atoms = -1, n_bonds = 0, n_angles = 0, n_dihedrals = 0, n_impropers = 0;
+    int n_atom_types = -1, n_bond_types = -1, n_angle_types = -1, n_dihedral_types = -1;
+    float lo[3] = {0, 0, 0}, hi[3] = {0, 0, 0};
+    bool have_box[3] = {false, false, false};
 
-            float lo, hi;
-            char dim_label[4];
-            if (sscanf(line.c_str() + start, "%f %f %3s", &lo, &hi, dim_label) == 3) {
-                std::string label(dim_label);
-                if (label == "xlo") { box_Lx = hi - lo; box_count++; }
-                else if (label == "ylo") { box_Ly = hi - lo; box_count++; }
-                else if (label == "zlo") { box_Lz = hi - lo; box_count++; }
-            }
-        }
-        if (box_count != 3) {
-            throw std::runtime_error("LAMMPS data file missing box dimensions");
-        }
-        if (std::fabs(box_Lx - box_Ly) > 1e-6f || std::fabs(box_Lx - box_Lz) > 1e-6f) {
-            throw std::runtime_error("Non-cubic box not supported");
-        }
-        topo.box_L = box_Lx;
-        file.clear();
-        file.seekg(0);
-    }
-
-    enum class Section { None, Atoms, Velocities, Bonds, Angles, Masses, Dihedrals };
-    Section current = Section::None;
-    std::string atom_style = "atomic";  // default
+    enum class Section { Header, None, Atoms, Velocities, Bonds, Angles, Masses, Dihedrals };
+    Section current = Section::Header;
+    std::string atom_style;  // empty until known (hint or inferred)
+    StyleLayout layout{};
+    bool seen_velocities = false;
+    size_t n_velocity_lines = 0;
 
     std::unordered_map<int, size_t> id_to_idx;
+    auto lookup = [&](int id, int lineno) -> int {
+        auto it = id_to_idx.find(id);
+        if (it == id_to_idx.end())
+            data_error(path, lineno, "reference to unknown atom id " + std::to_string(id));
+        return (int)it->second;
+    };
+    auto check_type = [&](int type, int ntypes, const char* what, int lineno) {
+        if (type < 1 || (ntypes > 0 && type > ntypes))
+            data_error(path, lineno, std::string(what) + " type " + std::to_string(type) +
+                       " out of range [1, " + std::to_string(ntypes) + "]");
+    };
+
     std::string line;
+    int lineno = 0;
+    bool first_line = true;
     while (std::getline(file, line)) {
-        size_t start = line.find_first_not_of(" \t\r\n");
-        if (start == std::string::npos) continue;
-        std::string trimmed = line.substr(start);
+        ++lineno;
+        if (first_line) { first_line = false; continue; }  // title line
+        auto tok = split_ws(line);
+        if (tok.empty()) continue;
 
-        if (trimmed[0] == '#') continue;
-
-        if (is_section_header(trimmed)) {
-            if (trimmed.find("Atoms") == 0) {
+        // Section keywords start with an upper-case letter.
+        if (std::isupper(static_cast<unsigned char>(tok[0][0]))) {
+            const std::string& k = tok[0];
+            std::string k2 = tok.size() > 1 ? k + " " + tok[1] : k;
+            if (k == "Atoms") {
                 current = Section::Atoms;
-                // Extract atom style from comment, e.g. "Atoms # full"
-                size_t hash = trimmed.find('#');
+                size_t hash = line.find('#');
                 if (hash != std::string::npos) {
-                    std::istringstream style_ss(trimmed.substr(hash + 1));
-                    style_ss >> atom_style;
+                    std::istringstream ss(line.substr(hash + 1));
+                    ss >> atom_style;
+                    // LAMMPS appends accelerator suffixes, e.g. "molecular/kk"
+                    atom_style = atom_style.substr(0, atom_style.find('/'));
+                    if (!style_layout(atom_style, layout))
+                        data_error(path, lineno, "unsupported atom style '" + atom_style +
+                                   "' (supported: atomic, charge, molecular, bond, angle, full)");
                 }
-                continue;
-            } else if (trimmed.find("Velocities") == 0) {
-                current = Section::Velocities;
-                continue;
-            } else if (trimmed.find("Bonds") == 0) {
-                current = Section::Bonds;
-                continue;
-            } else if (trimmed.find("Angles") == 0) {
-                current = Section::Angles;
-                continue;
-            } else if (trimmed.find("Dihedrals") == 0) {
-                current = Section::Dihedrals;
-                continue;
-            } else if (trimmed.find("Masses") == 0) {
-                current = Section::Masses;
-                continue;
-            } else if (
-                trimmed.find("Impropers") == 0 ||
-                trimmed.find("Pair Coeffs") == 0 ||
-                trimmed.find("Bond Coeffs") == 0 ||
-                trimmed.find("Angle Coeffs") == 0) {
+            } else if (k == "Velocities") { current = Section::Velocities; seen_velocities = true; }
+            else if (k == "Masses") current = Section::Masses;
+            else if (k == "Bonds") current = Section::Bonds;
+            else if (k == "Angles") current = Section::Angles;
+            else if (k == "Dihedrals") current = Section::Dihedrals;
+            else if (k == "Impropers") {
+                if (n_impropers > 0)
+                    fprintf(stderr, "Warning: %s: %ld impropers are ignored (no improper styles)\n",
+                            path.c_str(), n_impropers);
                 current = Section::None;
-                continue;
+            } else if (k2 == "Pair Coeffs" || k2 == "PairIJ Coeffs" || k2 == "Bond Coeffs" ||
+                       k2 == "Angle Coeffs" || k2 == "Dihedral Coeffs" || k2 == "Improper Coeffs" ||
+                       k2 == "BondBond Coeffs" || k2 == "BondAngle Coeffs" ||
+                       k2 == "MiddleBondTorsion Coeffs" || k2 == "EndBondTorsion Coeffs" ||
+                       k2 == "AngleTorsion Coeffs" || k2 == "AngleAngleTorsion Coeffs" ||
+                       k2 == "BondBond13 Coeffs" || k2 == "AngleAngle Coeffs") {
+                current = Section::None;  // coefficients come from the fastMD config
             } else {
-                current = Section::None;
-                continue;
+                data_error(path, lineno, "unknown section '" + line + "'");
             }
+            continue;
         }
 
+        if (current == Section::Header) {
+            if (tok.size() == 2 && tok[1] == "atoms") n_atoms = to_int(tok[0], path, lineno);
+            else if (tok.size() == 2 && tok[1] == "bonds") n_bonds = to_int(tok[0], path, lineno);
+            else if (tok.size() == 2 && tok[1] == "angles") n_angles = to_int(tok[0], path, lineno);
+            else if (tok.size() == 2 && tok[1] == "dihedrals") n_dihedrals = to_int(tok[0], path, lineno);
+            else if (tok.size() == 2 && tok[1] == "impropers") n_impropers = to_int(tok[0], path, lineno);
+            else if (tok.size() == 3 && tok[2] == "types") {
+                int n = to_int(tok[0], path, lineno);
+                if (tok[1] == "atom") n_atom_types = n;
+                else if (tok[1] == "bond") n_bond_types = n;
+                else if (tok[1] == "angle") n_angle_types = n;
+                else if (tok[1] == "dihedral") n_dihedral_types = n;
+            } else if (tok.size() == 4 && (tok[2] == "xlo" || tok[2] == "ylo" || tok[2] == "zlo")) {
+                int d = tok[2][0] - 'x';
+                lo[d] = to_float(tok[0], path, lineno);
+                hi[d] = to_float(tok[1], path, lineno);
+                have_box[d] = true;
+            } else if (tok.size() >= 6 && tok[3] == "xy") {
+                float xy = to_float(tok[0], path, lineno), xz = to_float(tok[1], path, lineno),
+                      yz = to_float(tok[2], path, lineno);
+                if (xy != 0.0f || xz != 0.0f || yz != 0.0f)
+                    data_error(path, lineno, "triclinic boxes are not supported");
+            }
+            // other header lines (extra/per-atom, ellipsoids, ...) are irrelevant here
+            continue;
+        }
         if (current == Section::None) continue;
 
-        std::istringstream iss(trimmed);
-        if (current == Section::Atoms) {
-            int id, mol, type;
-            float x, y, z;
-            int ix = 0, iy = 0, iz = 0;
-
-            if (atom_style == "atomic") {
-                std::vector<std::string> tokens;
-                std::string tok;
-                while (iss >> tok) tokens.push_back(tok);
-                if (tokens.size() < 5) continue;
-                id = std::stoi(tokens[0]);
-                mol = 1;
-                type = std::stoi(tokens[1]);
-                x = std::stof(tokens[2]);
-                y = std::stof(tokens[3]);
-                z = std::stof(tokens[4]);
-                if (tokens.size() >= 8) {
-                    ix = std::stoi(tokens[5]);
-                    iy = std::stoi(tokens[6]);
-                    iz = std::stoi(tokens[7]);
+        if (current == Section::Masses) {
+            if (tok.size() < 2) data_error(path, lineno, "Masses line needs: type mass");
+            int type = to_int(tok[0], path, lineno);
+            check_type(type, n_atom_types, "atom", lineno);
+            float mass = to_float(tok[1], path, lineno);
+            if (!(mass > 0.0f)) data_error(path, lineno, "mass must be > 0");
+            if ((size_t)type > topo.masses.size()) topo.masses.resize(type, 1.0f);
+            topo.masses[type - 1] = mass;
+        } else if (current == Section::Atoms) {
+            if (atom_style.empty()) {
+                // No style hint: infer from the column count of the first line.
+                switch (tok.size()) {
+                    case 5: case 8:  atom_style = "atomic"; break;
+                    case 6: case 9:  atom_style = "molecular"; break;
+                    case 7: case 10: atom_style = "full"; break;
+                    default:
+                        data_error(path, lineno, "cannot infer the atom style from " +
+                                   std::to_string(tok.size()) + " columns; add e.g. 'Atoms # full'");
                 }
-            } else if (atom_style == "molecular") {
-                std::vector<std::string> tokens;
-                std::string tok;
-                while (iss >> tok) tokens.push_back(tok);
-                if (tokens.size() < 6) continue;
-                id = std::stoi(tokens[0]);
-                mol = std::stoi(tokens[1]);
-                type = std::stoi(tokens[2]);
-                x = std::stof(tokens[3]);
-                y = std::stof(tokens[4]);
-                z = std::stof(tokens[5]);
-                if (tokens.size() >= 9) {
-                    ix = std::stoi(tokens[6]);
-                    iy = std::stoi(tokens[7]);
-                    iz = std::stoi(tokens[8]);
-                }
-            } else if (atom_style == "full" || atom_style == "charge") {
-                std::vector<std::string> tokens;
-                std::string tok;
-                while (iss >> tok) tokens.push_back(tok);
-                if (tokens.size() < 7) continue;
-                id = std::stoi(tokens[0]);
-                mol = std::stoi(tokens[1]);
-                type = std::stoi(tokens[2]);
-                float q = std::stof(tokens[3]);
-                x = std::stof(tokens[4]);
-                y = std::stof(tokens[5]);
-                z = std::stof(tokens[6]);
-                topo.charges.push_back(q);
-                if (tokens.size() >= 10) {
-                    ix = std::stoi(tokens[7]);
-                    iy = std::stoi(tokens[8]);
-                    iz = std::stoi(tokens[9]);
-                }
-            } else {
-                // Unspecified style: fall back to original 6-field behavior
-                iss >> id >> mol >> type >> x >> y >> z;
-                if (iss.fail()) continue;
-                iss >> ix >> iy >> iz;
+                style_layout(atom_style, layout);
+                fprintf(stderr, "Note: %s has no atom-style hint; inferred '%s' from the column count\n",
+                        path.c_str(), atom_style.c_str());
             }
-
-            size_t idx = topo.positions.size();
-            id_to_idx[id] = idx;
+            int nc = layout.ncols;
+            if ((int)tok.size() != nc && (int)tok.size() != nc + 3)
+                data_error(path, lineno, "atom style '" + atom_style + "' expects " +
+                           std::to_string(nc) + " or " + std::to_string(nc + 3) + " columns");
+            int c = 0;
+            int id = to_int(tok[c++], path, lineno);
+            int mol = layout.mol ? to_int(tok[c++], path, lineno) : 1;
+            int type = to_int(tok[c++], path, lineno);
+            float q = layout.q ? to_float(tok[c++], path, lineno) : 0.0f;
+            float x = to_float(tok[c++], path, lineno);
+            float y = to_float(tok[c++], path, lineno);
+            float z = to_float(tok[c++], path, lineno);
+            int im[3] = {0, 0, 0};
+            if ((int)tok.size() == nc + 3)
+                for (int d = 0; d < 3; d++) im[d] = to_int(tok[c++], path, lineno);
+            check_type(type, n_atom_types, "atom", lineno);
+            if (!id_to_idx.emplace(id, topo.positions.size()).second)
+                data_error(path, lineno, "duplicate atom id " + std::to_string(id));
+            topo.atom_ids.push_back(id);
             topo.mol_ids.push_back(mol);
+            if (layout.q) topo.charges.push_back(q);
             topo.positions.push_back(make_float4(x, y, z, pack_type_id(type - 1)));
-
-            topo.images.push_back(ix);
-            topo.images.push_back(iy);
-            topo.images.push_back(iz);
+            topo.images.insert(topo.images.end(), im, im + 3);
         } else if (current == Section::Velocities) {
-            int id;
-            float vx, vy, vz;
-            iss >> id >> vx >> vy >> vz;
-            if (iss.fail()) continue;
-            auto it = id_to_idx.find(id);
-            if (it == id_to_idx.end()) continue;
+            if (tok.size() < 4) data_error(path, lineno, "Velocities line needs: id vx vy vz");
+            int i = lookup(to_int(tok[0], path, lineno), lineno);
             if (topo.velocities.size() < topo.positions.size())
-                topo.velocities.resize(topo.positions.size(), make_float4(0,0,0,0));
-            topo.velocities[it->second] = make_float4(vx, vy, vz, 0);
-        } else if (current == Section::Masses) {
-            int type_id;
-            float mass;
-            iss >> type_id >> mass;
-            if (iss.fail()) continue;
-            if (mass <= 0.0f) {
-                throw std::runtime_error("mass must be > 0 for type " +
-                                         std::to_string(type_id));
-            }
-            size_t tidx = static_cast<size_t>(type_id - 1);
-            if (tidx >= topo.masses.size()) {
-                topo.masses.resize(tidx + 1, 1.0f);
-            }
-            topo.masses[tidx] = mass;
+                topo.velocities.resize(topo.positions.size(), make_float4(0, 0, 0, 0));
+            n_velocity_lines++;
+            topo.velocities[i] = make_float4(to_float(tok[1], path, lineno),
+                                             to_float(tok[2], path, lineno),
+                                             to_float(tok[3], path, lineno), 0.0f);
         } else if (current == Section::Bonds) {
-            int id, type, atom1, atom2;
-            iss >> id >> type >> atom1 >> atom2;
-            if (iss.fail()) continue;
-            auto it1 = id_to_idx.find(atom1);
-            auto it2 = id_to_idx.find(atom2);
-            if (it1 == id_to_idx.end() || it2 == id_to_idx.end()) continue;
-            topo.bonds.push_back(make_int2(static_cast<int>(it1->second),
-                                           static_cast<int>(it2->second)));
+            if (tok.size() < 4) data_error(path, lineno, "Bonds line needs: id type atom1 atom2");
+            int type = to_int(tok[1], path, lineno);
+            check_type(type, n_bond_types, "bond", lineno);
+            int a = lookup(to_int(tok[2], path, lineno), lineno);
+            int b = lookup(to_int(tok[3], path, lineno), lineno);
+            if (a == b) data_error(path, lineno, "bond between an atom and itself");
+            topo.bonds.push_back(make_int2(a, b));
             topo.bond_types.push_back(type - 1);
         } else if (current == Section::Angles) {
-            int id, type, atom1, atom2, atom3;
-            iss >> id >> type >> atom1 >> atom2 >> atom3;
-            if (iss.fail()) continue;
-            auto it1 = id_to_idx.find(atom1);
-            auto it2 = id_to_idx.find(atom2);
-            auto it3 = id_to_idx.find(atom3);
-            if (it1 == id_to_idx.end() || it2 == id_to_idx.end() || it3 == id_to_idx.end()) continue;
-            topo.angles.push_back(make_int4(static_cast<int>(it1->second),
-                                            static_cast<int>(it2->second),
-                                            static_cast<int>(it3->second),
-                                            type - 1));
+            if (tok.size() < 5) data_error(path, lineno, "Angles line needs: id type atom1 atom2 atom3");
+            int type = to_int(tok[1], path, lineno);
+            check_type(type, n_angle_types, "angle", lineno);
+            topo.angles.push_back(make_int4(lookup(to_int(tok[2], path, lineno), lineno),
+                                            lookup(to_int(tok[3], path, lineno), lineno),
+                                            lookup(to_int(tok[4], path, lineno), lineno), type - 1));
         } else if (current == Section::Dihedrals) {
-            int id, type, atom1, atom2, atom3, atom4;
-            iss >> id >> type >> atom1 >> atom2 >> atom3 >> atom4;
-            if (iss.fail()) continue;
-            auto it1 = id_to_idx.find(atom1);
-            auto it2 = id_to_idx.find(atom2);
-            auto it3 = id_to_idx.find(atom3);
-            auto it4 = id_to_idx.find(atom4);
-            if (it1 == id_to_idx.end() || it2 == id_to_idx.end() ||
-                it3 == id_to_idx.end() || it4 == id_to_idx.end()) continue;
-            topo.dihedrals.push_back(make_int4(static_cast<int>(it1->second),
-                                               static_cast<int>(it2->second),
-                                               static_cast<int>(it3->second),
-                                               static_cast<int>(it4->second)));
+            if (tok.size() < 6) data_error(path, lineno, "Dihedrals line needs: id type a1 a2 a3 a4");
+            int type = to_int(tok[1], path, lineno);
+            check_type(type, n_dihedral_types, "dihedral", lineno);
+            topo.dihedrals.push_back(make_int4(lookup(to_int(tok[2], path, lineno), lineno),
+                                               lookup(to_int(tok[3], path, lineno), lineno),
+                                               lookup(to_int(tok[4], path, lineno), lineno),
+                                               lookup(to_int(tok[5], path, lineno), lineno)));
             topo.dihedral_types.push_back(type - 1);
         }
     }
 
-    int ntypes = 1;
-    for (const auto& pos : topo.positions) {
-        int t = unpack_type_id(pos.w);
-        if (t + 1 > ntypes) ntypes = t + 1;
+    auto require_count = [&](const char* what, long declared, size_t got) {
+        if (declared >= 0 && (size_t)declared != got)
+            throw std::runtime_error(path + ": header declares " + std::to_string(declared) + " " +
+                                     what + " but " + std::to_string(got) + " were read");
+    };
+    if (n_atoms < 0) throw std::runtime_error(path + ": missing 'N atoms' header line");
+    require_count("atoms", n_atoms, topo.positions.size());
+    require_count("bonds", n_bonds, topo.bonds.size());
+    require_count("angles", n_angles, topo.angles.size());
+    require_count("dihedrals", n_dihedrals, topo.dihedrals.size());
+    if (seen_velocities && n_velocity_lines != topo.positions.size())
+        throw std::runtime_error(path + ": Velocities section has " +
+                                 std::to_string(n_velocity_lines) + " lines for " +
+                                 std::to_string(topo.positions.size()) + " atoms");
+
+    // Tags follow ascending atom id regardless of the order atoms appear in
+    // the file (LAMMPS write_data emits storage order).
+    {
+        const size_t n = topo.positions.size();
+        std::vector<int> order(n);
+        for (size_t i = 0; i < n; i++) order[i] = (int)i;
+        std::sort(order.begin(), order.end(),
+                  [&](int a, int b) { return topo.atom_ids[a] < topo.atom_ids[b]; });
+        bool identity = true;
+        for (size_t i = 0; i < n && identity; i++) identity = (order[i] == (int)i);
+        if (!identity) {
+            std::vector<int> new_of_old(n);
+            for (size_t k = 0; k < n; k++) new_of_old[order[k]] = (int)k;
+            auto permute = [&](auto& v, size_t width) {
+                if (v.empty()) return;
+                auto old = v;
+                for (size_t k = 0; k < n; k++)
+                    for (size_t c = 0; c < width; c++) v[k * width + c] = old[order[k] * width + c];
+            };
+            permute(topo.positions, 1);
+            permute(topo.velocities, 1);
+            permute(topo.charges, 1);
+            permute(topo.mol_ids, 1);
+            permute(topo.atom_ids, 1);
+            permute(topo.images, 3);
+            for (auto& b : topo.bonds) { b.x = new_of_old[b.x]; b.y = new_of_old[b.y]; }
+            for (auto& a : topo.angles) { a.x = new_of_old[a.x]; a.y = new_of_old[a.y]; a.z = new_of_old[a.z]; }
+            for (auto& d : topo.dihedrals) {
+                d.x = new_of_old[d.x]; d.y = new_of_old[d.y]; d.z = new_of_old[d.z]; d.w = new_of_old[d.w];
+            }
+        }
     }
+
+    if (!(have_box[0] && have_box[1] && have_box[2]))
+        throw std::runtime_error(path + ": missing box dimensions (xlo xhi / ylo yhi / zlo zhi)");
+    float L[3];
+    for (int d = 0; d < 3; d++) {
+        L[d] = hi[d] - lo[d];
+        if (!(L[d] > 0.0f)) throw std::runtime_error(path + ": box length must be positive");
+    }
+    if (std::fabs(L[0] - L[1]) > 1e-5f * L[0] || std::fabs(L[0] - L[2]) > 1e-5f * L[0])
+        throw std::runtime_error(path + ": non-cubic boxes are not supported");
+    topo.box_L = L[0];
+    topo.box_lo = make_float3(lo[0], lo[1], lo[2]);
+
+    // Shift to a box spanning [0, L) and wrap, keeping unwrapped coordinates
+    // (position + image * L) unchanged.
+    for (size_t i = 0; i < topo.positions.size(); i++) {
+        float* p = &topo.positions[i].x;
+        for (int d = 0; d < 3; d++) {
+            float x = p[d] - lo[d];
+            int shift = (int)std::floor(x / L[d]);
+            x -= shift * L[d];
+            if (x >= L[d]) { x -= L[d]; shift++; }   // round-off at the upper edge
+            p[d] = x;
+            topo.images[3 * i + d] += shift;
+        }
+    }
+
+    int ntypes = n_atom_types > 0 ? n_atom_types : 1;
+    for (const auto& pos : topo.positions) ntypes = std::max(ntypes, unpack_type_id(pos.w) + 1);
     topo.masses.resize(ntypes, 1.0f);
+    topo.n_atom_types = ntypes;
+    topo.n_bond_types = std::max(n_bond_types, 0);
+    topo.n_angle_types = std::max(n_angle_types, 0);
+    topo.n_dihedral_types = std::max(n_dihedral_types, 0);
 }
 
 void build_exclusions(const TopologyData& in_topo, TopologyData& out_topo) {
@@ -355,151 +437,81 @@ std::string build_restart_final_filename(const std::string& base) {
     return base + "_final";
 }
 
-void write_lammps_data(const std::string& path,
-                       const float4* d_pos,
-                       const float4* d_vel,
-                       const int*    d_image,
-                       const int*    d_mol_id,
-                       const int2*   d_bonds,
-                       const int*    d_bond_types,
-                       const int4*   d_angles,
-                       const float*  masses,
-                       const float*  d_charges,
-                       const int4*   d_dihedrals,
-                       const int*    d_dihedral_types,
-                       int natoms, int nbonds, int nangles, int ndihedrals,
+void write_lammps_data(const std::string& path, const RestartFrame& f,
+                       const TopologyData& topo,
                        int ntypes, int nbond_types, int nangle_types, int ndihedral_types,
-                       float box_L,
-                       int64_t step,
-                       cudaStream_t stream) {
+                       float box_L, int64_t step) {
+    const int natoms = (int)f.pos.size();
+    const int nbonds = (int)topo.bonds.size();
+    const int nangles = (int)topo.angles.size();
+    const int ndihedrals = (int)topo.dihedrals.size();
+    auto id_of = [&](int tag) {
+        return tag < (int)topo.atom_ids.size() ? topo.atom_ids[tag] : tag + 1;
+    };
 
-    std::vector<float4> h_pos(natoms);
-    std::vector<float4> h_vel(natoms);
-    std::vector<int> h_image(d_image ? natoms * 3 : 0);
-    std::vector<int> h_mol_id(d_mol_id ? natoms : 0);
-    std::vector<int2> h_bonds(nbonds);
-    std::vector<int> h_bond_types(nbonds);
-    std::vector<int4> h_angles(nangles);
-    std::vector<int4> h_dihedrals(ndihedrals);
-    std::vector<int> h_dihedral_types(ndihedrals);
+    // Write to a temporary file and rename, so an interrupted run never
+    // leaves a truncated restart behind.
+    const std::string tmp = path + ".tmp";
+    FILE* fp = fopen(tmp.c_str(), "w");
+    if (!fp) throw std::runtime_error("cannot open restart file " + tmp);
 
-    CUDA_CHECK(cudaMemcpyAsync(h_pos.data(), d_pos,
-                                natoms * sizeof(float4),
-                                cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaMemcpyAsync(h_vel.data(), d_vel,
-                                natoms * sizeof(float4),
-                                cudaMemcpyDeviceToHost, stream));
-    if (d_image)
-        CUDA_CHECK(cudaMemcpyAsync(h_image.data(), d_image,
-                                    natoms * 3 * sizeof(int),
-                                    cudaMemcpyDeviceToHost, stream));
-    if (d_mol_id)
-        CUDA_CHECK(cudaMemcpyAsync(h_mol_id.data(), d_mol_id,
-                                    natoms * sizeof(int),
-                                    cudaMemcpyDeviceToHost, stream));
-    if (nbonds > 0) {
-        CUDA_CHECK(cudaMemcpyAsync(h_bonds.data(), d_bonds,
-                                    nbonds * sizeof(int2),
-                                    cudaMemcpyDeviceToHost, stream));
-        CUDA_CHECK(cudaMemcpyAsync(h_bond_types.data(), d_bond_types,
-                                    nbonds * sizeof(int),
-                                    cudaMemcpyDeviceToHost, stream));
-    }
-    if (nangles > 0)
-        CUDA_CHECK(cudaMemcpyAsync(h_angles.data(), d_angles,
-                                    nangles * sizeof(int4),
-                                    cudaMemcpyDeviceToHost, stream));
-    if (ndihedrals > 0) {
-        CUDA_CHECK(cudaMemcpyAsync(h_dihedrals.data(), d_dihedrals,
-                                    ndihedrals * sizeof(int4),
-                                    cudaMemcpyDeviceToHost, stream));
-        CUDA_CHECK(cudaMemcpyAsync(h_dihedral_types.data(), d_dihedral_types,
-                                    ndihedrals * sizeof(int),
-                                    cudaMemcpyDeviceToHost, stream));
+    // %.9g round-trips IEEE single precision exactly.
+    fprintf(fp, "LAMMPS data file written by fastmd (step %lld)\n\n", (long long)step);
+    fprintf(fp, "%d atoms\n%d atom types\n", natoms, ntypes);
+    if (nbonds > 0) fprintf(fp, "%d bonds\n%d bond types\n", nbonds, nbond_types);
+    if (nangles > 0) fprintf(fp, "%d angles\n%d angle types\n", nangles, nangle_types);
+    if (ndihedrals > 0) fprintf(fp, "%d dihedrals\n%d dihedral types\n", ndihedrals, ndihedral_types);
+    const float lo[3] = {topo.box_lo.x, topo.box_lo.y, topo.box_lo.z};
+    fprintf(fp, "\n%.9g %.9g xlo xhi\n%.9g %.9g ylo yhi\n%.9g %.9g zlo zhi\n",
+            (double)lo[0], (double)(lo[0] + box_L), (double)lo[1], (double)(lo[1] + box_L),
+            (double)lo[2], (double)(lo[2] + box_L));
+
+    fprintf(fp, "\nMasses\n\n");
+    for (int t = 0; t < ntypes; t++) {
+        float m = t < (int)topo.masses.size() ? topo.masses[t] : 1.0f;
+        fprintf(fp, "%d %.9g\n", t + 1, (double)m);
     }
 
-    std::vector<float> charges_h(natoms, 0.0f);
-    if (d_charges)
-        CUDA_CHECK(cudaMemcpyAsync(charges_h.data(), d_charges,
-                                    natoms * sizeof(float),
-                                    cudaMemcpyDeviceToHost, stream));
-
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-
-    FILE* fp = fopen(path.c_str(), "w");
-    if (!fp) {
-        fprintf(stderr, "Warning: cannot open restart file %s\n", path.c_str());
-        return;
-    }
-
-    fprintf(fp, "# Restart from step %ld\n", step);
-    fprintf(fp, "%d atoms\n", natoms);
-    fprintf(fp, "%d atom types\n", ntypes);
-    if (nbonds > 0) { fprintf(fp, "%d bonds\n", nbonds); fprintf(fp, "%d bond types\n", nbond_types); }
-    if (nangles > 0) { fprintf(fp, "%d angles\n", nangles); fprintf(fp, "%d angle types\n", nangle_types); }
-    if (ndihedrals > 0) { fprintf(fp, "%d dihedrals\n", ndihedrals); fprintf(fp, "%d dihedral types\n", ndihedral_types); }
-    fprintf(fp, "\n");
-    fprintf(fp, "0.000000 %.6f xlo xhi\n", box_L);
-    fprintf(fp, "0.000000 %.6f ylo yhi\n", box_L);
-    fprintf(fp, "0.000000 %.6f zlo zhi\n");
-    fprintf(fp, "\n");
-
-    fprintf(fp, "Masses\n\n");
-    for (int i = 0; i < ntypes; i++) {
-        float m = (masses && i < ntypes) ? masses[i] : 1.0f;
-        fprintf(fp, "%d %.6g\n", i + 1, m);
-    }
-    fprintf(fp, "\n");
-
-    fprintf(fp, "Atoms # full\n\n");
-    for (int i = 0; i < natoms; i++) {
-        int mol = d_mol_id ? h_mol_id[i] : 1;
-        int type = unpack_type_id(h_pos[i].w) + 1;
-        float q = (i < (int)charges_h.size()) ? charges_h[i] : 0.0f;
-        int ix = d_image ? h_image[i * 3] : 0;
-        int iy = d_image ? h_image[i * 3 + 1] : 0;
-        int iz = d_image ? h_image[i * 3 + 2] : 0;
-        fprintf(fp, "%d %d %d %.6f %.6f %.6f %.6f %d %d %d\n",
-                i + 1, mol, type, q,
-                h_pos[i].x, h_pos[i].y, h_pos[i].z,
-                ix, iy, iz);
+    fprintf(fp, "\nAtoms # full\n\n");
+    for (int t = 0; t < natoms; t++) {
+        int mol = t < (int)f.mol_id.size() ? f.mol_id[t] : 1;
+        float q = t < (int)f.charge.size() ? f.charge[t] : 0.0f;
+        int ix = 0, iy = 0, iz = 0;
+        if (3 * t + 2 < (int)f.image.size()) {
+            ix = f.image[3 * t]; iy = f.image[3 * t + 1]; iz = f.image[3 * t + 2];
+        }
+        fprintf(fp, "%d %d %d %.9g %.9g %.9g %.9g %d %d %d\n",
+                id_of(t), mol, unpack_type_id(f.pos[t].w) + 1, (double)q,
+                (double)(f.pos[t].x + lo[0]), (double)(f.pos[t].y + lo[1]),
+                (double)(f.pos[t].z + lo[2]), ix, iy, iz);
     }
 
     fprintf(fp, "\nVelocities\n\n");
-    for (int i = 0; i < natoms; i++) {
-        fprintf(fp, "%d %.6f %.6f %.6f\n",
-                i + 1, h_vel[i].x, h_vel[i].y, h_vel[i].z);
-    }
+    for (int t = 0; t < natoms; t++)
+        fprintf(fp, "%d %.9g %.9g %.9g\n", id_of(t),
+                (double)f.vel[t].x, (double)f.vel[t].y, (double)f.vel[t].z);
 
     if (nbonds > 0) {
         fprintf(fp, "\nBonds\n\n");
-        for (int i = 0; i < nbonds; i++) {
-            fprintf(fp, "%d %d %d %d\n",
-                    i + 1, h_bond_types[i] + 1,
-                    h_bonds[i].x + 1, h_bonds[i].y + 1);
-        }
+        for (int b = 0; b < nbonds; b++)
+            fprintf(fp, "%d %d %d %d\n", b + 1, topo.bond_types[b] + 1,
+                    id_of(topo.bonds[b].x), id_of(topo.bonds[b].y));
     }
-
     if (nangles > 0) {
         fprintf(fp, "\nAngles\n\n");
-        for (int i = 0; i < nangles; i++) {
-            fprintf(fp, "%d %d %d %d %d\n",
-                    i + 1, h_angles[i].w + 1,
-                    h_angles[i].x + 1, h_angles[i].y + 1,
-                    h_angles[i].z + 1);
-        }
+        for (int a = 0; a < nangles; a++)
+            fprintf(fp, "%d %d %d %d %d\n", a + 1, topo.angles[a].w + 1,
+                    id_of(topo.angles[a].x), id_of(topo.angles[a].y), id_of(topo.angles[a].z));
     }
-
     if (ndihedrals > 0) {
         fprintf(fp, "\nDihedrals\n\n");
-        for (int i = 0; i < ndihedrals; i++) {
-            fprintf(fp, "%d %d %d %d %d %d\n",
-                    i + 1, h_dihedral_types[i] + 1,
-                    h_dihedrals[i].x + 1, h_dihedrals[i].y + 1,
-                    h_dihedrals[i].z + 1, h_dihedrals[i].w + 1);
-        }
+        for (int d = 0; d < ndihedrals; d++)
+            fprintf(fp, "%d %d %d %d %d %d\n", d + 1, topo.dihedral_types[d] + 1,
+                    id_of(topo.dihedrals[d].x), id_of(topo.dihedrals[d].y),
+                    id_of(topo.dihedrals[d].z), id_of(topo.dihedrals[d].w));
     }
 
-    fclose(fp);
-    printf("Restart written to %s (step %ld)\n", path.c_str(), step);
+    if (fclose(fp) != 0) throw std::runtime_error("error writing restart file " + tmp);
+    if (std::rename(tmp.c_str(), path.c_str()) != 0)
+        throw std::runtime_error("cannot rename " + tmp + " to " + path);
 }

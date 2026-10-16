@@ -6,23 +6,22 @@ void parse_lammps_data(const std::string& path, TopologyData& topo);
 void build_exclusions(const TopologyData& in_topo, TopologyData& out_topo);
 void build_exclusions_opls(const TopologyData& in_topo, TopologyData& out_topo);
 
-void write_lammps_data(const std::string& path,
-                       const float4* d_pos,
-                       const float4* d_vel,
-                       const int*    d_image,
-                       const int*    d_mol_id,
-                       const int2*   d_bonds,
-                       const int*    d_bond_types,
-                       const int4*   d_angles,
-                       const float*  masses,
-                       const float*  d_charges,
-                       const int4*   d_dihedrals,
-                       const int*    d_dihedral_types,
-                       int natoms, int nbonds, int nangles, int ndihedrals,
+// Per-particle state for a restart, in tag (input-file) order.
+struct RestartFrame {
+    std::vector<float4> pos;     // wrapped positions + packed type
+    std::vector<float4> vel;
+    std::vector<int>    image;   // 3 per particle
+    std::vector<float>  charge;
+    std::vector<int>    mol_id;
+};
+
+// Write a LAMMPS data file (Atoms # full + Velocities + topology) that
+// parse_lammps_data() reads back to the same state. Atom ids are taken from
+// topo.atom_ids (input-file ids), topology from topo's tag-space lists.
+void write_lammps_data(const std::string& path, const RestartFrame& frame,
+                       const TopologyData& topo,
                        int ntypes, int nbond_types, int nangle_types, int ndihedral_types,
-                       float box_L,
-                       int64_t step,
-                       cudaStream_t stream = 0);
+                       float box_L, int64_t step);
 
 std::string build_restart_filename(const std::string& base, int64_t step);
 std::string build_restart_final_filename(const std::string& base);

@@ -3,13 +3,15 @@
 
 // Subtract the real-space Ewald term for fully-excluded pairs (1-2, 1-3):
 //   F -= grad[ C q_i q_j erf(alpha r)/r ],  PE -= C q_i q_j erf(alpha r)/r
-// One thread per (i, e) where e indexes atom i's CSR exclusion row.
+// One thread per CSR entry. The CSR is in tag space (rows indexed by tag,
+// entries are tags); rank maps tag -> current index (nullptr = identity).
 void launch_ewald_excl_kernel(const float4* __restrict__ pos,
                                const float* __restrict__ charges,
                                float4* __restrict__ force,
                                float* __restrict__ virial,
                                const int* __restrict__ excl_offsets,
                                const int* __restrict__ excl_list,
+                               const int* __restrict__ rank,
                                int natoms, int nexcl,
                                float coul_const, float alpha,
                                float L, float inv_L,

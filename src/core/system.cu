@@ -1,135 +1,17 @@
 #include "system.cuh"
+#include <stdexcept>
+#include <string>
 
 __constant__ float c_masses[MAX_TYPES];
 
-void System::allocate(const SimParams& params, const float* h_masses) {
-    natoms  = params.natoms;
-    ntypes  = params.ntypes;
-    ntiles  = div_ceil(natoms, TILE_SIZE);
-    natoms_padded = ntiles * TILE_SIZE;
-
-    size_t n4 = natoms_padded * sizeof(float4);
-
-    CUDA_CHECK(cudaMalloc(&pos,     n4));
-    CUDA_CHECK(cudaMalloc(&vel,     n4));
-    CUDA_CHECK(cudaMalloc(&force,   n4));
-    CUDA_CHECK(cudaMalloc(&pos_ref, n4));
-
-    CUDA_CHECK(cudaMemset(pos,   0, n4));
-    CUDA_CHECK(cudaMemset(vel,   0, n4));
-    CUDA_CHECK(cudaMemset(force, 0, n4));
-
-    int lj_size = ntypes * ntypes;
-    CUDA_CHECK(cudaMalloc(&lj_params, lj_size * sizeof(float2)));
-
-    CUDA_CHECK(cudaMalloc(&virial, 6 * sizeof(float)));
-
-    d_table_idx = nullptr;
-    d_table_params = nullptr;
-    d_table_data = nullptr;
-
-    CUDA_CHECK(cudaMalloc(&d_max_dr2_int, sizeof(int)));
-    CUDA_CHECK(cudaHostAlloc(&h_rebuild_flag, sizeof(int),
-                              cudaHostAllocMapped));
-    *h_rebuild_flag = 0;
-
-    bonds = nullptr;
-    bond_param_idx = nullptr;
-    angles = nullptr;
-    dihedrals = nullptr;
-    dihedral_param_idx = nullptr;
-    nbonds = 0;
-    nangles = 0;
-    ndihedrals = 0;
-
-    exclusion_offsets = nullptr;
-    exclusion_list = nullptr;
-    nexclusions = 0;
-
-    excl13_offsets = nullptr;
-    excl13_list = nullptr;
-    nexcl13 = 0;
-
-    pairs14 = nullptr;
-    npairs14 = 0;
-
-    charges = nullptr;
-    ewald_kvecs = nullptr;
-    ewald_sfac = nullptr;
-    ewald_ek = nullptr;
-    ewald_kcount = 0;
-
-    d_mol_id = nullptr;
-    d_image = nullptr;
-
-    float h_default_masses[MAX_TYPES];
-    if (h_masses != nullptr) {
-        CUDA_CHECK(cudaMemcpyToSymbol(c_masses, h_masses,
-                                       ntypes * sizeof(float)));
-    } else {
-        for (int i = 0; i < MAX_TYPES; i++) h_default_masses[i] = 1.0f;
-        CUDA_CHECK(cudaMemcpyToSymbol(c_masses, h_default_masses,
-                                       MAX_TYPES * sizeof(float)));
+void set_type_masses(const std::vector<float>& masses, int ntypes) {
+    if (ntypes < 1 || ntypes > MAX_TYPES)
+        throw std::runtime_error("ntypes must be in [1, " + std::to_string(MAX_TYPES) + "]");
+    float h[MAX_TYPES];
+    for (int t = 0; t < MAX_TYPES; t++) {
+        h[t] = t < (int)masses.size() ? masses[t] : 1.0f;
+        if (t < ntypes && !(h[t] > 0.0f))
+            throw std::runtime_error("mass of type " + std::to_string(t + 1) + " must be > 0");
     }
-}
-
-void System::free() {
-    CUDA_CHECK(cudaFree(pos));
-    CUDA_CHECK(cudaFree(vel));
-    CUDA_CHECK(cudaFree(force));
-    CUDA_CHECK(cudaFree(pos_ref));
-    CUDA_CHECK(cudaFree(lj_params));
-    CUDA_CHECK(cudaFree(virial));
-
-    if (d_table_idx)     CUDA_CHECK(cudaFree(d_table_idx));
-    if (d_table_params)  CUDA_CHECK(cudaFree(d_table_params));
-    if (d_table_data)    CUDA_CHECK(cudaFree(d_table_data));
-
-    CUDA_CHECK(cudaFree(d_max_dr2_int));
-    CUDA_CHECK(cudaFreeHost(h_rebuild_flag));
-    if (bonds) CUDA_CHECK(cudaFree(bonds));
-    if (bond_param_idx) CUDA_CHECK(cudaFree(bond_param_idx));
-    if (angles) CUDA_CHECK(cudaFree(angles));
-    if (dihedrals) CUDA_CHECK(cudaFree(dihedrals));
-    if (dihedral_param_idx) CUDA_CHECK(cudaFree(dihedral_param_idx));
-    if (exclusion_offsets) CUDA_CHECK(cudaFree(exclusion_offsets));
-    if (exclusion_list) CUDA_CHECK(cudaFree(exclusion_list));
-    if (excl13_offsets) CUDA_CHECK(cudaFree(excl13_offsets));
-    if (excl13_list) CUDA_CHECK(cudaFree(excl13_list));
-    if (pairs14) CUDA_CHECK(cudaFree(pairs14));
-    if (charges) CUDA_CHECK(cudaFree(charges));
-    if (ewald_kvecs) CUDA_CHECK(cudaFree(ewald_kvecs));
-    if (ewald_sfac) CUDA_CHECK(cudaFree(ewald_sfac));
-    if (ewald_ek) CUDA_CHECK(cudaFree(ewald_ek));
-    if (d_mol_id) CUDA_CHECK(cudaFree(d_mol_id));
-    if (d_image) CUDA_CHECK(cudaFree(d_image));
-}
-
-void System::zero_forces() {
-    CUDA_CHECK(cudaMemset(force, 0, natoms_padded * sizeof(float4)));
-}
-
-void System::zero_virial() {
-    CUDA_CHECK(cudaMemset(virial, 0, 6 * sizeof(float)));
-}
-
-void System::allocate_rg_buffers(const std::vector<int>& mol_ids,
-                                  const std::vector<int>& images,
-                                  int natoms_padded) {
-    size_t n_int = natoms_padded * sizeof(int);
-    size_t n_3int = natoms_padded * 3 * sizeof(int);
-
-    CUDA_CHECK(cudaMalloc(&d_mol_id, n_int));
-    CUDA_CHECK(cudaMemset(d_mol_id, -1, n_int));
-    CUDA_CHECK(cudaMemcpy(d_mol_id, mol_ids.data(),
-                          mol_ids.size() * sizeof(int),
-                          cudaMemcpyHostToDevice));
-
-    CUDA_CHECK(cudaMalloc(&d_image, n_3int));
-    CUDA_CHECK(cudaMemset(d_image, 0, n_3int));
-    if (!images.empty()) {
-        CUDA_CHECK(cudaMemcpy(d_image, images.data(),
-                              images.size() * sizeof(int),
-                              cudaMemcpyHostToDevice));
-    }
+    CUDA_CHECK(cudaMemcpyToSymbol(c_masses, h, sizeof(h)));
 }
