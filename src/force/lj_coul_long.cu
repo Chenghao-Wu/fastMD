@@ -4,17 +4,18 @@
 #include "../core/launch.cuh"
 
 // LAMMPS EWALD_P/A1..A5 erfc polynomial (Abramowitz & Stegun 7.1.26)
-__device__ inline float erfc_poly(float x) {
+__device__ inline float erfc_poly(float x, float exp_mx2) {   // exp_mx2 = exp(-x^2)
     float t = __frcp_rn(1.0f + 0.3275911f * x);
     float poly = t * (0.254829592f
                + t * (-0.284496736f
                + t * (1.421413741f
                + t * (-1.453152027f
                + t * 1.061405429f))));
-    return poly * __expf(-x * x);
+    return poly * exp_mx2;
 }
 
-template <int TPA>
+// EV = false: no per-atom energy (force.w = 0) and no virial.
+template <int TPA, bool EV>
 __global__ void lj_coul_long_kernel(
     const float4* __restrict__ pos,
     const float* __restrict__ charges,
@@ -67,14 +68,12 @@ __global__ void lj_coul_long_kernel(
                 float sr6 = sr2 * sr2 * sr2;
                 float sr12 = sr6 * sr6;
                 float lj_ff = 24.0f * eps * r2inv * (2.0f * sr12 - sr6);
-                float lj_pe = 4.0f * eps * (sr12 - sr6);
 
                 // real-space Coulomb: C q_i q_j erfc(alpha r)/r
                 float qiqj = coul_const * qi * charges[j];
                 float ar = alpha * r;
-                float erfc_ar = erfc_poly(ar);
                 float expm2 = __expf(-ar * ar);
-                float coul_pe = qiqj * erfc_ar * rinv;
+                float erfc_ar = erfc_poly(ar, expm2);
                 // F_i = C qiqj (erfc(ar)/r + 2a/sqrt(pi) e^{-a^2 r^2}) / r^3 * dr
                 float r3inv = rinv * r2inv;
                 float coul_ff = qiqj * r3inv
@@ -86,13 +85,17 @@ __global__ void lj_coul_long_kernel(
                 float fzij = ff * dz;
 
                 fx += fxij; fy += fyij; fz += fzij;
-                pe_i += 0.5f * (lj_pe + coul_pe);
-                vir_xx += 0.5f * fxij * dx;
-                vir_xy += 0.5f * fxij * dy;
-                vir_xz += 0.5f * fxij * dz;
-                vir_yy += 0.5f * fyij * dy;
-                vir_yz += 0.5f * fyij * dz;
-                vir_zz += 0.5f * fzij * dz;
+                if (EV) {
+                    float lj_pe = 4.0f * eps * (sr12 - sr6);
+                    float coul_pe = qiqj * erfc_ar * rinv;
+                    pe_i += 0.5f * (lj_pe + coul_pe);
+                    vir_xx += 0.5f * fxij * dx;
+                    vir_xy += 0.5f * fxij * dy;
+                    vir_xz += 0.5f * fxij * dz;
+                    vir_yy += 0.5f * fyij * dy;
+                    vir_yz += 0.5f * fyij * dz;
+                    vir_zz += 0.5f * fzij * dz;
+                }
             }
         }
     }
@@ -102,13 +105,15 @@ __global__ void lj_coul_long_kernel(
             fx += __shfl_down_sync(0xffffffffu, fx, o, TPA);
             fy += __shfl_down_sync(0xffffffffu, fy, o, TPA);
             fz += __shfl_down_sync(0xffffffffu, fz, o, TPA);
-            pe_i += __shfl_down_sync(0xffffffffu, pe_i, o, TPA);
+            if (EV) pe_i += __shfl_down_sync(0xffffffffu, pe_i, o, TPA);
         }
     }
     if (i < natoms && sub == 0) force[i] = make_float4(fx, fy, fz, pe_i);
 
-    float vir[6] = {vir_xx, vir_xy, vir_xz, vir_yy, vir_yz, vir_zz};
-    block_reduce_virial(vir, virial);
+    if (EV) {
+        float vir[6] = {vir_xx, vir_xy, vir_xz, vir_yy, vir_yz, vir_zz};
+        block_reduce_virial(vir, virial);
+    }
 }
 
 void launch_lj_coul_long_kernel(const float4* pos, const float* charges,
@@ -118,13 +123,14 @@ void launch_lj_coul_long_kernel(const float4* pos, const float* charges,
                                  int natoms, int ntypes,
                                  float coul_const, float alpha,
                                  float rc2, float L, float inv_L,
-                                 cudaStream_t stream, int tpa, const float* d_box)
+                                 cudaStream_t stream, int tpa, const float* d_box, bool ev)
 {
     if (tpa <= 0) tpa = pair_threads_per_atom(natoms);
     const int blocks = div_ceil(natoms * tpa, 256);
-#define FASTMD_LAUNCH(T) lj_coul_long_kernel<T><<<blocks, 256, 0, stream>>>(       \
+#define FASTMD_LAUNCH_EV(T, E) lj_coul_long_kernel<T, E><<<blocks, 256, 0, stream>>>( \
         pos, charges, force, virial, lj_params, neighbors, num_neighbors,          \
         natoms, ntypes, coul_const, alpha, rc2, L, inv_L, d_box)
+#define FASTMD_LAUNCH(T) do { if (ev) FASTMD_LAUNCH_EV(T, true); else FASTMD_LAUNCH_EV(T, false); } while (0)
     switch (tpa) {
         case 1: FASTMD_LAUNCH(1); break;
         case 2: FASTMD_LAUNCH(2); break;
@@ -132,4 +138,5 @@ void launch_lj_coul_long_kernel(const float4* pos, const float* charges,
         default: FASTMD_LAUNCH(8); break;
     }
 #undef FASTMD_LAUNCH
+#undef FASTMD_LAUNCH_EV
 }

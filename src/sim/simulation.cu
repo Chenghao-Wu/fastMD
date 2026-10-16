@@ -95,7 +95,7 @@ Simulation::Simulation(const SimParams& params, TopologyData topo)
     rebuild_neighbors(params_.sort_every > 0);
     tune_pair_tpa();
     tune_bonded_tpa();
-    launch_forces();
+    launch_forces(true);
     CUDA_CHECK(cudaStreamSynchronize(stream_));
     if (params_.neigh_capacity > 0) {
         // testing knob: the first device-side build uses this capacity (it
@@ -368,7 +368,7 @@ void Simulation::restore_checkpoint() {
 // Forces
 // ---------------------------------------------------------------------------
 
-void Simulation::launch_forces() {
+void Simulation::launch_forces(bool ev) {
     const float L = box_L_, inv_L = inv_L_;
     const int n = params_.natoms;
 
@@ -377,7 +377,9 @@ void Simulation::launch_forces() {
     CUDA_CHECK(cudaMemsetAsync(d_virial_, 0, 6 * sizeof(double), st));
 
     // Nonbonded kernels overwrite force[i] (=), everything after accumulates.
-    launch_pair_kernel(pair_tpa_);
+    // The smaller kernels below always add energies/virial (harmless when
+    // ev is false: neither is read then).
+    launch_pair_kernel(pair_tpa_, ev);
     if (params_.ewald_on) {
         if (params_.kspace == 1) {
             pme_.compute(p_.pos, p_.charge, p_.force, d_virial_, d_box, st);
@@ -408,7 +410,7 @@ void Simulation::launch_forces() {
     // Bonded terms accumulate into the same force buffer, so they follow the
     // overwriting nonbonded kernel on the same stream.
     if (params_.bonded_gather) {
-        launch_bonded_kernel(bonded_tpa_);
+        launch_bonded_kernel(bonded_tpa_, ev);
         CUDA_CHECK(cudaGetLastError());
         return;
     }
@@ -439,18 +441,18 @@ void Simulation::launch_forces() {
     CUDA_CHECK(cudaGetLastError());
 }
 
-void Simulation::launch_pair_kernel(int tpa) {
+void Simulation::launch_pair_kernel(int tpa, bool ev) {
     const int n = params_.natoms;
     if (params_.ewald_on)
         launch_lj_coul_long_kernel(p_.pos, p_.charge, p_.force, d_virial_, d_lj_params_,
                                    verlet_.neighbors, verlet_.num_neighbors,
                                    n, params_.ntypes, params_.coul_const, params_.ewald_alpha,
-                                   params_.rc2, box_L_, inv_L_, stream_, tpa, &d_status_->L);
+                                   params_.rc2, box_L_, inv_L_, stream_, tpa, &d_status_->L, ev);
     else
         launch_lj_kernel(p_.pos, p_.force, d_virial_, d_lj_params_,
                          verlet_.neighbors, verlet_.num_neighbors,
                          n, params_.ntypes, params_.rc2, box_L_, inv_L_, stream_,
-                         d_lj_cap_, params_.lj_force_cap, tpa, &d_status_->L);
+                         d_lj_cap_, params_.lj_force_cap, tpa, &d_status_->L, ev);
 }
 
 // Time the overwriting pair kernel with 1, 2, 4 and 8 threads per particle on
@@ -463,10 +465,10 @@ void Simulation::tune_pair_tpa() {
     CUDA_CHECK(cudaEventCreate(&e1));
     float best_ms = 1e30f;
     for (int tpa : {1, 2, 4, 8}) {
-        launch_pair_kernel(tpa);   // warm-up
+        launch_pair_kernel(tpa, false);   // warm-up (most steps need forces only)
         CUDA_CHECK(cudaEventRecord(e0, stream_));
         const int reps = 10;
-        for (int r = 0; r < reps; r++) launch_pair_kernel(tpa);
+        for (int r = 0; r < reps; r++) launch_pair_kernel(tpa, false);
         CUDA_CHECK(cudaEventRecord(e1, stream_));
         CUDA_CHECK(cudaEventSynchronize(e1));
         float ms = 0;
@@ -480,10 +482,10 @@ void Simulation::tune_pair_tpa() {
     CUDA_CHECK(cudaEventDestroy(e1));
 }
 
-void Simulation::launch_bonded_kernel(int tpa) {
+void Simulation::launch_bonded_kernel(int tpa, bool ev) {
     launch_bonded_gather_kernel(p_.pos, p_.force, d_virial_, p_.tag, t_.term_offsets,
                                 t_.terms, t_.bonds, t_.angles, t_.dihedrals, bonded_params_,
-                                params_.natoms, box_L_, inv_L_, stream_, tpa, &d_status_->L);
+                                params_.natoms, box_L_, inv_L_, stream_, tpa, &d_status_->L, ev);
 }
 
 // Same timing-based choice as tune_pair_tpa for the bonded gather kernel
@@ -497,9 +499,9 @@ void Simulation::tune_bonded_tpa() {
     CUDA_CHECK(cudaEventCreate(&e1));
     float best_ms = 1e30f;
     for (int tpa : {1, 2, 4, 8}) {
-        launch_bonded_kernel(tpa);
+        launch_bonded_kernel(tpa, false);
         CUDA_CHECK(cudaEventRecord(e0, stream_));
-        for (int r = 0; r < 10; r++) launch_bonded_kernel(tpa);
+        for (int r = 0; r < 10; r++) launch_bonded_kernel(tpa, false);
         CUDA_CHECK(cudaEventRecord(e1, stream_));
         CUDA_CHECK(cudaEventSynchronize(e1));
         float ms = 0;
@@ -514,7 +516,7 @@ void Simulation::compute_forces() {
     verlet_.step(p_.pos, p_.pos_ref, &d_status_->L, &d_status_->max_dr2_bits, p_.tag,
                  t_.excl_offsets, t_.excl_list, stream_);
     if (!validate()) rebuild_neighbors(false);
-    launch_forces();
+    launch_forces(true);
     CUDA_CHECK(cudaStreamSynchronize(stream_));
 }
 
@@ -597,11 +599,11 @@ void Simulation::integrate_post_force() {
 // Device work of one time step. Every per-step quantity (step counter,
 // ramps, box, rebuild decision) lives in device memory, so the sequence is
 // identical from step to step and can be captured as a CUDA graph.
-void Simulation::launch_step(bool with_stress) {
+void Simulation::launch_step(bool with_stress, bool ev) {
     integrate_pre_force();
     verlet_.step(p_.pos, p_.pos_ref, &d_status_->L, &d_status_->max_dr2_bits, p_.tag,
                  t_.excl_offsets, t_.excl_list, stream_);
-    launch_forces();
+    launch_forces(ev);
     integrate_post_force();
     if (with_stress) {
         // device-only sample; a pending fused-NVT velocity scale is applied in the kernel
@@ -619,23 +621,27 @@ void Simulation::invalidate_graphs() {
         }
 }
 
-void Simulation::step() {
+// One time step. Energies and the virial are computed only when something
+// reads them after this step (want_ev: outputs, the end of a run), on
+// stress-sample steps, and every step under NPT (the barostat uses the virial).
+void Simulation::advance_one(bool want_ev) {
     ++step_;
     const bool with_stress = params_.stress_on && step_ % params_.stress_freq == 0;
+    const bool ev = want_ev || with_stress || params_.ensemble == Ensemble::NPT_NH;
     // the per-term bonded kernels take the box by value, so NPT then needs it
     // on the host every step and cannot be replayed from a graph
     const bool host_box = params_.ensemble == Ensemble::NPT_NH && !params_.bonded_gather;
     if (host_box) read_status();
     if (!params_.cuda_graphs || host_box) {
-        launch_step(with_stress);
+        launch_step(with_stress, ev);
         return;
     }
-    cudaGraphExec_t& exec = graph_exec_[with_stress ? 1 : 0];
+    cudaGraphExec_t& exec = graph_exec_[with_stress ? 2 : ev ? 1 : 0];
     if (!exec) {
         const bool pending = velocities_pending_;   // host bookkeeping replayed below
         cudaGraph_t graph;
         CUDA_CHECK(cudaStreamBeginCapture(stream_, cudaStreamCaptureModeThreadLocal));
-        launch_step(with_stress);
+        launch_step(with_stress, ev);
         CUDA_CHECK(cudaStreamEndCapture(stream_, &graph));
         CUDA_CHECK(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0));
         CUDA_CHECK(cudaGraphDestroy(graph));
@@ -768,7 +774,7 @@ void Simulation::advance(int nsteps, bool progress) {
     const int target = step_ + nsteps;
     save_checkpoint();
     while (step_ < target) {
-        step();
+        advance_one(output_due(step_ + 1) || step_ + 1 == target);
         bool at_output = output_due(step_) || step_ == target;
         if (at_output || step_ - ckpt_step_ >= check_every_) {
             if (!validate()) {
@@ -860,7 +866,7 @@ void Simulation::set_positions(const std::vector<float3>& xyz, const std::vector
     p_.set_positions(pos);
     p_.set_images(img);
     rebuild_neighbors(false);
-    launch_forces();
+    launch_forces(true);
     CUDA_CHECK(cudaStreamSynchronize(stream_));
 }
 

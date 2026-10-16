@@ -3,7 +3,8 @@
 #include "../core/pbc.cuh"
 #include "../core/reduce.cuh"
 
-template <int TPA>
+// EV = false: forces only (no energy added to force.w, no virial).
+template <int TPA, bool EV>
 __global__ void bonded_gather_kernel(const float4* __restrict__ pos, float4* __restrict__ force,
                                      double* __restrict__ virial,
                                      const int* __restrict__ tag,
@@ -23,7 +24,9 @@ __global__ void bonded_gather_kernel(const float4* __restrict__ pos, float4* __r
     float3 f = make_float3(0.0f, 0.0f, 0.0f);
     float e = 0.0f;
     float vir[6] = {0, 0, 0, 0, 0, 0};
-    auto add_vir = [&](const float (&v)[6]) { for (int c = 0; c < 6; c++) vir[c] += v[c]; };
+    auto add_vir = [&](const float (&v)[6]) {
+        if (EV) for (int c = 0; c < 6; c++) vir[c] += v[c];
+    };
 
     if (i < natoms) {
         int t = tag ? tag[i] : i;
@@ -94,14 +97,14 @@ __global__ void bonded_gather_kernel(const float4* __restrict__ pos, float4* __r
             f.x += __shfl_down_sync(0xffffffffu, f.x, o, TPA);
             f.y += __shfl_down_sync(0xffffffffu, f.y, o, TPA);
             f.z += __shfl_down_sync(0xffffffffu, f.z, o, TPA);
-            e += __shfl_down_sync(0xffffffffu, e, o, TPA);
+            if (EV) e += __shfl_down_sync(0xffffffffu, e, o, TPA);
         }
     }
     if (i < natoms && sub == 0) {
         float4 fi = force[i];
-        force[i] = make_float4(fi.x + f.x, fi.y + f.y, fi.z + f.z, fi.w + e);
+        force[i] = make_float4(fi.x + f.x, fi.y + f.y, fi.z + f.z, EV ? fi.w + e : fi.w);
     }
-    block_reduce_virial(vir, virial);
+    if (EV) block_reduce_virial(vir, virial);
 }
 
 void launch_bonded_gather_kernel(const float4* pos, float4* force, double* virial,
@@ -109,13 +112,14 @@ void launch_bonded_gather_kernel(const float4* pos, float4* force, double* viria
                                  const int2* bonds, const int4* angles, const int4* dihedrals,
                                  const BondedParams& params,
                                  int natoms, float L, float inv_L, cudaStream_t stream,
-                                 int tpa, const float* d_box) {
+                                 int tpa, const float* d_box, bool ev) {
     if (!term_offsets) return;
     if (tpa != 1 && tpa != 2 && tpa != 4 && tpa != 8) tpa = 1;
     const int blocks = div_ceil(natoms * tpa, 256);
-#define FASTMD_LAUNCH(T) bonded_gather_kernel<T><<<blocks, 256, 0, stream>>>(       \
+#define FASTMD_LAUNCH_EV(T, E) bonded_gather_kernel<T, E><<<blocks, 256, 0, stream>>>( \
         pos, force, virial, tag, term_offsets, terms, bonds, angles, dihedrals,    \
         params, natoms, L, inv_L, d_box)
+#define FASTMD_LAUNCH(T) do { if (ev) FASTMD_LAUNCH_EV(T, true); else FASTMD_LAUNCH_EV(T, false); } while (0)
     switch (tpa) {
         case 1: FASTMD_LAUNCH(1); break;
         case 2: FASTMD_LAUNCH(2); break;
@@ -123,4 +127,5 @@ void launch_bonded_gather_kernel(const float4* pos, float4* force, double* viria
         default: FASTMD_LAUNCH(8); break;
     }
 #undef FASTMD_LAUNCH
+#undef FASTMD_LAUNCH_EV
 }

@@ -42,7 +42,7 @@ public:
     void print_setup() const;
     void run();
     void run(int nsteps);
-    void step();
+    void step() { advance_one(true); }   // one step; energies and virial valid afterwards
 
     // Evaluate forces/energies/virial at the current positions (rebuilding
     // the neighbor list first if particles moved beyond the skin).
@@ -85,14 +85,17 @@ private:
     void save_checkpoint();
     void restore_checkpoint();
     bool validate();                     // neighbor/grid flags since the checkpoint
-    void launch_forces();
-    void launch_pair_kernel(int tpa);     // the overwriting nonbonded kernel
+    // ev: also per-atom energies (force.w) and the virial; without it only
+    // forces are valid (the pair and bonded kernels skip the rest)
+    void launch_forces(bool ev);
+    void launch_pair_kernel(int tpa, bool ev);   // the overwriting nonbonded kernel
     void tune_pair_tpa();
-    void launch_bonded_kernel(int tpa);
+    void launch_bonded_kernel(int tpa, bool ev);
     void tune_bonded_tpa();
     void integrate_pre_force();
     void integrate_post_force();
-    void launch_step(bool with_stress);   // all device work of one step
+    void launch_step(bool with_stress, bool ev);   // all device work of one step
+    void advance_one(bool want_ev);
     void invalidate_graphs();
     void write_outputs();
     void flush_velocities();     // apply a pending thermostat scale (fused NVT)
@@ -178,8 +181,9 @@ private:
     // All device work is ordered on one stream; host waits only for the
     // per-step status read-back and for output.
     cudaStream_t stream_ = nullptr;
-    // captured single steps: [0] plain, [1] with a stress sample
-    cudaGraphExec_t graph_exec_[2] = {nullptr, nullptr};
+    // captured single steps: [0] forces only, [1] with energies/virial,
+    // [2] with energies/virial and a stress sample
+    cudaGraphExec_t graph_exec_[3] = {nullptr, nullptr, nullptr};
     int n_graph_captures_ = 0;
     void read_status();
 

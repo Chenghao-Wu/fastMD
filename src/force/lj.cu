@@ -4,12 +4,15 @@
 #include "../core/launch.cuh"
 #include <cmath>
 
+// EV = false skips the per-atom energy (force.w is left 0) and the virial:
+// most steps need neither (see Simulation::step).
+//
 // TPA threads cooperate on one particle: lane `sub` of the group takes
 // neighbors sub, sub+TPA, ... (rows of the transposed list stay contiguous
 // across the consecutive particles of a warp), then the group sums its
 // partial forces with shuffles. TPA > 1 raises occupancy when the system is
 // small relative to the GPU.
-template <bool CAP, int TPA>
+template <bool CAP, int TPA, bool EV>
 __global__ void lj_verlet_kernel(
     const float4* __restrict__ pos,
     float4* __restrict__ force,
@@ -72,13 +75,15 @@ __global__ void lj_verlet_kernel(
                 float fzij = force_r * dz;
 
                 fx += fxij; fy += fyij; fz += fzij;
-                pe_i += 0.5f * pe_pair;
-                vir_xx += 0.5f * fxij * dx;
-                vir_xy += 0.5f * fxij * dy;
-                vir_xz += 0.5f * fxij * dz;
-                vir_yy += 0.5f * fyij * dy;
-                vir_yz += 0.5f * fyij * dz;
-                vir_zz += 0.5f * fzij * dz;
+                if (EV) {
+                    pe_i += 0.5f * pe_pair;
+                    vir_xx += 0.5f * fxij * dx;
+                    vir_xy += 0.5f * fxij * dy;
+                    vir_xz += 0.5f * fxij * dz;
+                    vir_yy += 0.5f * fyij * dy;
+                    vir_yz += 0.5f * fyij * dz;
+                    vir_zz += 0.5f * fzij * dz;
+                }
             }
         }
     }
@@ -88,13 +93,15 @@ __global__ void lj_verlet_kernel(
             fx += __shfl_down_sync(0xffffffffu, fx, o, TPA);
             fy += __shfl_down_sync(0xffffffffu, fy, o, TPA);
             fz += __shfl_down_sync(0xffffffffu, fz, o, TPA);
-            pe_i += __shfl_down_sync(0xffffffffu, pe_i, o, TPA);
+            if (EV) pe_i += __shfl_down_sync(0xffffffffu, pe_i, o, TPA);
         }
     }
     if (i < natoms && sub == 0) force[i] = make_float4(fx, fy, fz, pe_i);
 
-    float vir[6] = {vir_xx, vir_xy, vir_xz, vir_yy, vir_yz, vir_zz};
-    block_reduce_virial(vir, virial);
+    if (EV) {
+        float vir[6] = {vir_xx, vir_xy, vir_xz, vir_yy, vir_yz, vir_zz};
+        block_reduce_virial(vir, virial);
+    }
 }
 
 void launch_lj_kernel(const float4* pos, float4* force, double* virial,
@@ -103,15 +110,21 @@ void launch_lj_kernel(const float4* pos, float4* force, double* virial,
                        int natoms, int ntypes,
                        float rc2, float L, float inv_L,
                        cudaStream_t stream,
-                       const float2* lj_cap, float force_cap, int tpa, const float* d_box)
+                       const float2* lj_cap, float force_cap, int tpa, const float* d_box,
+                       bool ev)
 {
     if (tpa <= 0) tpa = pair_threads_per_atom(natoms);
     const bool cap = lj_cap && force_cap > 0.0f;
     const int blocks = div_ceil(natoms * tpa, 256);
 #define FASTMD_LJ_LAUNCH(C, T)                                                     \
-    lj_verlet_kernel<C, T><<<blocks, 256, 0, stream>>>(                           \
-        pos, force, virial, lj_params, lj_cap, force_cap,                         \
-        neighbors, num_neighbors, natoms, ntypes, rc2, L, inv_L, d_box)
+    do {                                                                           \
+        if (ev) lj_verlet_kernel<C, T, true><<<blocks, 256, 0, stream>>>(         \
+            pos, force, virial, lj_params, lj_cap, force_cap,                     \
+            neighbors, num_neighbors, natoms, ntypes, rc2, L, inv_L, d_box);      \
+        else lj_verlet_kernel<C, T, false><<<blocks, 256, 0, stream>>>(           \
+            pos, force, virial, lj_params, lj_cap, force_cap,                     \
+            neighbors, num_neighbors, natoms, ntypes, rc2, L, inv_L, d_box);      \
+    } while (0)
     switch ((cap ? 16 : 0) + tpa) {
         case 1:  FASTMD_LJ_LAUNCH(false, 1); break;
         case 2:  FASTMD_LJ_LAUNCH(false, 2); break;
