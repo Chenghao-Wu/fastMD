@@ -116,7 +116,7 @@ __global__ void ewald_sf_kernel(
 // where eg_k = 2 k ug, ug = (4pi/V) exp(-k2/(4 a2)) / k2.
 // PE per atom: 0.5 q_i C sum_k ug [ Re(e^{-ikr} S(k)) ]  (half = per-pair share)
 // Virial per LAMMPS: virial += C sum_k ug |S|^2 vg_k,
-//   vg_a = 1 - 2(1/k2 + 1/(4a2)) k_a^2 (diagonal).
+//   vg_ab = delta_ab - 2(1/k2 + 1/(4a2)) k_a k_b (all six components).
 // ---------------------------------------------------------------------------
 __global__ void ewald_recip_kernel(
     const float4* __restrict__ pos,
@@ -137,10 +137,10 @@ __global__ void ewald_recip_kernel(
     float inv_4a2 = 0.25f / (alpha * alpha);
 
     float fx = 0.0f, fy = 0.0f, fz = 0.0f, pe_i = 0.0f;
-    float vir_xx = 0.0f, vir_yy = 0.0f, vir_zz = 0.0f;
     // reciprocal virial is a global (per-k-grid) quantity: only block 0
     // accumulates it, strided over k; all other blocks contribute 0.
     bool do_virial = (blockIdx.x == 0);
+    float v[6] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};   // xx xy xz yy yz zz
 
     if (i < natoms) {
         float4 p = pos[i];
@@ -185,6 +185,10 @@ __global__ void ewald_recip_kernel(
         atomicAdd(&force[i].w, coul_const * pe_i);
     }
 
+    // Full reciprocal virial (LAMMPS Ewald::coeffs/compute):
+    //   W_ab = C sum_k ug |S(k)|^2 (delta_ab - 2 (1/k^2 + 1/(4 alpha^2)) k_a k_b)
+    // Off-diagonal terms are non-zero for any instantaneous configuration,
+    // cubic box or not, and enter the shear-stress autocorrelation.
     if (do_virial) {
         for (int k = threadIdx.x; k < kcount; k += blockDim.x) {
             int3 n = kvecs[k];
@@ -195,37 +199,30 @@ __global__ void ewald_recip_kernel(
             float sf_im = __ldg(&sfac[2 * k + 1]);
             float uk = ug * (sf_rl * sf_rl + sf_im * sf_im);
             float vterm = -2.0f * (1.0f / k2 + inv_4a2);
-            vir_xx += uk * (1.0f + vterm * kx * kx);
-            vir_yy += uk * (1.0f + vterm * ky * ky);
-            vir_zz += uk * (1.0f + vterm * kz * kz);
+            v[0] += uk * (1.0f + vterm * kx * kx);
+            v[1] += uk * vterm * kx * ky;
+            v[2] += uk * vterm * kx * kz;
+            v[3] += uk * (1.0f + vterm * ky * ky);
+            v[4] += uk * vterm * ky * kz;
+            v[5] += uk * (1.0f + vterm * kz * kz);
         }
-    }
-
-    // block virial reduction (diagonal only; off-diagonal omitted for this
-    // orthorhombic-only build — Pxx/Pyy/Pzz remain exact)
-    for (int offset = 16; offset > 0; offset >>= 1) {
-        vir_xx += __shfl_down_sync(0xFFFFFFFF, vir_xx, offset);
-        vir_yy += __shfl_down_sync(0xFFFFFFFF, vir_yy, offset);
-        vir_zz += __shfl_down_sync(0xFFFFFFFF, vir_zz, offset);
-    }
-    __shared__ float s_v[3 * 8];
-    if (lane == 0) {
-        int wid = threadIdx.x >> 5;
-        s_v[wid * 3 + 0] = vir_xx;
-        s_v[wid * 3 + 1] = vir_yy;
-        s_v[wid * 3 + 2] = vir_zz;
-    }
-    __syncthreads();
-    if (threadIdx.x == 0 && do_virial) {
-        float b0 = 0, b3 = 0, b5 = 0;
-        for (int w = 0; w < (blockDim.x >> 5); w++) {
-            b0 += s_v[w * 3 + 0];
-            b3 += s_v[w * 3 + 1];
-            b5 += s_v[w * 3 + 2];
+        // block 0 only: warp shuffle, then the first warp combines warp sums
+        __shared__ float s_v[6 * 32];
+        for (int c = 0; c < 6; c++)
+            for (int offset = 16; offset > 0; offset >>= 1)
+                v[c] += __shfl_down_sync(0xFFFFFFFF, v[c], offset);
+        if (lane == 0)
+            for (int c = 0; c < 6; c++) s_v[c * 32 + (threadIdx.x >> 5)] = v[c];
+        __syncthreads();
+        if (threadIdx.x < 32) {
+            int nwarps = blockDim.x >> 5;
+            for (int c = 0; c < 6; c++) {
+                float t = threadIdx.x < nwarps ? s_v[c * 32 + threadIdx.x] : 0.0f;
+                for (int offset = 16; offset > 0; offset >>= 1)
+                    t += __shfl_down_sync(0xFFFFFFFF, t, offset);
+                if (threadIdx.x == 0) atomicAdd(&virial[c], coul_const * t);
+            }
         }
-        atomicAdd(&virial[0], coul_const * b0);
-        atomicAdd(&virial[3], coul_const * b3);
-        atomicAdd(&virial[5], coul_const * b5);
     }
 }
 

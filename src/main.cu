@@ -13,7 +13,9 @@ int main(int argc, char** argv) {
         TopologyData topo;
         SimParams params = parse_config(argv[1], topo);
         if (!topo.data_file.empty()) parse_lammps_data(topo.data_file, topo);
+        if (params.natoms == 0) params.natoms = (int)topo.positions.size();
         params.box_L = topo.box_L;
+        validate_system(params, topo);
         finalize_params(params);
 
         Simulation sim(params, std::move(topo));

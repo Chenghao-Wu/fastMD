@@ -52,7 +52,7 @@ Simulation::Simulation(const SimParams& params, TopologyData topo)
     // neighbor list and re-added scaled by the pair14 kernel) applies
     // whenever the system has dihedrals or uses Ewald.
     opls_mode_ = params_.ewald_on || !topo_.dihedrals.empty();
-    if (opls_mode_) build_exclusions_opls(topo_, topo_);
+    if (opls_mode_) build_exclusions_opls(topo_, topo_, params_.special_dihedral != 0);
     else if (!topo_.bonds.empty()) build_exclusions(topo_, topo_);
 
     p_.allocate(params_.natoms);
@@ -105,6 +105,9 @@ void Simulation::upload_force_field() {
     d_lj_params_ = upload_vec(topo_.lj_params);
     if ((int)topo_.lj_params.size() != nt2)
         throw std::runtime_error("LJ parameter table has wrong size");
+    if (params_.lj_force_cap > 0.0f)
+        d_lj_cap_ = upload_vec(lj_force_cap_table(topo_.lj_params, params_.ntypes,
+                                                  params_.lj_force_cap));
 
     if (!topo_.table_params.empty()) {
         d_table_idx_ = upload_vec(topo_.table_idx);
@@ -138,15 +141,6 @@ void Simulation::upload_force_field() {
                                                       params_.ewald_alpha, box_L_);
     }
 
-    if (t_.nbonds > 0 && !d_bond_table_data_ && !d_hbond_params_ && !d_fene_params_)
-        fprintf(stderr, "Warning: %d bonds in data file but no bond params "
-                        "— skipping bond forces\n", t_.nbonds);
-    if (t_.nangles > 0 && !d_angle_table_data_ && !d_angle_params_)
-        fprintf(stderr, "Warning: %d angles in data file but no angle params "
-                        "— skipping angle forces\n", t_.nangles);
-    if (t_.ndihedrals > 0 && !d_dihedral_params_)
-        fprintf(stderr, "Warning: %d dihedrals in data file but no "
-                        "dihedral_opls params — skipping dihedral forces\n", t_.ndihedrals);
 }
 
 void Simulation::setup_integrator() {
@@ -286,7 +280,8 @@ void Simulation::launch_forces() {
     } else {
         launch_lj_kernel(p_.pos, p_.force, d_virial_, d_lj_params_,
                          verlet_.neighbors, verlet_.num_neighbors,
-                         n, params_.ntypes, params_.rc2, L, inv_L, stream_lj_);
+                         n, params_.ntypes, params_.rc2, L, inv_L, stream_lj_,
+                         d_lj_cap_, params_.lj_force_cap);
     }
     if (t_.npairs14 > 0) {
         launch_pair14_kernel(p_.pos, p_.charge, p_.force, d_virial_, t_.pairs14, d_lj_params_,
@@ -576,29 +571,7 @@ void Simulation::run() {
 
 void Simulation::finish() {
     if (!params_.stress_on) return;
-    int buf_size = CORR_LEVELS * CORR_POINTS * STRESS_COMPONENTS;
-    std::vector<float> h_corr(buf_size);
-    std::vector<int> h_counts(CORR_LEVELS * CORR_POINTS);
-    int total_levels;
-    correlator_.get_results(h_corr.data(), h_counts.data(), &total_levels);
-
-    FILE* corr_fp = fopen(params_.stress_file, "w");
-    if (!corr_fp) throw std::runtime_error(std::string("cannot open ") + params_.stress_file);
-    fprintf(corr_fp, "# lag_steps  C_xx  C_xy  C_xz  C_yy  C_yz  C_zz  count\n");
-    int lag_step = params_.stress_freq;
-    for (int level = 0; level < total_levels; level++) {
-        for (int lag = 0; lag < CORR_POINTS; lag++) {
-            int count = h_counts[level * CORR_POINTS + lag];
-            if (count == 0) continue;
-            fprintf(corr_fp, "%d", lag_step * (lag + 1));
-            for (int c = 0; c < STRESS_COMPONENTS; c++)
-                fprintf(corr_fp, " %.8e",
-                        h_corr[(level * CORR_POINTS + lag) * STRESS_COMPONENTS + c] / count);
-            fprintf(corr_fp, " %d\n", count);
-        }
-        lag_step *= CORR_POINTS;
-    }
-    fclose(corr_fp);
+    correlator_.write(params_.stress_file, params_.stress_freq);
     printf("Stress autocorrelation written to %s\n", params_.stress_file);
 }
 
@@ -616,6 +589,7 @@ Simulation::~Simulation() {
     verlet_.free();
     morton_.free();
     free_dev(d_lj_params_);
+    free_dev(d_lj_cap_);
     free_dev(d_fene_params_);
     free_dev(d_angle_params_);
     free_dev(d_hbond_params_);

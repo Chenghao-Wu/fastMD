@@ -4,6 +4,7 @@
 #include "../force/angle.cuh"
 #include "../force/bond_harmonic.cuh"
 #include "../force/dihedral_opls.cuh"
+#include "../integrate/nose_hoover.cuh"
 #include "table_parser.hpp"
 #include <string>
 #include <vector>
@@ -22,6 +23,8 @@ struct TopologyData {
     std::vector<AngleParams> angle_params;
     std::vector<BondHarmonicParams> hbond_params;
     std::vector<OPLSDihedralParams> dihedral_params;
+    // which bonded types were explicitly parameterised (index = type)
+    std::vector<char> bond_params_set, hbond_params_set, angle_params_set, dihedral_params_set;
     std::string data_file;
 
     std::vector<int> exclusion_offsets;
@@ -57,5 +60,9 @@ struct TopologyData {
 };
 
 void finalize_params(SimParams& params);
+
+// Consistency checks between the config and the loaded system (atom count,
+// type ranges, parameter coverage of every bonded type, cutoff vs box).
+void validate_system(const SimParams& params, const TopologyData& topo);
 
 SimParams parse_config(const std::string& filename, TopologyData& topo);

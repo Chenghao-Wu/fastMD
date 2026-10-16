@@ -42,6 +42,11 @@ __host__ __device__ inline int unpack_type_id(float w) {
 
 enum class Ensemble { Langevin = 0, NVT_NH = 1, NPT_NH = 2 };
 
+// Layout of every 6-component virial / stress array on the device and in
+// ThermoOutput::stress. Text output uses the conventional order
+// xx yy zz xy xz yz (see analysis/thermo.cu).
+enum VirialIndex { VXX = 0, VXY = 1, VXZ = 2, VYY = 3, VYZ = 4, VZZ = 5 };
+
 struct SimParams {
     float box_L;
     float inv_L;
@@ -93,4 +98,13 @@ struct SimParams {
     float lj14 = 0.5f;
     float ewald_self_offset = 0.0f;   // total self-energy, PE correction
     int   ewald_kcount = 0;           // number of k-vectors (half-shell)
+
+    // Optional, explicit LJ force cap (0 = off): below the radius where
+    // |F_LJ| reaches lj_force_cap the force is held at the cap and the energy
+    // continued linearly, so F = -dU/dr everywhere.
+    float lj_force_cap = 0.0f;
+
+    // 1-4 pairs: 0 = from bond-graph distance (LAMMPS default),
+    // 1 = only end atoms of listed dihedrals (LAMMPS 'special_bonds dihedral yes').
+    int   special_dihedral = 0;
 };

@@ -4,7 +4,8 @@
 
 void parse_lammps_data(const std::string& path, TopologyData& topo);
 void build_exclusions(const TopologyData& in_topo, TopologyData& out_topo);
-void build_exclusions_opls(const TopologyData& in_topo, TopologyData& out_topo);
+void build_exclusions_opls(const TopologyData& in_topo, TopologyData& out_topo,
+                           bool from_dihedrals = false);
 
 // Per-particle state for a restart, in tag (input-file) order.
 struct RestartFrame {

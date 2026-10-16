@@ -26,7 +26,7 @@ TEST(Table, MatchesLJWithinInterpolationTolerance) {
             pack_type_id(0));
     }
 
-    // Build LJ-equivalent table with clamped forces to match LJ kernel
+    // LJ-equivalent table (exact LJ; F/r stored, as the kernel expects)
     int ntable = 10000;
     float rlo = 0.01f, rhi = rc;
     float dr = (rhi - rlo) / (ntable - 1);
@@ -39,7 +39,6 @@ TEST(Table, MatchesLJWithinInterpolationTolerance) {
         float sr6 = sr2 * sr2 * sr2;
         float sr12 = sr6 * sr6;
         float force = 24.0f * r2inv * (2.0f * sr12 - sr6);
-        force = fminf(fmaxf(force, -1000.0f), 1000.0f);
         float energy = 4.0f * (sr12 - sr6);
         h_table_data[k] = make_float4(r, force, energy, 0.0f);
     }

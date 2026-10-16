@@ -1,11 +1,15 @@
 #include "lj.cuh"
 #include "../core/pbc.cuh"
+#include <cmath>
 
+template <bool CAP>
 __global__ void lj_verlet_kernel(
     const float4* __restrict__ pos,
     float4* __restrict__ force,
     float* __restrict__ virial,
     const float2* __restrict__ lj_params,
+    const float2* __restrict__ lj_cap,
+    float force_cap,
     const int* __restrict__ neighbors,
     const int* __restrict__ num_neighbors,
     int natoms, int ntypes,
@@ -42,17 +46,24 @@ __global__ void lj_verlet_kernel(
                 float sr2 = sig2 * r2inv;
                 float sr6 = sr2 * sr2 * sr2;
                 float sr12 = sr6 * sr6;
+                // force_r = F(r) / r, so that F_vec = force_r * dr
                 float force_r = 24.0f * eps * r2inv * (2.0f * sr12 - sr6);
+                float pe_pair = 4.0f * eps * (sr12 - sr6);
+                if (CAP) {
+                    float2 cap = __ldg(&lj_cap[type_i * ntypes + type_j]);  // (r_cap, U(r_cap))
+                    if (r2 < cap.x * cap.x) {
+                        float r = sqrtf(r2);
+                        force_r = force_cap / r;
+                        pe_pair = cap.y + force_cap * (cap.x - r);
+                    }
+                }
 
-                // Clamp LJ force to prevent overflow in single precision
-                float force_r_clamped = fminf(fmaxf(force_r, -1000.0f), 1000.0f);
-
-                float fxij = force_r_clamped * dx;
-                float fyij = force_r_clamped * dy;
-                float fzij = force_r_clamped * dz;
+                float fxij = force_r * dx;
+                float fyij = force_r * dy;
+                float fzij = force_r * dz;
 
                 fx += fxij; fy += fyij; fz += fzij;
-                pe_i += 0.5f * 4.0f * eps * (sr12 - sr6);
+                pe_i += 0.5f * pe_pair;
                 vir_xx += 0.5f * fxij * dx;
                 vir_xy += 0.5f * fxij * dy;
                 vir_xz += 0.5f * fxij * dz;
@@ -111,12 +122,41 @@ void launch_lj_kernel(const float4* pos, float4* force, float* virial,
                        const int* neighbors, const int* num_neighbors,
                        int natoms, int ntypes,
                        float rc2, float L, float inv_L,
-                       cudaStream_t stream)
+                       cudaStream_t stream,
+                       const float2* lj_cap, float force_cap)
 {
     int blocks = div_ceil(natoms, 256);
     int smem = (256 / 32) * 6 * sizeof(float);
-    lj_verlet_kernel<<<blocks, 256, smem, stream>>>(
-        pos, force, virial, lj_params,
-        neighbors, num_neighbors,
-        natoms, ntypes, rc2, L, inv_L);
+    if (lj_cap && force_cap > 0.0f)
+        lj_verlet_kernel<true><<<blocks, 256, smem, stream>>>(
+            pos, force, virial, lj_params, lj_cap, force_cap,
+            neighbors, num_neighbors, natoms, ntypes, rc2, L, inv_L);
+    else
+        lj_verlet_kernel<false><<<blocks, 256, smem, stream>>>(
+            pos, force, virial, lj_params, nullptr, 0.0f,
+            neighbors, num_neighbors, natoms, ntypes, rc2, L, inv_L);
+}
+
+std::vector<float2> lj_force_cap_table(const std::vector<float2>& lj_params,
+                                       int ntypes, float force_cap) {
+    std::vector<float2> cap(lj_params.size(), make_float2(0.0f, 0.0f));
+    for (int k = 0; k < ntypes * ntypes; k++) {
+        double eps = lj_params[k].x, sig = lj_params[k].y;
+        if (eps <= 0.0 || sig <= 0.0) continue;
+        auto F = [&](double r) {  // radial LJ force, positive = repulsive
+            double sr6 = std::pow(sig / r, 6);
+            return 24.0 * eps / r * (2.0 * sr6 * sr6 - sr6);
+        };
+        // F decreases monotonically on (0, 2^(1/6) sig], where it reaches 0.
+        double lo = 1e-3 * sig, hi = std::pow(2.0, 1.0 / 6.0) * sig;
+        if (F(lo) <= force_cap) continue;   // cap never reached
+        for (int it = 0; it < 200; it++) {
+            double mid = 0.5 * (lo + hi);
+            (F(mid) > force_cap ? lo : hi) = mid;
+        }
+        double rcap = 0.5 * (lo + hi);
+        double sr6 = std::pow(sig / rcap, 6);
+        cap[k] = make_float2((float)rcap, (float)(4.0 * eps * (sr6 * sr6 - sr6)));
+    }
+    return cap;
 }

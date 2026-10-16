@@ -75,6 +75,7 @@ private:
 
     // force field (device)
     float2*             d_lj_params_ = nullptr;
+    float2*             d_lj_cap_ = nullptr;     // (r_cap, U(r_cap)) when lj_force_cap > 0
     FENEParams*         d_fene_params_ = nullptr;
     AngleParams*        d_angle_params_ = nullptr;
     BondHarmonicParams* d_hbond_params_ = nullptr;

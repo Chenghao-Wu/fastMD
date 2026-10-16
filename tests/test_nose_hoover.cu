@@ -208,12 +208,15 @@ TEST(NoseHoover, NVTReachesTargetTemperature) {
     const float Tdamp = 0.5f;
     const float T_target = 1.5f;
 
+    // Jittered 5x5x4 lattice (spacing 2): no overlaps, so the exact LJ force
+    // stays finite (uniform random positions relied on the old force clamp).
     std::vector<float4> h_pos(np, make_float4(0,0,0, pack_type_id(-1)));
     srand(123);
     for (int i = 0; i < N; i++) {
-        h_pos[i] = make_float4((rand()/(float)RAND_MAX) * L,
-                                (rand()/(float)RAND_MAX) * L,
-                                (rand()/(float)RAND_MAX) * L,
+        int ix = i % 5, iy = (i / 5) % 5, iz = i / 25;
+        h_pos[i] = make_float4((ix + 0.5f) * 2.0f + 0.2f * (rand()/(float)RAND_MAX - 0.5f),
+                                (iy + 0.5f) * 2.0f + 0.2f * (rand()/(float)RAND_MAX - 0.5f),
+                                (iz + 0.5f) * 2.5f + 0.2f * (rand()/(float)RAND_MAX - 0.5f),
                                 pack_type_id(0));
     }
     std::vector<float4> h_vel(np, make_float4(0,0,0,0));

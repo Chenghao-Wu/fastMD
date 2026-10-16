@@ -6,6 +6,8 @@
 #include "neighbor/verlet_list.cuh"
 #include "../reference/cpu_reference.hpp"
 #include <cstdlib>
+#include <random>
+#include <cmath>
 
 // 6-atom charged cluster with one bond chain 0-1-2-3-4 (gives 1-2, 1-3,
 // 1-4 relationships), plus an isolated atom 5. All Ewald components
@@ -172,4 +174,106 @@ TEST(EwaldOPLS, SmallClusterMatchesBruteForce) {
     free_device(d_ex13_off); free_device(d_ex13_list);
     free_device(d_p14);
     verlet.free();
+}
+
+namespace {
+// fp64 reciprocal energy under a homogeneous deformation F of the box and
+// particles: k' = F^-T k, V' = det(F) V, and k'.r' = k.r (S(k) invariant).
+double recip_energy(const std::vector<float4>& pos, const std::vector<float>& q,
+                    const std::vector<int3>& kv, double L, double alpha, double C,
+                    const double F[3][3]) {
+    double det = F[0][0] * (F[1][1] * F[2][2] - F[1][2] * F[2][1])
+               - F[0][1] * (F[1][0] * F[2][2] - F[1][2] * F[2][0])
+               + F[0][2] * (F[1][0] * F[2][1] - F[1][1] * F[2][0]);
+    double inv[3][3];   // F^-1
+    inv[0][0] = (F[1][1] * F[2][2] - F[1][2] * F[2][1]) / det;
+    inv[0][1] = (F[0][2] * F[2][1] - F[0][1] * F[2][2]) / det;
+    inv[0][2] = (F[0][1] * F[1][2] - F[0][2] * F[1][1]) / det;
+    inv[1][0] = (F[1][2] * F[2][0] - F[1][0] * F[2][2]) / det;
+    inv[1][1] = (F[0][0] * F[2][2] - F[0][2] * F[2][0]) / det;
+    inv[1][2] = (F[0][2] * F[1][0] - F[0][0] * F[1][2]) / det;
+    inv[2][0] = (F[1][0] * F[2][1] - F[1][1] * F[2][0]) / det;
+    inv[2][1] = (F[0][1] * F[2][0] - F[0][0] * F[2][1]) / det;
+    inv[2][2] = (F[0][0] * F[1][1] - F[0][1] * F[1][0]) / det;
+    double V = det * L * L * L;
+    double E = 0.0;
+    for (const int3& n : kv) {
+        double k0[3] = {2 * M_PI * n.x / L, 2 * M_PI * n.y / L, 2 * M_PI * n.z / L};
+        double kp[3];
+        for (int a = 0; a < 3; a++)   // F^-T k: (F^-T)_ab = inv[b][a]
+            kp[a] = inv[0][a] * k0[0] + inv[1][a] * k0[1] + inv[2][a] * k0[2];
+        double k2 = kp[0] * kp[0] + kp[1] * kp[1] + kp[2] * kp[2];
+        double re = 0, im = 0;
+        for (size_t j = 0; j < pos.size(); j++) {
+            double ph = k0[0] * pos[j].x + k0[1] * pos[j].y + k0[2] * pos[j].z;
+            re += q[j] * std::cos(ph);
+            im += q[j] * std::sin(ph);
+        }
+        // half-shell sum: each +/-k pair counted once with weight 4 pi / V
+        E += C * (4 * M_PI / V) * std::exp(-k2 / (4 * alpha * alpha)) / k2 * (re * re + im * im);
+    }
+    return E;
+}
+}  // namespace
+
+// All six reciprocal-space virial components equal -dE_recip/dF_ab.
+// Previously only the diagonal was accumulated; Pxy/Pxz/Pyz missed the
+// k-space part although it is non-zero for any configuration.
+TEST(EwaldOPLS, ReciprocalVirialMatchesStrainDerivative) {
+    const float L = 2.5f, alpha = 3.0f, C = 138.9354576f;
+    const int kmax = 5, N = 37;
+    std::mt19937 rng(5);
+    std::uniform_real_distribution<float> u(0.0f, L);
+    std::vector<float4> pos(N);
+    std::vector<float> q(N);
+    for (int i = 0; i < N; i++) {
+        pos[i] = make_float4(u(rng), u(rng), u(rng), pack_type_id(0));
+        q[i] = (i % 2 ? 0.4f : -0.4f) * (1.0f + 0.1f * (i % 3));
+    }
+    double qsum = 0;
+    for (float v : q) qsum += v;
+    q[N - 1] -= (float)qsum;   // neutral
+
+    std::vector<int3> kv = ewald_build_kvectors(kmax, L, alpha);
+    int np = div_ceil(N, TILE_SIZE) * TILE_SIZE;
+    std::vector<float4> pos_pad(np, make_float4(0, 0, 0, pack_type_id(-1)));
+    std::copy(pos.begin(), pos.end(), pos_pad.begin());
+    std::vector<float> q_pad(np, 0.0f);
+    std::copy(q.begin(), q.end(), q_pad.begin());
+    float4* d_pos = to_device(pos_pad);
+    float* d_q = to_device(q_pad);
+    int3* d_kv = to_device(kv);
+    float* d_sfac;
+    CUDA_CHECK(cudaMalloc(&d_sfac, 2 * kv.size() * sizeof(float)));
+    float4* d_force;
+    CUDA_CHECK(cudaMalloc(&d_force, np * sizeof(float4)));
+    CUDA_CHECK(cudaMemset(d_force, 0, np * sizeof(float4)));
+    float* d_vir;
+    CUDA_CHECK(cudaMalloc(&d_vir, 6 * sizeof(float)));
+    CUDA_CHECK(cudaMemset(d_vir, 0, 6 * sizeof(float)));
+    launch_ewald_sf_kernel(d_pos, d_q, d_kv, d_sfac, N, (int)kv.size(), L);
+    launch_ewald_recip_kernel(d_pos, d_q, d_kv, d_sfac, d_force, d_vir, N, (int)kv.size(), C, alpha, L);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    float vir[6];
+    CUDA_CHECK(cudaMemcpy(vir, d_vir, sizeof(vir), cudaMemcpyDeviceToHost));
+
+    const int comp[6][2] = {{0, 0}, {0, 1}, {0, 2}, {1, 1}, {1, 2}, {2, 2}};  // xx xy xz yy yz zz
+    double scale = 0;
+    double ref[6];
+    for (int c = 0; c < 6; c++) {
+        const double h = 1e-6;
+        double Fp[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}, Fm[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+        Fp[comp[c][0]][comp[c][1]] += h;
+        Fm[comp[c][0]][comp[c][1]] -= h;
+        ref[c] = -(recip_energy(pos, q, kv, L, alpha, C, Fp) -
+                   recip_energy(pos, q, kv, L, alpha, C, Fm)) / (2 * h);
+        scale = std::max(scale, std::fabs(ref[c]));
+    }
+    for (int c = 0; c < 6; c++)
+        EXPECT_NEAR(vir[c], ref[c], 2e-4 * scale) << "virial component " << c;
+    // the configuration is generic: shear components must be non-trivial
+    EXPECT_GT(std::fabs(ref[1]) + std::fabs(ref[2]) + std::fabs(ref[4]), 1e-3 * scale);
+
+    free_device(d_pos); free_device(d_q); free_device(d_kv);
+    free_device(d_sfac); free_device(d_force); free_device(d_vir);
 }

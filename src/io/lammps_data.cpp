@@ -354,11 +354,15 @@ void build_exclusions(const TopologyData& in_topo, TopologyData& out_topo) {
     out_topo.exclusion_offsets[natoms] = static_cast<int>(out_topo.exclusion_list.size());
 }
 
-// OPLS mode (special_bonds 0 0 0.5):
+// OPLS mode (special_bonds lj/coul 0 0 f14):
 //  - exclusion CSR gets 1-2, 1-3 and 1-4 (the pair14 kernel re-adds scaled 1-4)
 //  - excl13 CSR gets 1-2 and 1-3 only (Ewald real-space erf subtraction)
-//  - pairs14: unique (i < j) dihedral end-pairs
-void build_exclusions_opls(const TopologyData& in_topo, TopologyData& out_topo) {
+//  - pairs14: unique (i < j) pairs at bond-graph distance exactly 3, as in
+//    LAMMPS' default special_bonds; with from_dihedrals only the end atoms of
+//    listed dihedrals qualify ('special_bonds dihedral yes'). A pair that is
+//    also 1-2 or 1-3 (small rings) keeps the closer classification.
+void build_exclusions_opls(const TopologyData& in_topo, TopologyData& out_topo,
+                           bool from_dihedrals) {
     int natoms = static_cast<int>(in_topo.positions.size());
     std::vector<std::vector<int>> bond_adj(natoms);
     for (const auto& b : in_topo.bonds) {
@@ -381,15 +385,23 @@ void build_exclusions_opls(const TopologyData& in_topo, TopologyData& out_topo) 
         ex13[i].erase(std::unique(ex13[i].begin(), ex13[i].end()), ex13[i].end());
     }
 
-    // 1-4 pairs from dihedral end atoms (unique, i < j)
     std::set<std::pair<int,int>> p14set;
-    for (const auto& d : in_topo.dihedrals) {
-        int i = d.x, l = d.w;
-        if (i == l) continue;
+    auto add14 = [&](int i, int l) {
+        if (i == l) return;
         if (i > l) std::swap(i, l);
-        // skip if the "1-4" pair is actually 1-2 or 1-3 (cyclic topology)
-        if (std::binary_search(ex13[i].begin(), ex13[i].end(), l)) continue;
+        if (std::binary_search(ex13[i].begin(), ex13[i].end(), l)) return;
         p14set.insert({i, l});
+    };
+    if (from_dihedrals) {
+        for (const auto& d : in_topo.dihedrals) add14(d.x, d.w);
+    } else {
+        for (int i = 0; i < natoms; i++)
+            for (int j : bond_adj[i])
+                for (int k : bond_adj[j]) {
+                    if (k == i) continue;
+                    for (int l : bond_adj[k])
+                        if (l != j && l > i) add14(i, l);
+                }
     }
     out_topo.pairs14.clear();
     for (auto& pr : p14set)

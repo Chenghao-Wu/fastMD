@@ -77,6 +77,7 @@ __global__ void max_vel_force_kernel(const float4* __restrict__ vel,
 
 void ThermoBuffers::open_file(const char* path) {
     fp = fopen(path, "w");
+    // per-atom KE and PE; pressure tensor components in conventional order
     fprintf(fp, "# step  KE  PE  T  Pxx  Pyy  Pzz  Pxy  Pxz  Pyz\n");
     fflush(fp);
 }
@@ -190,13 +191,14 @@ void compute_thermo(const float4* vel, const float4* pos, const float4* force,
     }
 
     if (fp) {
-        fprintf(fp, "%d  %.4f  %.4f  %.4f  %.4f  %.4f  %.4f  %.4f  %.4f  %.4f\n",
+        // stress[] is stored xx xy xz yy yz zz; write in the header's order
+        const float* P = h_output->stress;
+        fprintf(fp, "%d  %.6g  %.6g  %.6g  %.6g  %.6g  %.6g  %.6g  %.6g  %.6g\n",
                 step,
                 h_output->kinetic_energy,
                 h_output->potential_energy,
                 h_output->temperature,
-                h_output->stress[0], h_output->stress[1], h_output->stress[2],
-                h_output->stress[3], h_output->stress[4], h_output->stress[5]);
+                P[VXX], P[VYY], P[VZZ], P[VXY], P[VXZ], P[VYZ]);
         fflush(fp);
     }
 }
