@@ -339,6 +339,33 @@ SimParams parse_config(std::istream& in, const std::string& filename, TopologyDa
                 w.e_shift = (float)(w.eps * (2.0 / 15.0 * sr3 * sr3 * sr3 - sr3));
             }
             params.walls.w[params.walls.n++] = w;
+        } else if (key == "dyn_corr") {
+            // dyn_corr <file> <origin_every> <norigins> [bins <n> <width>] [q <q>] [modes p...]
+            copy_path(params.dyn_file, a.str("file"), a);
+            long e = a.integer("origin_every"), k = a.integer("norigins");
+            if (e < 1 || k < 1) a.fail("<origin_every> and <norigins> must be >= 1");
+            params.dyn_every = (int)e;
+            params.dyn_norigins = (int)k;
+            while (a.more()) {
+                const std::string opt = a.str("option");
+                if (opt == "bins") {
+                    long n = a.integer("n");
+                    if (n < 1 || n > 64) a.fail("bins <n> must be in [1, 64]");
+                    params.dyn_nbins = (int)n;
+                    params.dyn_width = (float)a.positive("width");
+                } else if (opt == "q") {
+                    params.dyn_q = (float)a.positive("q");
+                } else if (opt == "modes") {
+                    params.dyn_nmodes = 0;
+                    while (a.more() && params.dyn_nmodes < 8) {
+                        long p = a.integer("p");
+                        if (p < 1) a.fail("Rouse mode numbers must be >= 1");
+                        params.dyn_modes[params.dyn_nmodes++] = (int)p;
+                    }
+                } else {
+                    a.fail("unknown dyn_corr option '" + opt + "' (bins, q, modes)");
+                }
+            }
         } else if (key == "minimize") {
             // minimize <ftol> <max_iter> [dt_max]: FIRE before the run
             params.min_ftol = (float)a.positive("ftol");
@@ -727,6 +754,9 @@ void validate_system(const SimParams& params, const TopologyData& topo) {
                 throw std::runtime_error("wall position " + std::to_string(z) + " outside [0, " +
                                          std::to_string(Lax[w.axis]) + "] (measured from the lower box edge)");
     }
+    if (params.dyn_every > 0 && params.dyn_nbins > 1 && params.film_axis < 0)
+        throw std::runtime_error("dyn_corr bins need `film <axis>` (bins are measured from the film "
+                                 "reference plane)");
     if (params.layer_n > 0) {
         if (params.film_axis < 0)
             throw std::runtime_error("layer_stress needs `film <axis>` (layers are measured from the "

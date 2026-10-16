@@ -6,6 +6,7 @@
 #include "../force/wall.cuh"
 #include "../analysis/film.cuh"
 #include "../analysis/layer_stress.cuh"
+#include "../analysis/dyn_corr.cuh"
 #include "../integrate/fire.cuh"
 #include "../force/lj_coul_long.cuh"
 #include "../force/ewald_recip.cuh"
@@ -252,6 +253,22 @@ void Simulation::setup_analysis() {
     }
     thermo_bufs_.allocate();
     if (params_.thermo_on) thermo_bufs_.open_file(params_.thermo_file);
+    if (params_.dyn_every > 0) {
+        DynCorrSpec ds;
+        ds.origin_every = params_.dyn_every;
+        ds.norigins = params_.dyn_norigins;
+        ds.nbins = params_.dyn_nbins;
+        ds.bin_width = params_.dyn_width;
+        ds.film = params_.film_axis >= 0;
+        ds.axis = params_.film_axis >= 0 ? params_.film_axis : 2;
+        ds.q = params_.dyn_q;
+        if (params_.dyn_nmodes < 0) {
+            if (!topo_.mol_ids.empty()) ds.modes = {1, 2, 4};
+        } else {
+            ds.modes.assign(params_.dyn_modes, params_.dyn_modes + params_.dyn_nmodes);
+        }
+        dyn_.allocate(ds, params_.natoms, topo_.mol_ids);
+    }
     if (params_.layer_n > 0) {
         layer_spec_.n = params_.layer_n;
         layer_spec_.width = params_.layer_width;
@@ -419,6 +436,7 @@ void Simulation::save_checkpoint() {
                                    cudaMemcpyDeviceToDevice, stream_));
     if (params_.stress_on) correlator_.save_snapshot(stream_);
     if (params_.layer_n > 0) layer_corr_.save_snapshot(stream_);
+    if (dyn_.allocated()) dyn_.save_snapshot(stream_);
     ckpt_step_ = step_;
     ckpt_vel_pending_ = velocities_pending_;
 }
@@ -433,6 +451,7 @@ void Simulation::restore_checkpoint() {
                                    cudaMemcpyDeviceToDevice, stream_));
     if (params_.stress_on) correlator_.restore_snapshot(stream_);
     if (params_.layer_n > 0) layer_corr_.restore_snapshot(stream_);
+    if (dyn_.allocated()) dyn_.restore_snapshot(stream_);
     t_.remap(p_.rank, stream_);
     step_ = ckpt_step_;
     velocities_pending_ = ckpt_vel_pending_;
@@ -880,8 +899,14 @@ void Simulation::advance(int nsteps, bool progress) {
     const int target = step_ + nsteps;
     write_traj_frame_if_due();   // time origin of the run (e.g. step 0)
     save_checkpoint();
+    if (dyn_.allocated())   // a time origin may fall on the first step of the run
+        dyn_.on_step(step_, p_.pos, p_.image, p_.tag, p_.rank, &d_status_->box,
+                     &d_status_->film_center, stream_);
     while (step_ < target) {
         advance_one(output_due(step_ + 1) || step_ + 1 == target);
+        if (dyn_.allocated())
+            dyn_.on_step(step_, p_.pos, p_.image, p_.tag, p_.rank, &d_status_->box,
+                         &d_status_->film_center, stream_);
         bool at_output = output_due(step_) || step_ == target;
         if (at_output || step_ - ckpt_step_ >= check_every_) {
             if (!validate()) {
@@ -1160,6 +1185,7 @@ void Simulation::set_friction_profile(const FrictionProfile& spec, const std::ve
     free_dev(d_layer_out_);
     free_dev(d_layer_shear_);
     if (layer_corr_.allocated()) layer_corr_.free();
+    if (dyn_.allocated()) dyn_.free();
     FrictionProfile p = spec;
     p.axis = params_.film_axis < 0 ? 2 : params_.film_axis;
     p.d_table = nullptr;
@@ -1199,7 +1225,17 @@ ThermoOutput Simulation::thermo() {
     return out;
 }
 
+DynCorr::Results Simulation::dyn_corr_results() const {
+    if (!dyn_.allocated()) throw std::logic_error("dyn_corr_results: no `dyn_corr` in the config");
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+    return dyn_.results();
+}
+
 void Simulation::finish() {
+    if (dyn_.allocated()) {
+        dyn_.write(params_.dyn_file, params_.dt);
+        printf("Dynamic correlations written to %s\n", params_.dyn_file);
+    }
     if (params_.layer_n > 0) {
         std::vector<std::string> cols;
         for (int a = 0; a < layer_spec_.n; a++)

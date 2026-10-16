@@ -666,3 +666,29 @@ TEST(Minimize, BeadSpringMeltConvergesAndKeepsVelocities) {
     sim->run(100);   // dynamics continue normally
     EXPECT_TRUE(std::isfinite(sim->thermo().temperature));
 }
+
+// dyn_corr through the command-line run: the results file lists every bin
+// with lag rows; lag 0 has MSD 0, F_s 1 and P(t) 1.
+TEST(Simulation, DynCorrFileFromRun) {
+    std::string data = write_melt("sim_dyn.data", 12, 20, 0.85f, 91);
+    auto sim = make_sim(data, "film z\ndyn_corr sim_dyn.txt 25 4 bins 3 4.0 modes 1\n", 300,
+                        "nvt_langevin 1.0 1.0 1.0 3", make_int3(1, 1, 1), slab_lift());
+    sim->run();
+    sim.reset();
+    std::ifstream in("sim_dyn.txt");
+    int bins = 0, rows = 0;
+    bool lag0_ok = true;
+    for (std::string line; std::getline(in, line);) {
+        if (line.rfind("# bin", 0) == 0) { bins++; continue; }
+        if (line.empty() || line[0] == '#') continue;
+        std::istringstream ls(line);
+        std::vector<double> v;
+        for (double x; ls >> x;) v.push_back(x);
+        ASSERT_GE(v.size(), 17u);
+        if (v[0] == 0) lag0_ok &= v[2] == 0 && v[3] == 0 && std::fabs(v[4] - 1) < 1e-6 && std::fabs(v[14] - 1) < 1e-5;
+        rows++;
+    }
+    EXPECT_EQ(bins, 3);
+    EXPECT_GT(rows, 30);
+    EXPECT_TRUE(lag0_ok);
+}

@@ -305,6 +305,65 @@ class SimulationAPITest(unittest.TestCase):
         self.assertLess(r["potential_energy"], e0)
         np.testing.assert_array_equal(sim.velocities, v0)   # restored
 
+    def test_dyn_corr_matches_trajectory_analysis(self):
+        """On-the-fly GPU correlations equal fastmd.analysis on a trajectory of the same run."""
+        from fastmd.trajectory import Trajectory
+        tp = os.path.join(self.tmp, "dyn.fmd")
+        dp = os.path.join(self.tmp, "dyn.txt")
+        sim = fastmd.Simulation.from_text(
+            self.config() + f"traj {tp} linear 1\ndyn_corr {dp} 20 5 q 6.5 modes 1 3\n")
+        sim.run(100)
+        d = sim.dyn_corr()
+        del sim
+        traj = Trajectory(tp)
+        lags = d["lags"]
+        steps = traj.steps
+        origins = [k for k in range(len(steps)) if steps[k] % 20 == 0]
+        X = np.array([traj.unwrapped(k) for k in range(len(steps))])          # (F, N, 3)
+        idx = A.chain_index(traj.mol_ids)
+        C = X[:, idx]                                                          # (F, nc, Nc, 3)
+        N = idx.shape[1]
+        n = np.arange(1, N + 1)
+        basis = {p: np.cos(p * np.pi * (n - 0.5) / N) / N for p in (1, 3)}
+        checked = 0
+        for j, lag in enumerate(lags):
+            pairs = [(o, o + lag) for o in origins if o + lag < len(steps)]
+            if not pairs:
+                continue
+            dr = np.concatenate([X[b] - X[a] for a, b in pairs])
+            np.testing.assert_allclose(d["msd_par"][0, j], (dr[:, :2] ** 2).sum(1).mean(), rtol=2e-4, atol=1e-7)
+            np.testing.assert_allclose(d["msd_perp"][0, j], (dr[:, 2] ** 2).mean(), rtol=2e-4, atol=1e-7)
+            np.testing.assert_allclose(d["fs_par"][0, j], np.cos(6.5 * dr[:, :2]).mean(), atol=2e-5)
+            np.testing.assert_allclose(d["fs_perp"][0, j], np.cos(6.5 * dr[:, 2]).mean(), atol=2e-5)
+            self.assertEqual(d["n_bead"][0, j], len(dr))
+            com = np.concatenate([C[b].mean(1) - C[a].mean(1) for a, b in pairs])
+            np.testing.assert_allclose(d["com_par"][0, j] + d["com_perp"][0, j], (com ** 2).sum(1).mean(),
+                                       rtol=2e-4, atol=1e-7)
+            R = lambda f: C[f][:, -1] - C[f][:, 0]
+            num = sum((R(b) * R(a)).sum() for a, b in pairs)
+            den = sum((R(a) ** 2).sum() for a, b in pairs)
+            np.testing.assert_allclose(d["P_t"][0, j], num / den, rtol=1e-4)
+            for p in (1, 3):
+                Xp = lambda f: np.einsum("n,cnd->cd", basis[p], C[f])
+                num = sum((Xp(b) * Xp(a)).sum() for a, b in pairs)
+                den = sum((Xp(a) ** 2).sum() for a, b in pairs)
+                np.testing.assert_allclose(d[f"rouse_{p}"][0, j], num / den, rtol=1e-3, atol=1e-5)
+            checked += 1
+        self.assertGreater(checked, 15)
+
+    def test_dyn_corr_film_bins_residence(self):
+        dp = os.path.join(self.tmp, "dynfilm.txt")
+        sim = fastmd.Simulation.from_text(self.config() + f"film z\ndyn_corr {dp} 50 4 bins 4 3.0\n")
+        sim.run(400)
+        d = sim.dyn_corr()
+        nb, nr = d["n_bead"], d["n_resident"]
+        self.assertEqual(nb.shape[0], 4)
+        np.testing.assert_array_equal(nb[:, 0], nr[:, 0])          # lag 0: everyone resident
+        self.assertTrue((nr <= nb + 1e-9).all())
+        frac = nr.sum(0) / nb.sum(0)
+        self.assertTrue(np.all(np.diff(frac[np.isfinite(frac)]) <= 1e-12))   # survival decreases
+        self.assertLess(frac[-1], 1.0)
+
     def test_errors(self):
         sim = self.make()
         with self.assertRaises(ValueError):

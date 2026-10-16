@@ -174,6 +174,21 @@ y + iy Ly, z + iz Lz.
              }, py::arg("ftol") = 1e-4, py::arg("max_iter") = 10000, py::arg("dt_max") = 0.02,
              "FIRE energy minimisation at fixed box (velocities restored afterwards). Returns "
              "{iterations, fmax, potential_energy, converged}.")
+        .def("dyn_corr", [](const Engine& e) {
+                 Engine::DynCorrData d = e.dyn_corr();
+                 py::dict out;
+                 out["lags"] = as_array(std::vector<long long>(d.lags), 1);
+                 const py::ssize_t nl = (py::ssize_t)d.lags.size();
+                 for (size_t k = 0; k < d.names.size(); k++) {
+                     py::array_t<double> a = as_array(std::move(d.values[k]), 1);
+                     out[d.names[k].c_str()] = a.attr("reshape")(d.nbins, nl);
+                 }
+                 return out;
+             },
+             "On-the-fly multiple-origin correlations (dyn_corr) accumulated so far: 'lags' "
+             "(steps) and per quantity an (nbins, nlags) array: msd_par/perp, fs_par/perp, "
+             "residence-conditioned rmsd_*/rfs_*, chain com_par/perp, P_t, rouse_<p>, and the "
+             "sample counts n_bead, n_resident, n_chain.")
         .def_property_readonly("nwalls", &Engine::nwalls, "Number of active walls.")
         .def_property_readonly("film_center", &Engine::film_center,
                                "Film reference plane: mass-weighted mean unwrapped coordinate "

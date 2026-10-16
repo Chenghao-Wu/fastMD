@@ -16,6 +16,7 @@
 #include "../analysis/correlator.cuh"
 #include "../analysis/rg.cuh"
 #include "../analysis/layer_stress.cuh"
+#include "../analysis/dyn_corr.cuh"
 #include "../io/dump.cuh"
 #include "../io/config.hpp"
 #include "../io/trajectory.hpp"
@@ -90,6 +91,8 @@ public:
         bool converged;
     };
     MinimizeResult minimize(float ftol, int max_iter, float dt_max = 0.02f);
+    // On-the-fly multiple-origin correlations accumulated so far (dyn_corr).
+    DynCorr::Results dyn_corr_results() const;
     const LayerSpec& layer_spec() const { return layer_spec_; }
     // Replace the walls (e.g. remove them after confined preparation).
     void set_walls(const WallSet& walls);
@@ -232,6 +235,7 @@ private:
     double* d_layer_out_ = nullptr;     // [n][6] last layer stresses
     double* d_layer_shear_ = nullptr;   // [n] in-plane shear (correlator input)
     MultipleTauCorrelator layer_corr_;
+    DynCorr dyn_;
     void sample_layers();
     void launch_film_center();
     void check_tilt_allowed(float xy) const;

@@ -3,6 +3,7 @@
 #include "../sim/simulation.cuh"
 #include <sstream>
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 
 namespace fastmd {
@@ -143,6 +144,50 @@ Engine::MinimizeResult Engine::minimize(double ftol, int max_iter, double dt_max
     Simulation::MinimizeResult r = sim_->minimize((float)ftol, max_iter, (float)dt_max);
     return {r.iterations, r.fmax, r.potential_energy, r.converged};
 }
+Engine::DynCorrData Engine::dyn_corr() const {
+    DynCorr::Results r = sim_->dyn_corr_results();
+    DynCorrData d;
+    d.lags = r.lags;
+    d.nbins = r.nbins;
+    const int nl = (int)r.lags.size();
+    auto at = [&](int l, int b, int q) { return r.sums[((size_t)l * r.nbins + b) * r.nq + q]; };
+    auto mean = [&](const char* name, int q, int nq_count) {
+        std::vector<double> v((size_t)r.nbins * nl);
+        for (int b = 0; b < r.nbins; b++)
+            for (int l = 0; l < nl; l++) {
+                double n = at(l, b, nq_count);
+                v[(size_t)b * nl + l] = n > 0 ? at(l, b, q) / n : NAN;
+            }
+        d.names.push_back(name);
+        d.values.push_back(std::move(v));
+    };
+    mean("msd_par", DynCorr::MSD_PAR, DynCorr::N_BEAD);
+    mean("msd_perp", DynCorr::MSD_PERP, DynCorr::N_BEAD);
+    mean("fs_par", DynCorr::FS_PAR, DynCorr::N_BEAD);
+    mean("fs_perp", DynCorr::FS_PERP, DynCorr::N_BEAD);
+    mean("rmsd_par", DynCorr::RMSD_PAR, DynCorr::N_RES);
+    mean("rmsd_perp", DynCorr::RMSD_PERP, DynCorr::N_RES);
+    mean("rfs_par", DynCorr::RFS_PAR, DynCorr::N_RES);
+    mean("rfs_perp", DynCorr::RFS_PERP, DynCorr::N_RES);
+    mean("com_par", DynCorr::COM_PAR, DynCorr::N_CHAIN);
+    mean("com_perp", DynCorr::COM_PERP, DynCorr::N_CHAIN);
+    mean("P_t", DynCorr::REE_DOT, DynCorr::REE0_SQ);
+    for (size_t m = 0; m < r.modes.size(); m++)
+        mean(("rouse_" + std::to_string(r.modes[m])).c_str(), DynCorr::kFixedQ + 2 * (int)m,
+             DynCorr::kFixedQ + 2 * (int)m + 1);
+    const std::pair<const char*, int> counts[3] = {{"n_bead", DynCorr::N_BEAD},
+                                                   {"n_resident", DynCorr::N_RES},
+                                                   {"n_chain", DynCorr::N_CHAIN}};
+    for (const auto& [name, q] : counts) {
+        std::vector<double> v((size_t)r.nbins * nl);
+        for (int b = 0; b < r.nbins; b++)
+            for (int l = 0; l < nl; l++) v[(size_t)b * nl + l] = at(l, b, q);
+        d.names.push_back(name);
+        d.values.push_back(std::move(v));
+    }
+    return d;
+}
+
 int Engine::nwalls() const { return sim_->walls().n; }
 double Engine::film_center() { return sim_->film_center(); }
 void Engine::remove_walls() { sim_->set_walls(WallSet{}); }

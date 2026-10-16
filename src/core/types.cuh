@@ -119,6 +119,12 @@ struct SimParams {
     float min_ftol = 0.0f;      // minimize before the run (0 = off)
     int   min_max_iter = 0;
     float min_dt_max = 0.02f;
+    // dyn_corr: on-the-fly multiple-origin correlations (analysis/dyn_corr.cuh)
+    char  dyn_file[256] = {0};
+    int   dyn_every = 0, dyn_norigins = 0, dyn_nbins = 1;
+    float dyn_width = 0.0f, dyn_q = 7.07f;
+    int   dyn_nmodes = -1;          // -1: default modes (1 2 4) when there are molecules
+    int   dyn_modes[8] = {0};
 
     // Nosé-Hoover
     Ensemble ensemble = Ensemble::Langevin;

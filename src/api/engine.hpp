@@ -73,6 +73,15 @@ public:
     double layer_width() const;
     struct MinimizeResult { int iterations; double fmax, potential_energy; bool converged; };
     MinimizeResult minimize(double ftol, int max_iter, double dt_max);
+    // dyn_corr results: lags (steps) and per quantity [nbins][nlags] means
+    // (P_t / rouse_p: normalised ratios), plus counts.
+    struct DynCorrData {
+        std::vector<long long> lags;
+        int nbins = 0;
+        std::vector<std::string> names;
+        std::vector<std::vector<double>> values;   // one [nbins * nlags] array per name
+    };
+    DynCorrData dyn_corr() const;
     int  nwalls() const;
     double film_center();   // film reference plane (needs `film <axis>`)
     void remove_walls();
