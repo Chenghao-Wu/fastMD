@@ -74,6 +74,38 @@ void DeviceTopology::upload(int natoms,
         excl_offsets = upload_vec(excl_offsets_h);
         excl_list = upload_vec(excl_list_h);
     }
+    // per-atom bonded-term CSR: bonds, then angles, then dihedrals per row
+    if (nbonds + nangles + ndihedrals > 0) {
+        std::vector<std::vector<int2>> rows(natoms);
+        for (int b = 0; b < nbonds; b++) {
+            rows[bonds_h[b].x].push_back(make_int2(b, 0 * 4 + 0));
+            rows[bonds_h[b].y].push_back(make_int2(b, 0 * 4 + 1));
+        }
+        for (int a = 0; a < nangles; a++) {
+            const int4& v = angles_h[a];
+            rows[v.x].push_back(make_int2(a, 1 * 4 + 0));
+            rows[v.y].push_back(make_int2(a, 1 * 4 + 1));
+            rows[v.z].push_back(make_int2(a, 1 * 4 + 2));
+        }
+        for (int d = 0; d < ndihedrals; d++) {
+            const int4& v = dihedrals_h[d];
+            rows[v.x].push_back(make_int2(d, 2 * 4 + 0));
+            rows[v.y].push_back(make_int2(d, 2 * 4 + 1));
+            rows[v.z].push_back(make_int2(d, 2 * 4 + 2));
+            rows[v.w].push_back(make_int2(d, 2 * 4 + 3));
+        }
+        std::vector<int> off(natoms + 1, 0);
+        std::vector<int2> flat;
+        for (int t = 0; t < natoms; t++) {
+            off[t] = (int)flat.size();
+            flat.insert(flat.end(), rows[t].begin(), rows[t].end());
+        }
+        off[natoms] = (int)flat.size();
+        nterms = (int)flat.size();
+        term_offsets = upload_vec(off);
+        terms = upload_vec(flat);
+    }
+
     nexcl13 = (int)excl13_list_h.size();
     if (nexcl13 > 0) {
         if ((int)excl13_offsets_h.size() != natoms + 1)
@@ -101,7 +133,8 @@ void DeviceTopology::free() {
                     (void*)dihedrals_tag, (void*)dihedrals, (void*)dihedral_type,
                     (void*)pairs14_tag, (void*)pairs14,
                     (void*)excl_offsets, (void*)excl_list,
-                    (void*)excl13_offsets, (void*)excl13_list})
+                    (void*)excl13_offsets, (void*)excl13_list,
+                    (void*)term_offsets, (void*)terms})
         if (p) CUDA_CHECK(cudaFree(p));
     *this = DeviceTopology{};
 }

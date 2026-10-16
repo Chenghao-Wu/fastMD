@@ -84,6 +84,7 @@ add_library(core STATIC
     src/force/angle.cu
     src/force/bond_table.cu
     src/force/angle_table.cu
+    src/force/bonded_gather.cu
     src/integrate/langevin.cu
     src/integrate/nose_hoover.cu
     src/analysis/thermo.cu

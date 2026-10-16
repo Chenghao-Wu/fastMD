@@ -85,6 +85,7 @@ Simulation::Simulation(const SimParams& params, TopologyData topo)
 
     build_neighbor_list();
     tune_pair_tpa();
+    tune_bonded_tpa();
     launch_forces();
     CUDA_CHECK(cudaStreamSynchronize(stream_));
 
@@ -124,6 +125,23 @@ void Simulation::upload_force_field() {
         d_angle_table_params_ = upload_vec(topo_.angle_table_params);
         d_angle_table_data_ = upload_vec(topo_.angle_table_data);
     }
+
+    BondedParams& bp = bonded_params_;
+    bp.bond_type = t_.bond_type;
+    bp.fene = d_fene_params_;
+    bp.harmonic = d_hbond_params_;
+    bp.bond_table_idx = d_bond_table_idx_;
+    bp.bond_table_params = d_bond_table_params_;
+    bp.bond_table_data = d_bond_table_data_;
+    bp.bond_style = d_bond_table_data_ ? 3 : d_hbond_params_ ? 2 : d_fene_params_ ? 1 : 0;
+    bp.angle = d_angle_params_;
+    bp.angle_table_idx = d_angle_table_idx_;
+    bp.angle_table_params = d_angle_table_params_;
+    bp.angle_table_data = d_angle_table_data_;
+    bp.angle_style = d_angle_table_data_ ? 2 : d_angle_params_ ? 1 : 0;
+    bp.dihedral_type = t_.dihedral_type;
+    bp.opls = d_dihedral_params_;
+    bp.dihedral_style = d_dihedral_params_ ? 1 : 0;
 
     if (params_.ewald_on) {
         if (topo_.charges.empty())
@@ -195,8 +213,8 @@ void Simulation::print_setup() const {
     if (params_.rg_on) printf("  rg_on");
     if (params_.stress_on) printf("  stress_on");
     if (params_.restart_freq >= 0) printf("  restart_on");
-    printf("\n[setup]  neighbor list: capacity=%d  max_count=%d  cells=%d^3  pair threads/atom=%d\n\n",
-           verlet_.max_neighbors, verlet_.max_count, verlet_.nx, pair_tpa_);
+    printf("\n[setup]  neighbor list: capacity=%d  max_count=%d  cells=%d^3  threads/atom: pair=%d bonded=%d\n\n",
+           verlet_.max_neighbors, verlet_.max_count, verlet_.nx, pair_tpa_, bonded_tpa_);
 }
 
 // ---------------------------------------------------------------------------
@@ -293,6 +311,11 @@ void Simulation::launch_forces() {
 
     // Bonded terms accumulate into the same force buffer, so they follow the
     // overwriting nonbonded kernel on the same stream.
+    if (params_.bonded_gather) {
+        launch_bonded_kernel(bonded_tpa_);
+        CUDA_CHECK(cudaGetLastError());
+        return;
+    }
     if (t_.nbonds > 0 && d_bond_table_data_) {
         launch_bond_table_kernel(p_.pos, p_.force, d_virial_, t_.bonds, t_.bond_type,
                                  d_bond_table_idx_, d_bond_table_params_, d_bond_table_data_,
@@ -356,6 +379,36 @@ void Simulation::tune_pair_tpa() {
             best_ms = ms;
             pair_tpa_ = tpa;
         }
+    }
+    CUDA_CHECK(cudaEventDestroy(e0));
+    CUDA_CHECK(cudaEventDestroy(e1));
+}
+
+void Simulation::launch_bonded_kernel(int tpa) {
+    launch_bonded_gather_kernel(p_.pos, p_.force, d_virial_, p_.tag, t_.term_offsets,
+                                t_.terms, t_.bonds, t_.angles, t_.dihedrals, bonded_params_,
+                                params_.natoms, box_L_, inv_L_, stream_, tpa);
+}
+
+// Same timing-based choice as tune_pair_tpa for the bonded gather kernel
+// (repeated launches accumulate into force[]; the first real force
+// evaluation overwrites it).
+void Simulation::tune_bonded_tpa() {
+    if (!params_.bonded_gather || !t_.term_offsets) return;
+    if (params_.pair_tpa > 0) { bonded_tpa_ = params_.pair_tpa; return; }
+    cudaEvent_t e0, e1;
+    CUDA_CHECK(cudaEventCreate(&e0));
+    CUDA_CHECK(cudaEventCreate(&e1));
+    float best_ms = 1e30f;
+    for (int tpa : {1, 2, 4, 8}) {
+        launch_bonded_kernel(tpa);
+        CUDA_CHECK(cudaEventRecord(e0, stream_));
+        for (int r = 0; r < 10; r++) launch_bonded_kernel(tpa);
+        CUDA_CHECK(cudaEventRecord(e1, stream_));
+        CUDA_CHECK(cudaEventSynchronize(e1));
+        float ms = 0;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, e0, e1));
+        if (ms < 0.97f * best_ms) { best_ms = ms; bonded_tpa_ = tpa; }
     }
     CUDA_CHECK(cudaEventDestroy(e0));
     CUDA_CHECK(cudaEventDestroy(e1));

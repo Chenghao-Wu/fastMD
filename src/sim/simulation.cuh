@@ -7,6 +7,7 @@
 #include "../force/angle.cuh"
 #include "../force/bond_harmonic.cuh"
 #include "../force/dihedral_opls.cuh"
+#include "../force/bonded_gather.cuh"
 #include "../integrate/langevin.cuh"
 #include "../integrate/nose_hoover.cuh"
 #include "../analysis/thermo.cuh"
@@ -55,6 +56,8 @@ private:
     void launch_forces();
     void launch_pair_kernel(int tpa);     // the overwriting nonbonded kernel
     void tune_pair_tpa();
+    void launch_bonded_kernel(int tpa);
+    void tune_bonded_tpa();
     void integrate_pre_force();
     void integrate_post_force();
     void write_outputs();
@@ -91,12 +94,14 @@ private:
     int3*  d_ewald_kvecs_ = nullptr;
     float* d_ewald_sfac_ = nullptr;
     double* d_virial_ = nullptr;         // [6] xx xy xz yy yz zz
+    BondedParams bonded_params_;
 
     VerletList   verlet_;
     int  steps_since_rebuild_ = 0;
     int  n_rebuilds_ = 0;
     int  n_sorts_ = 0;
     int  pair_tpa_ = 1;
+    int  bonded_tpa_ = 1;
 
     // Small device state read back once per step (one 16-byte copy):
     // maximum squared displacement since the last build (float bits, written

@@ -121,4 +121,8 @@ struct SimParams {
     // Threads per particle in the neighbor-list pair kernels (1, 2, 4, 8);
     // 0 = pick the fastest by timing at start-up.
     int   pair_tpa = 0;
+
+    // Bonded terms: 1 = per-particle gather kernel (no atomics),
+    // 0 = per-term kernels with atomic scatter.
+    int   bonded_gather = 1;
 };

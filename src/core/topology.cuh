@@ -22,6 +22,11 @@ struct DeviceTopology {
     // 1-2/1-3 pairs for the Ewald real-space correction (tag space)
     int* excl13_offsets = nullptr; int* excl13_list = nullptr; int nexcl13 = 0;
 
+    // Per-atom bonded-term membership (tag space): row t lists
+    // {term index, kind * 4 + role} for every bond/angle/dihedral that
+    // contains the particle with tag t (see force/bonded_gather.cuh).
+    int*  term_offsets = nullptr;  int2* terms = nullptr;  int nterms = 0;
+
     void upload(int natoms,
                 const std::vector<int2>& bonds_h, const std::vector<int>& bond_types_h,
                 const std::vector<int4>& angles_h,

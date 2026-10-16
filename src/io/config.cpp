@@ -268,6 +268,10 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
             e.keyword = a.str("keyword");
             if (a.more()) e.conv = parse_table_convention(a.str("convention"), angle);
             (angle ? angle_table_entries : bond_table_entries).push_back(e);
+        } else if (key == "bonded_mode") {
+            std::string v = a.str("gather|scatter");
+            if (v != "gather" && v != "scatter") a.fail("expected 'gather' or 'scatter'");
+            params.bonded_gather = (v == "gather");
         } else if (key == "pair_tpa") {
             long n = a.integer("N");
             if (n != 0 && n != 1 && n != 2 && n != 4 && n != 8)
