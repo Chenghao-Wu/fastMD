@@ -34,7 +34,7 @@ struct ThermoBuffers {
 struct StressSampler {
     double* d_acc = nullptr;          // [6] kinetic tensor accumulator
     unsigned int* d_done = nullptr;   // last-block ticket
-    float* d_stress = nullptr;        // [6] result
+    double* d_stress = nullptr;       // [6] result
     void allocate();
     void free();
     void sample(const float4* vel, const float4* pos, const double* virial, int natoms,

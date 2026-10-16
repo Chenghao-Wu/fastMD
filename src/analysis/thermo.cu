@@ -144,7 +144,7 @@ __global__ void stress_sample_kernel(const float4* __restrict__ vel,
                                      const float* __restrict__ d_L,
                                      const float* __restrict__ d_vscale,
                                      double* __restrict__ acc, unsigned int* __restrict__ done,
-                                     float* __restrict__ out) {
+                                     double* __restrict__ out) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     double k[6] = {0, 0, 0, 0, 0, 0};
     if (i < natoms) {
@@ -165,7 +165,7 @@ __global__ void stress_sample_kernel(const float4* __restrict__ vel,
         double s = d_vscale ? (double)*d_vscale : 1.0;
         for (int c = 0; c < 6; c++) {
             double kin = atomicAdd(&acc[c], 0.0);
-            out[c] = (float)((kin * s * s + virial[c]) / (L * L * L));
+            out[c] = (kin * s * s + virial[c]) / (L * L * L);
             acc[c] = 0.0;
         }
         *done = 0u;
@@ -175,7 +175,7 @@ __global__ void stress_sample_kernel(const float4* __restrict__ vel,
 void StressSampler::allocate() {
     CUDA_CHECK(cudaMalloc(&d_acc, 6 * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_done, sizeof(unsigned int)));
-    CUDA_CHECK(cudaMalloc(&d_stress, 6 * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_stress, 6 * sizeof(double)));
     CUDA_CHECK(cudaMemset(d_acc, 0, 6 * sizeof(double)));
     CUDA_CHECK(cudaMemset(d_done, 0, sizeof(unsigned int)));
 }

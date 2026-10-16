@@ -40,7 +40,8 @@ __host__ __device__ inline int unpack_type_id(float w) {
 #endif
 }
 
-enum class Ensemble { Langevin = 0, NVT_NH = 1, NPT_NH = 2 };
+enum class Ensemble { Langevin = 0, NVT_NH = 1, NPT_NH = 2, NVE = 3 };
+inline bool is_nose_hoover(Ensemble e) { return e == Ensemble::NVT_NH || e == Ensemble::NPT_NH; }
 
 // Layout of every 6-component virial / stress array on the device and in
 // ThermoOutput::stress. Text output uses the conventional order
@@ -69,6 +70,9 @@ struct SimParams {
     int   stress_on;
     int   stress_freq;
     char  stress_file[256];
+    int   pair_shift = 0;     // 1: energy-shifted LJ (U(rc) = 0)
+    int   stress_p = 16;      // correlator points per level
+    int   stress_m = 2;       // correlator block-averaging factor
 
     int   restart_freq;
     char  restart_file[256];

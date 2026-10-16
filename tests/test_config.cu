@@ -75,6 +75,10 @@ TEST(Config, RejectsUnknownAndDuplicateKeys) {
     expect_reject("unknown", std::string(kBase) + "lj 0 0 1 1\nthermo_freq 100\n", "unknown keyword");
     expect_reject("dup_rc", std::string(kBase) + "lj 0 0 1 1\nrc 3.0\n", "more than once");
     expect_reject("two_ensembles", std::string(kBase) + "lj 0 0 1 1\nnvt_nh 1 1 1\n", "only one ensemble");
+    expect_reject("nve_and_langevin", std::string(kBase) + "lj 0 0 1 1\nnve\n", "only one ensemble");
+    expect_reject("nve_args", "ntypes 1\nnve 1.0\n", "unexpected extra argument");
+    expect_reject("pair_shift_bad", std::string(kBase) + "pair_shift maybe\n", "yes");
+    expect_reject("stress_pm", std::string(kBase) + "stress 1 10 s.dat 16 3\n", "multiple of m");
     expect_reject("dup_lj", std::string(kBase) + "lj 0 0 1 1\nlj 0 0 2 1\n", "given twice");
 }
 

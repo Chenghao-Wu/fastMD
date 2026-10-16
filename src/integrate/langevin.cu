@@ -51,15 +51,17 @@ __global__ void integrator_pre_force_kernel(
     r.y += half_dt * v.y;
     r.z += half_dt * v.z;
 
-    // Philox stream: subsequence = particle tag, one 4-word block per step
-    curandStatePhilox4_32_10_t rs;
-    curand_init(seed, (unsigned long long)(tag ? tag[i] : i), (unsigned long long)step * 4ull, &rs);
-    float4 rand4 = curand_normal4(&rs);
+    if (c2 > 0.0f) {   // c2 = 0: plain velocity Verlet (NVE), no random numbers drawn
+        // Philox stream: subsequence = particle tag, one 4-word block per step
+        curandStatePhilox4_32_10_t rs;
+        curand_init(seed, (unsigned long long)(tag ? tag[i] : i), (unsigned long long)step * 4ull, &rs);
+        float4 rand4 = curand_normal4(&rs);
 
-    float noise_scale = c2 * sqrtf(kT / m_i);
-    v.x = c1 * v.x + noise_scale * rand4.x;
-    v.y = c1 * v.y + noise_scale * rand4.y;
-    v.z = c1 * v.z + noise_scale * rand4.z;
+        float noise_scale = c2 * sqrtf(kT / m_i);
+        v.x = c1 * v.x + noise_scale * rand4.x;
+        v.y = c1 * v.y + noise_scale * rand4.y;
+        v.z = c1 * v.z + noise_scale * rand4.z;
+    }
 
     r.x += half_dt * v.x;
     r.y += half_dt * v.y;

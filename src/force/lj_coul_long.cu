@@ -26,7 +26,7 @@ __global__ void lj_coul_long_kernel(
     const int* __restrict__ num_neighbors,
     int natoms, int ntypes,
     float coul_const, float alpha,
-    float rc2, float L, float inv_L, const float* __restrict__ d_box)
+    float rc2, float L, float inv_L, const float* __restrict__ d_box, bool shift)
 {
     if (d_box) { L = d_box[0]; inv_L = d_box[1]; }   // box on the device (NPT)
     const int t = blockIdx.x * blockDim.x + threadIdx.x;
@@ -87,6 +87,10 @@ __global__ void lj_coul_long_kernel(
                 fx += fxij; fy += fyij; fz += fzij;
                 if (EV) {
                     float lj_pe = 4.0f * eps * (sr12 - sr6);
+                    if (shift) {   // LJ part energy-shifted (U_LJ(rc) = 0)
+                        float sc6 = sig2 / rc2; sc6 = sc6 * sc6 * sc6;
+                        lj_pe -= 4.0f * eps * (sc6 * sc6 - sc6);
+                    }
                     float coul_pe = qiqj * erfc_ar * rinv;
                     pe_i += 0.5f * (lj_pe + coul_pe);
                     vir_xx += 0.5f * fxij * dx;
@@ -123,13 +127,14 @@ void launch_lj_coul_long_kernel(const float4* pos, const float* charges,
                                  int natoms, int ntypes,
                                  float coul_const, float alpha,
                                  float rc2, float L, float inv_L,
-                                 cudaStream_t stream, int tpa, const float* d_box, bool ev)
+                                 cudaStream_t stream, int tpa, const float* d_box, bool ev,
+                                 bool shift)
 {
     if (tpa <= 0) tpa = pair_threads_per_atom(natoms);
     const int blocks = div_ceil(natoms * tpa, 256);
 #define FASTMD_LAUNCH_EV(T, E) lj_coul_long_kernel<T, E><<<blocks, 256, 0, stream>>>( \
         pos, charges, force, virial, lj_params, neighbors, num_neighbors,          \
-        natoms, ntypes, coul_const, alpha, rc2, L, inv_L, d_box)
+        natoms, ntypes, coul_const, alpha, rc2, L, inv_L, d_box, shift)
 #define FASTMD_LAUNCH(T) do { if (ev) FASTMD_LAUNCH_EV(T, true); else FASTMD_LAUNCH_EV(T, false); } while (0)
     switch (tpa) {
         case 1: FASTMD_LAUNCH(1); break;

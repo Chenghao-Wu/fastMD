@@ -164,13 +164,27 @@ SimParams parse_config(std::istream& in, const std::string& filename, TopologyDa
                 if (f.empty()) a.fail("missing argument <file>");
             }
             if (key == "thermo") { params.thermo_on = on; params.thermo_freq = (int)freq; copy_path(params.thermo_file, f, a); }
-            if (key == "stress") { params.stress_on = on; params.stress_freq = (int)freq; copy_path(params.stress_file, f, a); }
+            if (key == "stress") {
+                params.stress_on = on; params.stress_freq = (int)freq; copy_path(params.stress_file, f, a);
+                if (a.more()) {   // stress <on> <freq> <file> [p m]
+                    long p = a.integer("p"), m = a.integer("m");
+                    if (m < 2 || p < 2 || p > 1024 || p % m != 0)
+                        a.fail("correlator needs m >= 2, 2 <= p <= 1024 and p a multiple of m");
+                    params.stress_p = (int)p;
+                    params.stress_m = (int)m;
+                }
+            }
             if (key == "rg")     { params.rg_on = on;     params.rg_freq = (int)freq;     copy_path(params.rg_file, f, a); }
         } else if (key == "restart") {
             long freq = a.integer("freq");
             if (freq < 0) a.fail("<freq> must be >= 0 (0 = final restart only)");
             params.restart_freq = (int)freq;
             copy_path(params.restart_file, a.str("file"), a);
+        } else if (key == "nve") {
+            if (!ensemble_key.empty())
+                a.fail("only one ensemble may be given (already '" + ensemble_key + "')");
+            ensemble_key = key;
+            params.ensemble = Ensemble::NVE;
         } else if (key == "nvt_langevin" || key == "nvt_nh" || key == "npt_nh") {
             if (!ensemble_key.empty())
                 a.fail("only one ensemble may be given (already '" + ensemble_key + "')");
@@ -246,6 +260,10 @@ SimParams parse_config(std::istream& in, const std::string& filename, TopologyDa
             params.ewald14_coul = (float)a.real("coul14");
             if (params.lj14 < 0 || params.lj14 > 1 || params.ewald14_coul < 0 || params.ewald14_coul > 1)
                 a.fail("scaling factors must be in [0, 1]");
+        } else if (key == "pair_shift") {
+            std::string v = a.str("yes|no");
+            if (v != "yes" && v != "no") a.fail("expected 'yes' or 'no'");
+            params.pair_shift = (v == "yes");
         } else if (key == "special_dihedral") {
             std::string v = a.str("yes|no");
             if (v != "yes" && v != "no") a.fail("expected 'yes' or 'no'");
@@ -338,7 +356,7 @@ SimParams parse_config(std::istream& in, const std::string& filename, TopologyDa
     require("dt");
     require("nsteps");
     if (ensemble_key.empty())
-        throw std::runtime_error(filename + ": no ensemble given (nvt_langevin, nvt_nh or npt_nh)");
+        throw std::runtime_error(filename + ": no ensemble given (nve, nvt_langevin, nvt_nh or npt_nh)");
     if (topo.data_file.empty() && coords_file.empty())
         throw std::runtime_error(filename + ": give lammps_data_file or coords_file");
     if (!topo.data_file.empty() && !coords_file.empty())

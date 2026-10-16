@@ -1,172 +1,227 @@
 #include "correlator.cuh"
+#include <cmath>
 #include <cstdio>
 #include <stdexcept>
 
 namespace {
-constexpr int kBuf = CORR_LEVELS * CORR_POINTS * STRESS_COMPONENTS;
-}
 
-void MultipleTauCorrelator::allocate() {
-    CUDA_CHECK(cudaMalloc(&d_stress_buf, kBuf * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_corr,       kBuf * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_counts,     CORR_LEVELS * CORR_POINTS * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&d_insert_idx, CORR_LEVELS * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&d_fill,       CORR_LEVELS * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&d_block_accum, CORR_LEVELS * STRESS_COMPONENTS * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_block_count, CORR_LEVELS * sizeof(int)));
-    reset();
-}
+struct CorrView {
+    double* buf;                  // [levels][p][nch] ring buffers
+    double* corr;                 // [levels][p][npairs]
+    unsigned long long* count;    // [levels][p]
+    int* idx;                     // [levels] next ring slot
+    int* fill;                    // [levels] samples held (saturates at p)
+    double* accum;                // [levels][nch] running block sums
+    int* acount;                  // [levels]
+    double* sum;                  // [nch] level-0 sums (means)
+    unsigned long long* nsamp;    // [1]
+};
 
-namespace {
-size_t snapshot_bytes() {
-    return kBuf * sizeof(float) + kBuf * sizeof(double) + CORR_LEVELS * CORR_POINTS * sizeof(int) +
-           2 * CORR_LEVELS * sizeof(int) + CORR_LEVELS * STRESS_COMPONENTS * sizeof(double) +
-           CORR_LEVELS * sizeof(int);
-}
-}  // namespace
-
-// The snapshot copies each buffer into one packed device allocation.
-void MultipleTauCorrelator::save_snapshot(cudaStream_t stream) {
-    if (!d_snapshot) CUDA_CHECK(cudaMalloc(&d_snapshot, snapshot_bytes()));
-    char* p = d_snapshot;
-    auto put = [&](const void* src, size_t bytes) {
-        CUDA_CHECK(cudaMemcpyAsync(p, src, bytes, cudaMemcpyDeviceToDevice, stream));
-        p += bytes;
-    };
-    put(d_stress_buf, kBuf * sizeof(float));
-    put(d_corr, kBuf * sizeof(double));
-    put(d_counts, CORR_LEVELS * CORR_POINTS * sizeof(int));
-    put(d_insert_idx, CORR_LEVELS * sizeof(int));
-    put(d_fill, CORR_LEVELS * sizeof(int));
-    put(d_block_accum, CORR_LEVELS * STRESS_COMPONENTS * sizeof(double));
-    put(d_block_count, CORR_LEVELS * sizeof(int));
-}
-
-void MultipleTauCorrelator::restore_snapshot(cudaStream_t stream) {
-    if (!d_snapshot) return;
-    const char* p = d_snapshot;
-    auto get = [&](void* dst, size_t bytes) {
-        CUDA_CHECK(cudaMemcpyAsync(dst, p, bytes, cudaMemcpyDeviceToDevice, stream));
-        p += bytes;
-    };
-    get(d_stress_buf, kBuf * sizeof(float));
-    get(d_corr, kBuf * sizeof(double));
-    get(d_counts, CORR_LEVELS * CORR_POINTS * sizeof(int));
-    get(d_insert_idx, CORR_LEVELS * sizeof(int));
-    get(d_fill, CORR_LEVELS * sizeof(int));
-    get(d_block_accum, CORR_LEVELS * STRESS_COMPONENTS * sizeof(double));
-    get(d_block_count, CORR_LEVELS * sizeof(int));
-}
-
-void MultipleTauCorrelator::free() {
-    for (void* p : {(void*)d_stress_buf, (void*)d_corr, (void*)d_counts, (void*)d_insert_idx,
-                    (void*)d_fill, (void*)d_block_accum, (void*)d_block_count, (void*)d_snapshot})
-        if (p) CUDA_CHECK(cudaFree(p));
-    *this = MultipleTauCorrelator{};
-}
-
-void MultipleTauCorrelator::reset() {
-    CUDA_CHECK(cudaMemset(d_stress_buf, 0, kBuf * sizeof(float)));
-    CUDA_CHECK(cudaMemset(d_corr, 0, kBuf * sizeof(double)));
-    CUDA_CHECK(cudaMemset(d_counts, 0, CORR_LEVELS * CORR_POINTS * sizeof(int)));
-    CUDA_CHECK(cudaMemset(d_insert_idx, 0, CORR_LEVELS * sizeof(int)));
-    CUDA_CHECK(cudaMemset(d_fill, 0, CORR_LEVELS * sizeof(int)));
-    CUDA_CHECK(cudaMemset(d_block_accum, 0, CORR_LEVELS * STRESS_COMPONENTS * sizeof(double)));
-    CUDA_CHECK(cudaMemset(d_block_count, 0, CORR_LEVELS * sizeof(int)));
-}
-
-// Single thread: at most CORR_LEVELS * CORR_POINTS * 6 products per sample.
-__global__ void correlator_push_kernel(
-    float* __restrict__ stress_buf,
-    double* __restrict__ corr,
-    int* __restrict__ counts,
-    int* __restrict__ insert_idx,
-    int* __restrict__ fill,
-    double* __restrict__ block_accum,
-    int* __restrict__ block_count,
-    const float* __restrict__ new_sample)
-{
-    double sample[STRESS_COMPONENTS];
-    for (int c = 0; c < STRESS_COMPONENTS; c++) sample[c] = new_sample[c];
-
-    for (int level = 0; level < CORR_LEVELS; level++) {
-        int idx = insert_idx[level];
-        int base = level * CORR_POINTS * STRESS_COMPONENTS;
-        for (int c = 0; c < STRESS_COMPONENTS; c++)
-            stress_buf[base + idx * STRESS_COMPONENTS + c] = (float)sample[c];
-
-        // Occupancy is tracked separately from the ring index: after the
-        // buffer wraps, all CORR_POINTS lags remain available.
-        int n_stored = min(fill[level] + 1, CORR_POINTS);
-        fill[level] = n_stored;
-        for (int lag = 0; lag < n_stored; lag++) {
-            int older = (idx - lag + CORR_POINTS) % CORR_POINTS;
-            for (int c = 0; c < STRESS_COMPONENTS; c++)
-                corr[base + lag * STRESS_COMPONENTS + c] +=
-                    sample[c] * stress_buf[base + older * STRESS_COMPONENTS + c];
-            counts[level * CORR_POINTS + lag]++;
+// One block; samples are processed in order. Per level, every (lag, pair)
+// product belongs to exactly one thread, so there are no atomics.
+__global__ void correlator_push_kernel(CorrView v, const int2* __restrict__ pairs,
+                                       const double* __restrict__ samples, int nsamples_in,
+                                       int nch, int npairs, int p, int m, int levels) {
+    extern __shared__ double s[];   // [nch] current sample of the level being processed
+    __shared__ int s_carry;          // 1: this level completed a block, go on
+    const int tid = threadIdx.x, nt = blockDim.x;
+    for (int n = 0; n < nsamples_in; n++) {
+        for (int c = tid; c < nch; c += nt) {
+            double x = samples[(size_t)n * nch + c];
+            s[c] = x;
+            v.sum[c] += x;
         }
-        insert_idx[level] = (idx + 1) % CORR_POINTS;
-
-        // Block-average into the next level.
-        int ba = level * STRESS_COMPONENTS;
-        for (int c = 0; c < STRESS_COMPONENTS; c++) block_accum[ba + c] += sample[c];
-        if (++block_count[level] < CORR_POINTS) break;
-        for (int c = 0; c < STRESS_COMPONENTS; c++) {
-            sample[c] = block_accum[ba + c] / CORR_POINTS;
-            block_accum[ba + c] = 0.0;
+        if (tid == 0) v.nsamp[0]++;
+        __syncthreads();
+        for (int level = 0; level < levels; level++) {
+            const int idx = v.idx[level];
+            double* buf = v.buf + (size_t)level * p * nch;
+            for (int c = tid; c < nch; c += nt) buf[idx * nch + c] = s[c];
+            __syncthreads();
+            const int stored = min(v.fill[level] + 1, p);
+            const int kmin = level == 0 ? 0 : p / m;
+            const int nk = stored - kmin;
+            if (nk > 0) {
+                double* corr = v.corr + (size_t)level * p * npairs;
+                for (int w = tid; w < nk * npairs; w += nt) {
+                    const int k = kmin + w / npairs, q = w % npairs;
+                    const int older = (idx - k + p) % p;
+                    const int2 ab = pairs[q];
+                    corr[k * npairs + q] += s[ab.x] * buf[older * nch + ab.y];
+                }
+                for (int k = kmin + tid; k < stored; k += nt) v.count[level * p + k]++;
+            }
+            for (int c = tid; c < nch; c += nt) v.accum[level * nch + c] += s[c];
+            __syncthreads();
+            if (tid == 0) {
+                v.fill[level] = stored;
+                v.idx[level] = (idx + 1) % p;
+                s_carry = (++v.acount[level] == m);
+                if (s_carry) v.acount[level] = 0;
+            }
+            __syncthreads();
+            if (!s_carry) break;
+            // the block average becomes the next level's sample
+            for (int c = tid; c < nch; c += nt) {
+                s[c] = v.accum[level * nch + c] / m;
+                v.accum[level * nch + c] = 0.0;
+            }
+            __syncthreads();
         }
-        block_count[level] = 0;
+        __syncthreads();
     }
 }
 
-void MultipleTauCorrelator::push_sample(const float* d_stress_6, cudaStream_t stream) {
-    correlator_push_kernel<<<1, 1, 0, stream>>>(
-        d_stress_buf, d_corr, d_counts, d_insert_idx, d_fill,
-        d_block_accum, d_block_count, d_stress_6);
+}  // namespace
+
+void MultipleTauCorrelator::allocate(int nch, const std::vector<int2>& pairs, int p_in, int m_in,
+                                     int levels_in) {
+    if (nch < 1) throw std::invalid_argument("correlator: nchannels must be >= 1");
+    if (pairs.empty()) throw std::invalid_argument("correlator: no channel pairs");
+    for (const int2& ab : pairs)
+        if (ab.x < 0 || ab.x >= nch || ab.y < 0 || ab.y >= nch)
+            throw std::invalid_argument("correlator: pair channel out of range");
+    if (m_in < 2 || p_in < 2 || p_in % m_in != 0)
+        throw std::invalid_argument("correlator: need m >= 2 and p a multiple of m");
+    free();
+    nchannels = nch;
+    pairs_ = pairs;
+    npairs = (int)pairs.size();
+    p = p_in;
+    m = m_in;
+    if (levels_in > 0) {
+        levels = levels_in;
+    } else {   // longest lag p * m^(levels-1) >= 2^31 samples
+        levels = 1;
+        for (double reach = p; reach < 2147483648.0 && levels < 64; reach *= m) levels++;
+    }
+    auto align = [](size_t x) { return (x + 15) & ~size_t(15); };
+    size_t o = 0;
+    off_.buf = o;    o = align(o + sizeof(double) * levels * p * nch);
+    off_.corr = o;   o = align(o + sizeof(double) * levels * p * npairs);
+    off_.count = o;  o = align(o + sizeof(unsigned long long) * levels * p);
+    off_.idx = o;    o = align(o + sizeof(int) * levels);
+    off_.fill = o;   o = align(o + sizeof(int) * levels);
+    off_.accum = o;  o = align(o + sizeof(double) * levels * nch);
+    off_.acount = o; o = align(o + sizeof(int) * levels);
+    off_.sum = o;    o = align(o + sizeof(double) * nch);
+    off_.nsamp = o;  o = align(o + sizeof(unsigned long long));
+    state_bytes_ = o;
+    CUDA_CHECK(cudaMalloc(&d_state_, state_bytes_));
+    CUDA_CHECK(cudaMalloc(&d_pairs_, npairs * sizeof(int2)));
+    CUDA_CHECK(cudaMemcpy(d_pairs_, pairs.data(), npairs * sizeof(int2), cudaMemcpyHostToDevice));
+    reset();
+}
+
+void MultipleTauCorrelator::allocate_auto(int nch, int p_in, int m_in, int levels_in) {
+    std::vector<int2> pairs;
+    for (int c = 0; c < nch; c++) pairs.push_back(make_int2(c, c));
+    allocate(nch, pairs, p_in, m_in, levels_in);
+}
+
+void MultipleTauCorrelator::free() {
+    for (void* q : {(void*)d_state_, (void*)d_snapshot_, (void*)d_pairs_})
+        if (q) CUDA_CHECK(cudaFree(q));
+    d_state_ = d_snapshot_ = nullptr;
+    d_pairs_ = nullptr;
+    pairs_.clear();
+    nchannels = npairs = levels = 0;
+    state_bytes_ = 0;
+}
+
+void MultipleTauCorrelator::reset() {
+    CUDA_CHECK(cudaMemset(d_state_, 0, state_bytes_));
+}
+
+void MultipleTauCorrelator::save_snapshot(cudaStream_t stream) {
+    if (!d_snapshot_) CUDA_CHECK(cudaMalloc(&d_snapshot_, state_bytes_));
+    CUDA_CHECK(cudaMemcpyAsync(d_snapshot_, d_state_, state_bytes_, cudaMemcpyDeviceToDevice, stream));
+}
+
+void MultipleTauCorrelator::restore_snapshot(cudaStream_t stream) {
+    if (!d_snapshot_) return;
+    CUDA_CHECK(cudaMemcpyAsync(d_state_, d_snapshot_, state_bytes_, cudaMemcpyDeviceToDevice, stream));
+}
+
+void MultipleTauCorrelator::push(const double* d_sample, cudaStream_t stream) {
+    push_batch(d_sample, 1, stream);
+}
+
+void MultipleTauCorrelator::push_batch(const double* d_samples, int n, cudaStream_t stream) {
+    if (n <= 0) return;
+    CorrView v{reinterpret_cast<double*>(d_state_ + off_.buf),
+               reinterpret_cast<double*>(d_state_ + off_.corr),
+               reinterpret_cast<unsigned long long*>(d_state_ + off_.count),
+               reinterpret_cast<int*>(d_state_ + off_.idx),
+               reinterpret_cast<int*>(d_state_ + off_.fill),
+               reinterpret_cast<double*>(d_state_ + off_.accum),
+               reinterpret_cast<int*>(d_state_ + off_.acount),
+               reinterpret_cast<double*>(d_state_ + off_.sum),
+               reinterpret_cast<unsigned long long*>(d_state_ + off_.nsamp)};
+    const int threads = npairs * p >= 256 ? 256 : 64;
+    correlator_push_kernel<<<1, threads, nchannels * sizeof(double), stream>>>(
+        v, d_pairs_, d_samples, n, nchannels, npairs, p, m, levels);
     CUDA_CHECK(cudaGetLastError());
 }
 
-void MultipleTauCorrelator::get_results(float* h_corr, int* h_counts, int* h_total_levels) {
-    std::vector<double> c(kBuf);
-    CUDA_CHECK(cudaMemcpy(c.data(), d_corr, kBuf * sizeof(double), cudaMemcpyDeviceToHost));
-    for (int k = 0; k < kBuf; k++) h_corr[k] = (float)c[k];
-    CUDA_CHECK(cudaMemcpy(h_counts, d_counts, CORR_LEVELS * CORR_POINTS * sizeof(int),
-                          cudaMemcpyDeviceToHost));
-    *h_total_levels = CORR_LEVELS;
-}
-
 std::vector<MultipleTauCorrelator::Row> MultipleTauCorrelator::results() const {
-    std::vector<double> c(kBuf);
-    std::vector<int> n(CORR_LEVELS * CORR_POINTS);
-    CUDA_CHECK(cudaMemcpy(c.data(), d_corr, kBuf * sizeof(double), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(n.data(), d_counts, n.size() * sizeof(int), cudaMemcpyDeviceToHost));
+    std::vector<char> h(state_bytes_);
+    CUDA_CHECK(cudaMemcpy(h.data(), d_state_, state_bytes_, cudaMemcpyDeviceToHost));
+    const double* corr = reinterpret_cast<const double*>(h.data() + off_.corr);
+    const unsigned long long* count = reinterpret_cast<const unsigned long long*>(h.data() + off_.count);
     std::vector<Row> rows;
     long long scale = 1;   // sampling intervals per sample at this level
-    for (int level = 0; level < CORR_LEVELS; level++) {
-        for (int lag = (level == 0 ? 0 : 1); lag < CORR_POINTS; lag++) {
-            int cnt = n[level * CORR_POINTS + lag];
+    for (int level = 0; level < levels; level++) {
+        for (int k = (level == 0 ? 0 : p / m); k < p; k++) {
+            unsigned long long cnt = count[level * p + k];
             if (cnt == 0) continue;
             Row r;
-            r.lag_samples = (long long)lag * scale;
-            for (int k = 0; k < STRESS_COMPONENTS; k++)
-                r.c[k] = c[(level * CORR_POINTS + lag) * STRESS_COMPONENTS + k] / cnt;
+            r.lag_samples = (long long)k * scale;
+            r.c.resize(npairs);
+            for (int q = 0; q < npairs; q++) r.c[q] = corr[((size_t)level * p + k) * npairs + q] / cnt;
             r.count = cnt;
-            rows.push_back(r);
+            rows.push_back(std::move(r));
         }
-        scale *= CORR_POINTS;
+        if (scale > (1ll << 50)) break;
+        scale *= m;
     }
     return rows;
 }
 
-void MultipleTauCorrelator::write(const std::string& path, int sample_interval_steps) const {
+std::vector<double> MultipleTauCorrelator::means() const {
+    std::vector<double> sum(nchannels);
+    unsigned long long n = nsamples();
+    CUDA_CHECK(cudaMemcpy(sum.data(), d_state_ + off_.sum, nchannels * sizeof(double),
+                          cudaMemcpyDeviceToHost));
+    for (double& x : sum) x = n ? x / n : 0.0;
+    return sum;
+}
+
+unsigned long long MultipleTauCorrelator::nsamples() const {
+    unsigned long long n = 0;
+    CUDA_CHECK(cudaMemcpy(&n, d_state_ + off_.nsamp, sizeof(n), cudaMemcpyDeviceToHost));
+    return n;
+}
+
+void MultipleTauCorrelator::write(const std::string& path, int sample_interval_steps,
+                                  const std::vector<std::string>& columns,
+                                  const std::string& extra_header) const {
+    if ((int)columns.size() != npairs) throw std::invalid_argument("correlator: column names");
     FILE* fp = fopen(path.c_str(), "w");
     if (!fp) throw std::runtime_error("cannot open " + path);
-    fprintf(fp, "# lag_steps  C_xx  C_xy  C_xz  C_yy  C_yz  C_zz  count\n");
+    fprintf(fp, "# multiple-tau correlator: p %d  m %d  levels %d  samples %llu  sample interval %d steps\n",
+            p, m, levels, nsamples(), sample_interval_steps);
+    if (!extra_header.empty()) fprintf(fp, "%s", extra_header.c_str());
+    std::vector<double> mu = means();
+    fprintf(fp, "# channel means:");
+    for (double x : mu) fprintf(fp, " %.10e", x);
+    fprintf(fp, "\n# lag_steps");
+    for (const std::string& c : columns) fprintf(fp, "  %s", c.c_str());
+    fprintf(fp, "  count\n");
     for (const Row& r : results()) {
         fprintf(fp, "%lld", r.lag_samples * sample_interval_steps);
-        for (int k = 0; k < STRESS_COMPONENTS; k++) fprintf(fp, " %.10e", r.c[k]);
-        fprintf(fp, " %lld\n", r.count);
+        for (double x : r.c) fprintf(fp, " %.10e", x);
+        fprintf(fp, " %llu\n", r.count);
     }
     fclose(fp);
 }

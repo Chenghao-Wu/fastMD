@@ -104,7 +104,7 @@ Simulation::Simulation(const SimParams& params, TopologyData topo)
         verlet_.request_rebuild(stream_);
     }
 
-    if (params_.ensemble != Ensemble::Langevin) {
+    if (is_nose_hoover(params_.ensemble)) {
         // first pre-force thermostat half-step uses the raw kinetic energy
         float init_ke = compute_ke_only(p_.vel, p_.pos, params_.natoms, d_ke_buf_, stream_);
         CUDA_CHECK(cudaMemcpy(&d_nh_state_->chain_KE_carry, &init_ke, sizeof(float),
@@ -199,7 +199,11 @@ void Simulation::upload_force_field() {
 void Simulation::setup_integrator() {
     langevin_.init(p_.natoms_padded, params_.Tdamp, params_.dt, params_.T_start, params_.seed,
                    params_.T_stop, params_.nsteps);
-    if (params_.ensemble != Ensemble::Langevin) {
+    if (params_.ensemble == Ensemble::NVE) {   // velocity Verlet: no friction, no noise
+        langevin_.c1 = 1.0f;
+        langevin_.c2 = 0.0f;
+    }
+    if (is_nose_hoover(params_.ensemble)) {
         nose_hoover_.init(params_);
         allocate_nh_device_state(d_nh_state_);
         init_nh_device_state(nose_hoover_, d_nh_state_);
@@ -211,7 +215,7 @@ void Simulation::setup_integrator() {
 
 void Simulation::setup_analysis() {
     if (params_.stress_on) {
-        correlator_.allocate();
+        correlator_.allocate_auto(6, params_.stress_p, params_.stress_m);
         stress_sampler_.allocate();
     }
     thermo_bufs_.allocate();
@@ -247,7 +251,9 @@ void Simulation::print_setup() const {
         printf("  coul_const=%.4f  lj14=%.2f  coul14=%.2f  self-energy=%.4f\n",
                params_.coul_const, params_.lj14, params_.ewald14_coul, params_.ewald_self_offset);
     }
-    if (params_.ensemble != Ensemble::Langevin) {
+    if (params_.ensemble == Ensemble::NVE) {
+        printf("[setup]  ensemble=nve");
+    } else if (is_nose_hoover(params_.ensemble)) {
         printf("[setup]  ensemble=%s  T_start=%.2f  T_stop=%.2f  Tdamp=%.2f  chain=%d",
                params_.ensemble == Ensemble::NPT_NH ? "npt_nh" : "nvt_nh",
                params_.T_start, params_.T_stop, params_.Tdamp, params_.nh_chain_length);
@@ -447,12 +453,14 @@ void Simulation::launch_pair_kernel(int tpa, bool ev) {
         launch_lj_coul_long_kernel(p_.pos, p_.charge, p_.force, d_virial_, d_lj_params_,
                                    verlet_.neighbors, verlet_.num_neighbors,
                                    n, params_.ntypes, params_.coul_const, params_.ewald_alpha,
-                                   params_.rc2, box_L_, inv_L_, stream_, tpa, &d_status_->L, ev);
+                                   params_.rc2, box_L_, inv_L_, stream_, tpa, &d_status_->L, ev,
+                                   params_.pair_shift != 0);
     else
         launch_lj_kernel(p_.pos, p_.force, d_virial_, d_lj_params_,
                          verlet_.neighbors, verlet_.num_neighbors,
                          n, params_.ntypes, params_.rc2, box_L_, inv_L_, stream_,
-                         d_lj_cap_, params_.lj_force_cap, tpa, &d_status_->L, ev);
+                         d_lj_cap_, params_.lj_force_cap, tpa, &d_status_->L, ev,
+                         params_.pair_shift != 0);
 }
 
 // Time the overwriting pair kernel with 1, 2, 4 and 8 threads per particle on
@@ -540,7 +548,7 @@ void Simulation::integrate_pre_force() {
     const int n = params_.natoms;
     int* d_max_dr2 = &d_status_->max_dr2_bits;
 
-    if (params_.ensemble == Ensemble::Langevin) {
+    if (!is_nose_hoover(params_.ensemble)) {   // Langevin or NVE
         launch_integrator_pre_force(p_.pos, p_.vel, p_.force, p_.pos_ref, d_max_dr2,
                                     p_.image, p_.tag, d_step_, langevin_,
                                     n, box_L_, inv_L_, hdt, stream_);
@@ -571,7 +579,7 @@ void Simulation::integrate_pre_force() {
 void Simulation::integrate_post_force() {
     const float hdt = 0.5f * params_.dt;
     const int n = params_.natoms;
-    if (params_.ensemble == Ensemble::Langevin) {
+    if (!is_nose_hoover(params_.ensemble)) {
         launch_integrator_post_force(p_.vel, p_.force, p_.pos, n, hdt, stream_, d_step_);
     } else if (nose_hoover_.is_npt) {
         launch_nh_v_verlet_half(p_.vel, p_.force, p_.pos, n, hdt, stream_);
@@ -609,7 +617,7 @@ void Simulation::launch_step(bool with_stress, bool ev) {
         // device-only sample; a pending fused-NVT velocity scale is applied in the kernel
         stress_sampler_.sample(p_.vel, p_.pos, d_virial_, params_.natoms, &d_status_->L,
                                velocities_pending_ ? &d_nh_state_->s_post : nullptr, stream_);
-        correlator_.push_sample(stress_sampler_.d_stress, stream_);
+        correlator_.push(stress_sampler_.d_stress, stream_);
     }
 }
 
@@ -894,7 +902,11 @@ ThermoOutput Simulation::thermo() {
 
 void Simulation::finish() {
     if (!params_.stress_on) return;
-    correlator_.write(params_.stress_file, params_.stress_freq);
+    char vol[160];
+    snprintf(vol, sizeof(vol), "# stress = (kinetic + virial) / V with V = %.10g (box volume); "
+             "G(t) = V C(t) / (k_B T)\n", (double)box_L_ * box_L_ * box_L_);
+    correlator_.write(params_.stress_file, params_.stress_freq,
+                      {"C_xx", "C_xy", "C_xz", "C_yy", "C_yz", "C_zz"}, vol);
     printf("Stress autocorrelation written to %s\n", params_.stress_file);
 }
 

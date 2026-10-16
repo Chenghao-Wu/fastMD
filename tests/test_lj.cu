@@ -121,3 +121,45 @@ TEST(LJ, ForceCapIsEnergyConsistent) {
     free_device(d_lj);
     free_device(d_cap);
 }
+
+// pair_shift: U(r) - U(rc) for every pair (forces unchanged); the forces-only
+// variant gives the same forces and leaves force.w = 0.
+TEST(LJ, EnergyShiftAndForcesOnlyVariant) {
+    const float L = 10.0f, rc = 2.5f;
+    std::vector<float2> lj = {{1.3f, 1.1f}};
+    float2* d_lj = to_device(lj);
+    auto eval = [&](float r, bool ev, bool shift, float* energy) {
+        std::vector<float4> pos(32, make_float4(0, 0, 0, pack_type_id(-1)));
+        pos[0] = make_float4(5.0f, 5.0f, 5.0f, pack_type_id(0));
+        pos[1] = make_float4(5.0f + r, 5.0f, 5.0f, pack_type_id(0));
+        float4* d_pos = to_device(pos);
+        float4* d_f;
+        double* d_v;
+        CUDA_CHECK(cudaMalloc(&d_f, 32 * sizeof(float4)));
+        CUDA_CHECK(cudaMalloc(&d_v, 6 * sizeof(double)));
+        CUDA_CHECK(cudaMemset(d_v, 0, 6 * sizeof(double)));
+        VerletList v;
+        v.allocate(2, rc + 0.3f, L);
+        v.build(d_pos, 2, L, 1.0f / L, nullptr, nullptr, rc + 0.3f);
+        launch_lj_kernel(d_pos, d_f, d_v, d_lj, v.neighbors, v.num_neighbors, 2, 1, rc * rc,
+                         L, 1.0f / L, 0, nullptr, 0.0f, 1, nullptr, ev, shift);
+        auto f = to_host(d_f, 2);
+        *energy = f[0].w + f[1].w;
+        v.free();
+        free_device(d_pos); free_device(d_f); free_device(d_v);
+        return f[1].x;
+    };
+    auto U = [](double r) { double s6 = std::pow(1.1 / r, 6); return 4.0 * 1.3 * (s6 * s6 - s6); };
+    for (float r : {1.0f, 1.4f, 2.0f, 2.45f}) {
+        float e_plain, e_shift, e_none;
+        float f_plain = eval(r, true, false, &e_plain);
+        float f_shift = eval(r, true, true, &e_shift);
+        float f_none = eval(r, false, true, &e_none);
+        EXPECT_NEAR(e_plain, U(r), 1e-4 * std::max(1.0, std::fabs(U(r))));
+        EXPECT_NEAR(e_shift, U(r) - U(rc), 1e-4 * std::max(1.0, std::fabs(U(r))));
+        EXPECT_EQ(f_plain, f_shift);
+        EXPECT_EQ(f_plain, f_none);
+        EXPECT_EQ(e_none, 0.0f);
+    }
+    free_device(d_lj);
+}

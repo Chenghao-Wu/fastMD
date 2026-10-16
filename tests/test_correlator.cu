@@ -2,160 +2,166 @@
 #include "test_utils.cuh"
 #include "analysis/correlator.cuh"
 #include <cmath>
-#include <array>
 #include <random>
-
-TEST(Correlator, ConstantSignalAutoCorrelation) {
-    MultipleTauCorrelator corr;
-    corr.allocate();
-
-    float h_stress[6] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-    float* d_stress;
-    CUDA_CHECK(cudaMalloc(&d_stress, 6 * sizeof(float)));
-    CUDA_CHECK(cudaMemcpy(d_stress, h_stress, 6 * sizeof(float),
-                           cudaMemcpyHostToDevice));
-
-    for (int i = 0; i < 64; i++) {
-        corr.push_sample(d_stress);
-    }
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    int buf_size = CORR_LEVELS * CORR_POINTS * STRESS_COMPONENTS;
-    std::vector<float> h_corr(buf_size);
-    std::vector<int> h_counts(CORR_LEVELS * CORR_POINTS);
-    int total_levels;
-    corr.get_results(h_corr.data(), h_counts.data(), &total_levels);
-
-    for (int lag = 0; lag < CORR_POINTS; lag++) {
-        int count = h_counts[0 * CORR_POINTS + lag];
-        if (count > 0) {
-            float c = h_corr[0 * CORR_POINTS * STRESS_COMPONENTS + lag * STRESS_COMPONENTS + 0];
-            float normalized = c / count;
-            EXPECT_NEAR(normalized, 1.0f, 1e-5f) << "lag " << lag;
-        }
-    }
-
-    corr.free();
-    free_device(d_stress);
-}
-
-TEST(Correlator, DecayingSignal) {
-    MultipleTauCorrelator corr;
-    corr.allocate();
-
-    float* d_stress;
-    CUDA_CHECK(cudaMalloc(&d_stress, 6 * sizeof(float)));
-
-    float tau = 10.0f;
-    int nsamples = 256;
-    for (int i = 0; i < nsamples; i++) {
-        float val = expf(-(float)i / tau);
-        float h_stress[6] = {val, 0, 0, 0, 0, 0};
-        CUDA_CHECK(cudaMemcpy(d_stress, h_stress, 6 * sizeof(float),
-                               cudaMemcpyHostToDevice));
-        corr.push_sample(d_stress);
-    }
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    int buf_size = CORR_LEVELS * CORR_POINTS * STRESS_COMPONENTS;
-    std::vector<float> h_corr(buf_size);
-    std::vector<int> h_counts(CORR_LEVELS * CORR_POINTS);
-    int total_levels;
-    corr.get_results(h_corr.data(), h_counts.data(), &total_levels);
-
-    float c0 = h_corr[0] / h_counts[0];
-    float c1 = h_corr[STRESS_COMPONENTS] / h_counts[1];
-    EXPECT_GT(c0, c1) << "Autocorrelation should decay with lag";
-
-    corr.free();
-    free_device(d_stress);
-}
+#include <vector>
 
 namespace {
-std::vector<std::array<double, 6>> push_series(MultipleTauCorrelator& corr, int n, unsigned seed) {
+
+// [n][nch] AR(1) signals x_c(t) = phi x_c(t-1) + noise; channel c+1 also
+// carries a delayed copy of channel c so cross-correlations are nonzero.
+std::vector<double> make_series(int n, int nch, double phi, unsigned seed, int delay = 3) {
     std::mt19937 rng(seed);
-    std::normal_distribution<float> g(0.0f, 1.0f);
-    std::vector<std::array<double, 6>> series(n);
-    float* d;
-    CUDA_CHECK(cudaMalloc(&d, 6 * sizeof(float)));
-    float ar[6] = {0, 0, 0, 0, 0, 0};
-    for (int i = 0; i < n; i++) {
-        float h[6];
-        for (int c = 0; c < 6; c++) {
-            ar[c] = 0.8f * ar[c] + g(rng);   // correlated AR(1) signal
-            h[c] = ar[c];
-            series[i][c] = h[c];
+    std::normal_distribution<double> g(0.0, 1.0);
+    std::vector<double> s((size_t)n * nch), ar(nch, 0.0);
+    for (int t = 0; t < n; t++)
+        for (int c = 0; c < nch; c++) {
+            ar[c] = phi * ar[c] + g(rng);
+            double x = ar[c] + 0.25;   // nonzero mean
+            if (c > 0 && t >= delay) x += 0.5 * s[(size_t)(t - delay) * nch + c - 1];
+            s[(size_t)t * nch + c] = x;
         }
-        CUDA_CHECK(cudaMemcpy(d, h, sizeof(h), cudaMemcpyHostToDevice));
-        corr.push_sample(d);
+    return s;
+}
+
+void push_all(MultipleTauCorrelator& corr, const std::vector<double>& s, int chunk = 4096) {
+    const int nch = corr.nchannels;
+    const int n = (int)(s.size() / nch);
+    double* d = nullptr;
+    CUDA_CHECK(cudaMalloc(&d, (size_t)chunk * nch * sizeof(double)));
+    for (int t0 = 0; t0 < n; t0 += chunk) {
+        int k = std::min(chunk, n - t0);
+        CUDA_CHECK(cudaMemcpy(d, s.data() + (size_t)t0 * nch, (size_t)k * nch * sizeof(double),
+                              cudaMemcpyHostToDevice));
+        corr.push_batch(d, k);
     }
     CUDA_CHECK(cudaDeviceSynchronize());
     CUDA_CHECK(cudaFree(d));
-    return series;
 }
 
-double direct_corr(const std::vector<std::array<double, 6>>& s, int lag, int c, long long* count) {
+// <x_a(t) x_b(t - lag)> over a series of block averages of size `block`.
+double direct(const std::vector<double>& s, int nch, int a, int b, int block, int lag,
+              unsigned long long* count) {
+    const int n = (int)(s.size() / nch) / block;
+    std::vector<double> xa(n), xb(n);
+    for (int i = 0; i < n; i++) {
+        double sa = 0, sb = 0;
+        for (int k = 0; k < block; k++) {
+            sa += s[((size_t)i * block + k) * nch + a];
+            sb += s[((size_t)i * block + k) * nch + b];
+        }
+        xa[i] = sa / block;
+        xb[i] = sb / block;
+    }
     double sum = 0;
-    long long n = 0;
-    for (size_t t = lag; t < s.size(); t++, n++) sum += s[t][c] * s[t - lag][c];
-    *count = n;
-    return n ? sum / n : 0.0;
+    unsigned long long cnt = 0;
+    for (int t = lag; t < n; t++, cnt++) sum += xa[t] * xb[t - lag];
+    *count = cnt;
+    return cnt ? sum / cnt : 0.0;
 }
+
 }  // namespace
 
-// After the level-0 ring buffer wraps, every lag must keep accumulating:
-// with 64 samples lag 15 has 64 - 15 = 49 pairs (the previous version used
-// the wrapped insert index as occupancy and counted only 4).
-TEST(Correlator, Level0MatchesDirectCalculationAfterWrap) {
-    MultipleTauCorrelator corr;
-    corr.allocate();
-    auto s = push_series(corr, 64, 7);
-    auto rows = corr.results();
-    for (int lag = 0; lag < CORR_POINTS; lag++) {
-        ASSERT_LT(lag, (int)rows.size());
-        const auto& r = rows[lag];
-        EXPECT_EQ(r.lag_samples, lag);
-        for (int c = 0; c < 6; c++) {
-            long long n;
-            double ref = direct_corr(s, lag, c, &n);
-            EXPECT_EQ(r.count, n) << "lag " << lag;
-            EXPECT_NEAR(r.c[c], ref, 1e-5 * (1 + std::fabs(ref))) << "lag " << lag << " comp " << c;
+// Every reported value equals the direct estimate over the block averages
+// of its level (lags p/m..p-1 at levels > 0), for auto and both time orders
+// of a cross pair, including after the ring buffers wrap.
+TEST(Correlator, MatchesBlockAveragedDirectCalculation) {
+    for (int m : {2, 4}) {
+        const int p = 16, nch = 3;
+        MultipleTauCorrelator corr;
+        corr.allocate(nch, {make_int2(0, 0), make_int2(1, 0), make_int2(0, 1), make_int2(2, 2)}, p, m);
+        auto s = make_series(5000, nch, 0.9, 7 + m);
+        push_all(corr, s);
+        int checked = 0;
+        for (const auto& r : corr.results()) {
+            long long block = 1;
+            int level = 0;
+            while (r.lag_samples / block >= p) { block *= m; level++; }
+            ASSERT_EQ(r.lag_samples % block, 0);
+            int k = (int)(r.lag_samples / block);
+            if (level > 0) EXPECT_GE(k, p / m);
+            for (int q = 0; q < corr.npairs; q++) {
+                unsigned long long cnt;
+                int2 ab = corr.pairs()[q];
+                double ref = direct(s, nch, ab.x, ab.y, (int)block, k, &cnt);
+                ASSERT_EQ(r.count, cnt) << "lag " << r.lag_samples;
+                EXPECT_NEAR(r.c[q], ref, 1e-9 * (1 + std::fabs(ref)))
+                    << "m " << m << " lag " << r.lag_samples << " pair " << q;
+            }
+            checked++;
         }
+        EXPECT_GT(checked, p + 3 * (p - p / m));
+        corr.free();
     }
-    EXPECT_EQ(rows[15].count, 49);
+}
+
+TEST(Correlator, MeansAndSampleCount) {
+    MultipleTauCorrelator corr;
+    corr.allocate_auto(2);
+    auto s = make_series(1234, 2, 0.5, 3);
+    push_all(corr, s, 100);
+    EXPECT_EQ(corr.nsamples(), 1234ull);
+    auto mu = corr.means();
+    for (int c = 0; c < 2; c++) {
+        double ref = 0;
+        for (int t = 0; t < 1234; t++) ref += s[(size_t)t * 2 + c];
+        EXPECT_NEAR(mu[c], ref / 1234, 1e-12);
+    }
     corr.free();
 }
 
-// Level 1 holds block averages of CORR_POINTS samples; its lag k is
-// k * CORR_POINTS sampling intervals and lag 0 is not reported.
-TEST(Correlator, Level1LagsAndValues) {
+// Block averaging biases the coarse levels; with p = 16, m = 2 the estimate
+// of a smooth correlation function stays within 1% of the exact (direct)
+// estimate from the same data wherever C(t) is not small. m = p (the old
+// fixed setting) is several times worse.
+TEST(Correlator, BlockAveragingBiasIsSmallForM2) {
+    const int n = 1 << 18;
+    auto s = make_series(n, 1, 0.995, 21, 0);   // tau ~ 200 samples
+    auto worst = [&](int p, int m) {
+        MultipleTauCorrelator corr;
+        corr.allocate_auto(1, p, m);
+        push_all(corr, s, 1 << 15);
+        unsigned long long c0n;
+        const double c0 = direct(s, 1, 0, 0, 1, 0, &c0n);
+        double err = 0;
+        for (const auto& r : corr.results()) {
+            if (r.lag_samples > 4000) break;
+            unsigned long long cnt;
+            double ref = direct(s, 1, 0, 0, 1, (int)r.lag_samples, &cnt);
+            if (ref - 0.0625 < 0.2 * (c0 - 0.0625)) continue;   // mean^2 = 0.0625
+            err = std::max(err, std::fabs(r.c[0] - ref) / (ref - 0.0625));
+        }
+        corr.free();
+        return err;
+    };
+    double e2 = worst(16, 2), e16 = worst(16, 16);
+    EXPECT_LT(e2, 0.01) << "p=16 m=2 relative bias";
+    EXPECT_GT(e16, 2.0 * e2) << "p=16 m=16 should be clearly worse";
+    printf("max relative bias where C > 0.2 C(0): m=2 %.2e, m=16 %.2e\n", e2, e16);
+}
+
+TEST(Correlator, SnapshotRestoresState) {
     MultipleTauCorrelator corr;
-    corr.allocate();
-    const int n = CORR_POINTS * 40;
-    auto s = push_series(corr, n, 11);
-    std::vector<std::array<double, 6>> blocks(n / CORR_POINTS);
-    for (size_t b = 0; b < blocks.size(); b++)
-        for (int c = 0; c < 6; c++) {
-            double sum = 0;
-            for (int k = 0; k < CORR_POINTS; k++) sum += s[b * CORR_POINTS + k][c];
-            blocks[b][c] = sum / CORR_POINTS;
-        }
-    auto rows = corr.results();
-    int checked = 0;
-    for (const auto& r : rows) {
-        if (r.lag_samples < CORR_POINTS) continue;
-        if (r.lag_samples >= (long long)CORR_POINTS * CORR_POINTS) break;
-        ASSERT_EQ(r.lag_samples % CORR_POINTS, 0);
-        int lag = (int)(r.lag_samples / CORR_POINTS);
-        EXPECT_GE(lag, 1);
-        for (int c = 0; c < 6; c++) {
-            long long cnt;
-            double ref = direct_corr(blocks, lag, c, &cnt);
-            EXPECT_EQ(r.count, cnt);
-            EXPECT_NEAR(r.c[c], ref, 1e-4 * (1 + std::fabs(ref)));
-        }
-        checked++;
+    corr.allocate_auto(2);
+    auto s = make_series(300, 2, 0.8, 5);
+    push_all(corr, s);
+    corr.save_snapshot();
+    auto before = corr.results();
+    push_all(corr, make_series(77, 2, 0.8, 6));
+    corr.restore_snapshot();
+    CUDA_CHECK(cudaDeviceSynchronize());
+    auto after = corr.results();
+    ASSERT_EQ(before.size(), after.size());
+    for (size_t i = 0; i < before.size(); i++) {
+        EXPECT_EQ(before[i].count, after[i].count);
+        EXPECT_EQ(before[i].c, after[i].c);
     }
-    EXPECT_EQ(checked, CORR_POINTS - 1);
+    EXPECT_EQ(corr.nsamples(), 300ull);
     corr.free();
+}
+
+TEST(Correlator, RejectsBadParameters) {
+    MultipleTauCorrelator corr;
+    EXPECT_THROW(corr.allocate_auto(2, 16, 3), std::invalid_argument);
+    EXPECT_THROW(corr.allocate(2, {make_int2(0, 2)}), std::invalid_argument);
+    EXPECT_THROW(corr.allocate(2, {}), std::invalid_argument);
 }

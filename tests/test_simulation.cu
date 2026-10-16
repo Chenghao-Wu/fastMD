@@ -61,10 +61,11 @@ std::string write_melt(const std::string& path, int nchains, int len, float dens
     return path;
 }
 
-std::unique_ptr<Simulation> make_sim(const std::string& data, const std::string& extra, int nsteps) {
-    std::string conf = "sim_test_" + std::to_string(std::hash<std::string>{}(extra)) + ".conf";
+std::unique_ptr<Simulation> make_sim(const std::string& data, const std::string& extra, int nsteps,
+                                     const std::string& ensemble = "nvt_nh 1.0 1.0 0.5 3") {
+    std::string conf = "sim_test_" + std::to_string(std::hash<std::string>{}(extra + ensemble)) + ".conf";
     std::ofstream(conf) << "ntypes 1\nrc 2.5\nskin 0.3\ndt 0.004\nnsteps " << nsteps << "\n"
-                        << "nvt_nh 1.0 1.0 0.5 3\nlj 0 0 1.0 1.0\nbond_type 0 30.0 1.5 1.0 1.0\n"
+                        << ensemble << "\nlj 0 0 1.0 1.0\nbond_type 0 30.0 1.5 1.0 1.0\n"
                         << "angle_type 0 3.0 180.0\nlammps_data_file " << data << "\n" << extra;
     TopologyData topo;
     SimParams p = parse_config(conf, topo);
@@ -137,4 +138,25 @@ TEST(Simulation, DeviceMaintainedListIsComplete) {
                          (double)std::fabs(f_dev[i].z - f_new[i].z)});
     }
     EXPECT_LT(dmax, 1e-4 * fmax);
+}
+
+// NVE (velocity Verlet, no thermostat) with energy-shifted LJ conserves the
+// total energy; the lattice start relaxes violently, so this also exercises
+// large KE/PE exchange.
+TEST(Simulation, NVEConservesEnergy) {
+    std::string data = write_melt("sim_nve.data", 20, 25, 0.85f, 5);
+    auto sim = make_sim(data, "pair_shift yes\n", 4000, "nve");
+    auto total = [&] {
+        ThermoOutput t = sim->thermo();
+        return (double)t.kinetic_energy + t.potential_energy;   // per atom
+    };
+    sim->run(200);   // let the lattice start relax a little
+    const double e0 = total();
+    double worst = 0;
+    for (int k = 0; k < 20; k++) {
+        sim->run(200);
+        worst = std::max(worst, std::fabs(total() - e0));
+    }
+    EXPECT_LT(worst, 2e-3 * std::fabs(e0)) << "E0 per atom " << e0;
+    printf("NVE: max |E - E0| per atom %.3e (E0 %.4f)\n", worst, e0);
 }

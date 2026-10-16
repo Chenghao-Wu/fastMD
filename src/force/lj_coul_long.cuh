@@ -18,4 +18,5 @@ void launch_lj_coul_long_kernel(const float4* __restrict__ pos,
                                  float rc2, float L, float inv_L,
                                  cudaStream_t stream = 0, int tpa = 0,
                                  const float* d_box = nullptr,
-                                 bool ev = true);   // false: skip per-atom energy and virial
+                                 bool ev = true,    // false: skip per-atom energy and virial
+                                 bool shift = false);   // energy-shift the LJ part

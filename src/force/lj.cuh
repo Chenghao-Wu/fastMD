@@ -21,7 +21,8 @@ void launch_lj_kernel(const float4* __restrict__ pos,
                        float force_cap = 0.0f,
                        int tpa = 0,    // threads per atom: 1,2,4,8 or 0 = heuristic
                        const float* d_box = nullptr,   // {L, 1/L} on the device overrides L
-                       bool ev = true);   // false: skip per-atom energy (force.w = 0) and virial
+                       bool ev = true,    // false: skip per-atom energy (force.w = 0) and virial
+                       bool shift = false);   // energy-shifted LJ (U(rc) = 0)
 
 // Host: (r_cap, U(r_cap)) per type pair for a force cap; r_cap = 0 when the
 // pair never reaches the cap (eps == 0).

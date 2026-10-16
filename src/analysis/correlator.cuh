@@ -3,51 +3,69 @@
 #include <string>
 #include <vector>
 
-static constexpr int CORR_LEVELS = 16;
-static constexpr int CORR_POINTS = 16;   // points per level = block-averaging factor
-static constexpr int STRESS_COMPONENTS = 6;
-
 // Multiple-tau correlator (Ramirez et al., J. Chem. Phys. 133, 154103 (2010))
-// for the six stress components, run entirely on the device.
+// for a vector of `nchannels` signals, run entirely on the device.
 //
-// Level 0 receives every sample; every CORR_POINTS samples of level l are
-// averaged into one sample of level l+1. At level l, lag k corresponds to
-// k * CORR_POINTS^l sampling intervals. Level 0 reports lags 0..P-1; higher
-// levels report lags 1..P-1 only (lag 0 of block averages is not C(0), and
-// shorter lags are resolved by the finer level).
+// Level 0 receives every sample and holds lags 0..p-1. Every m samples of
+// level l are averaged into one sample of level l+1, whose lags p/m..p-1
+// (in units of m^(l+1) samples) continue where level l stops; shorter lags
+// of a coarse level are resolved better by the finer one. Correlations are
+// accumulated for a list of ordered channel pairs (a, b):
+//     C_ab(k) = < x_a(t) x_b(t - k) >,
+// so (a, a) gives autocorrelations and (a, b) / (b, a) the two time orders
+// of a cross-correlation. Accuracy improves with p/m; p = 16, m = 2 (the
+// LAMMPS fix ave/correlate/long default) keeps the block-averaging bias of
+// smooth correlation functions well below a percent. Channel means are kept
+// so that fluctuation correlations <dx_a(t) dx_b(0)> = C_ab - mean_a mean_b
+// can be formed afterwards.
+//
+// All state lives in one device allocation, so a rollback snapshot is a
+// single copy.
 struct MultipleTauCorrelator {
-    float*  d_stress_buf = nullptr;   // [levels][points][6] ring buffers
-    double* d_corr = nullptr;         // [levels][points][6] accumulated products
-    int*    d_counts = nullptr;       // [levels][points] number of products
-    int*    d_insert_idx = nullptr;   // [levels] next ring-buffer slot
-    int*    d_fill = nullptr;         // [levels] samples held (saturates at points)
-    double* d_block_accum = nullptr;  // [levels][6] running block sums
-    int*    d_block_count = nullptr;  // [levels]
-    char*   d_snapshot = nullptr;     // packed copy of all of the above
+    int nchannels = 0, npairs = 0;
+    int p = 16, m = 2, levels = 0;
 
     struct Row {
-        long long lag_samples;        // lag in sampling intervals
-        double c[STRESS_COMPONENTS];  // <s(t) s(t+lag)>, order xx xy xz yy yz zz
-        long long count;
+        long long lag_samples;            // lag in sampling intervals
+        std::vector<double> c;            // one value per pair
+        unsigned long long count;         // number of products averaged
     };
 
-    void allocate();
+    // levels = 0: enough levels for 2^31 samples.
+    void allocate(int nchannels, const std::vector<int2>& pairs, int p = 16, int m = 2,
+                  int levels = 0);
+    // Autocorrelations of every channel.
+    void allocate_auto(int nchannels, int p = 16, int m = 2, int levels = 0);
     void free();
     void reset();
+    bool allocated() const { return d_state_ != nullptr; }
 
-    // Device-side copy of the full correlator state (for rollback).
     void save_snapshot(cudaStream_t stream = 0);
     void restore_snapshot(cudaStream_t stream = 0);
 
-    // d_stress_6: device pointer to one sample (xx xy xz yy yz zz)
-    void push_sample(const float* d_stress_6, cudaStream_t stream = 0);
+    // One sample: d_sample points to nchannels doubles on the device.
+    void push(const double* d_sample, cudaStream_t stream = 0);
+    // n consecutive samples ([n][nchannels] on the device) in one launch.
+    void push_batch(const double* d_samples, int n, cudaStream_t stream = 0);
 
-    // Raw accumulators (normalise by counts); kept for tests.
-    void get_results(float* h_corr, int* h_counts, int* h_total_levels);
+    std::vector<Row> results() const;          // one row per distinct lag
+    std::vector<double> means() const;          // per channel, over all samples
+    unsigned long long nsamples() const;
+    const std::vector<int2>& pairs() const { return pairs_; }
 
-    // Normalised correlation function, one row per distinct lag.
-    std::vector<Row> results() const;
+    // Text output: header lines (parameters, means), then
+    // "lag_steps  <pair columns...>  count". `columns` names the pairs.
+    void write(const std::string& path, int sample_interval_steps,
+               const std::vector<std::string>& columns,
+               const std::string& extra_header = "") const;
 
-    // Write "lag_steps C_xx C_xy C_xz C_yy C_yz C_zz count" text output.
-    void write(const std::string& path, int sample_interval_steps) const;
+private:
+    std::vector<int2> pairs_;
+    int2* d_pairs_ = nullptr;
+    char* d_state_ = nullptr;
+    char* d_snapshot_ = nullptr;
+    size_t state_bytes_ = 0;
+    struct Layout {
+        size_t buf, corr, count, idx, fill, accum, acount, sum, nsamp;
+    } off_{};
 };
