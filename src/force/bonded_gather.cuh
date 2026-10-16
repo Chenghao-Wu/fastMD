@@ -27,7 +27,7 @@ struct BondedParams {
     const TableParams* bond_table_params = nullptr;
     const float4* bond_table_data = nullptr;
 
-    int angle_style = 0;       // 0 none, 1 harmonic, 2 table
+    int angle_style = 0;       // 0 none, 1 harmonic, 2 table, 3 cosine
     const AngleParams* angle = nullptr;
     const int* angle_table_idx = nullptr;
     const TableParams* angle_table_params = nullptr;

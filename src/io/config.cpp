@@ -110,7 +110,7 @@ SimParams parse_config(std::istream& in, const std::string& filename, TopologyDa
     std::vector<Table> table_entries;
     std::vector<BondedTable> bond_table_entries, angle_table_entries;
     std::vector<Fene> fene_entries;
-    std::vector<Angle> angle_entries;
+    std::vector<Angle> angle_entries, cosine_entries;
     std::vector<HBond> hbond_entries;
     std::vector<Dih> dih_entries;
 
@@ -127,7 +127,7 @@ SimParams parse_config(std::istream& in, const std::string& filename, TopologyDa
         const std::string& key = a.key();
 
         static const std::set<std::string> repeatable = {
-            "lj", "lj_type", "table", "bond_type", "angle_type", "bond_harmonic",
+            "lj", "lj_type", "table", "bond_type", "angle_type", "angle_cosine", "bond_harmonic",
             "dihedral_opls", "bond_table", "angle_table"};
         if (!repeatable.count(key) && !seen.insert(key).second)
             a.fail("specified more than once");
@@ -299,6 +299,10 @@ SimParams parse_config(std::istream& in, const std::string& filename, TopologyDa
             e.theta0_deg = (float)a.real("theta0");
             if (e.theta0_deg < 0 || e.theta0_deg > 180) a.fail("<theta0> must be in [0, 180] degrees");
             angle_entries.push_back(e);
+        } else if (key == "angle_cosine") {
+            Angle e{a.line(), (int)a.integer("t"), 0, 0};
+            e.k = (float)a.real("K");
+            cosine_entries.push_back(e);
         } else if (key == "bond_table" || key == "angle_table") {
             bool angle = key == "angle_table";
             BondedTable e{a.line(), (int)a.integer("t"), "", "",
@@ -460,6 +464,9 @@ SimParams parse_config(std::istream& in, const std::string& filename, TopologyDa
         if ((int)vec.size() <= t) vec.resize(t + 1, zero);
         vec[t] = value;
     };
+    if (!angle_entries.empty() + !cosine_entries.empty() + !angle_table_entries.empty() > 1)
+        throw std::runtime_error(filename + ": use only one angle style (angle_type, angle_cosine "
+                                 "or angle_table)");
     std::vector<char> fene_set, hbond_set, angle_set, dih_set;
     auto mark = [&](std::vector<char>& set, int t, int line, const char* what) {
         if ((int)set.size() <= t) set.resize(t + 1, 0);
@@ -481,6 +488,11 @@ SimParams parse_config(std::istream& in, const std::string& filename, TopologyDa
               e.line, "angle_type", AngleParams{0, 0});
         mark(angle_set, e.t, e.line, "angle_type");
     }
+    for (auto& e : cosine_entries) {
+        place(topo.angle_params, e.t, AngleParams{e.k, 0.0f}, e.line, "angle_cosine", AngleParams{0, 0});
+        mark(angle_set, e.t, e.line, "angle_cosine");
+    }
+    topo.angle_cosine = !cosine_entries.empty();
     for (auto& e : dih_entries) {
         place(topo.dihedral_params, e.t, e.p, e.line, "dihedral_opls", OPLSDihedralParams{0, 0, 0, 0});
         mark(dih_set, e.t, e.line, "dihedral_opls");
@@ -494,8 +506,6 @@ SimParams parse_config(std::istream& in, const std::string& filename, TopologyDa
     if (nbond_styles > 1)
         throw std::runtime_error(filename + ": use only one bond style (bond_type FENE, "
                                  "bond_harmonic or bond_table)");
-    if (!angle_entries.empty() && !angle_table_entries.empty())
-        throw std::runtime_error(filename + ": angle_type and angle_table cannot both be used");
 
     auto load_bonded_tables = [&](std::vector<BondedTable>& entries, TableKind kind,
                                   std::vector<int>& idx_vec, std::vector<TableParams>& params_vec,

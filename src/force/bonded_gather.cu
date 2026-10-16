@@ -63,6 +63,8 @@ __global__ void bonded_gather_kernel(const float4* __restrict__ pos, float4* __r
                 AngleTerm at;
                 if (bp.angle_style == 1) {
                     at = harmonic_angle_term(dij, dkj, bp.angle[a.w]);
+                } else if (bp.angle_style == 3) {
+                    at = cosine_angle_term(dij, dkj, bp.angle[a.w]);
                 } else {
                     int tidx = bp.angle_table_idx[a.w];
                     if (tidx < 0) continue;

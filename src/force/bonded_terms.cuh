@@ -126,6 +126,22 @@ __device__ __forceinline__ AngleTerm harmonic_angle_term(float3 dij, float3 dkj,
     return t;
 }
 
+// Cosine angle E = K (1 + cos theta) (LAMMPS angle_style cosine; minimum at
+// theta = 180 degrees, the usual Kremer-Grest bending potential). dU/dtheta
+// = -K sin(theta), so the projection prefactor is exactly -K: no division by
+// sin(theta) near straight angles.
+__device__ __forceinline__ AngleTerm cosine_angle_term(float3 dij, float3 dkj, AngleParams p) {
+    float rij2 = dij.x * dij.x + dij.y * dij.y + dij.z * dij.z;
+    float rkj2 = dkj.x * dkj.x + dkj.y * dkj.y + dkj.z * dkj.z;
+    float rij_inv = rsqrtf(rij2), rkj_inv = rsqrtf(rkj2);
+    float cos_theta = (dij.x * dkj.x + dij.y * dkj.y + dij.z * dkj.z) * rij_inv * rkj_inv;
+    cos_theta = fminf(fmaxf(cos_theta, -1.0f), 1.0f);
+    AngleTerm t;
+    angle_project(dij, dkj, rij2, rkj2, rij_inv, rkj_inv, cos_theta, -p.k_theta, t);
+    t.e = p.k_theta * (1.0f + cos_theta);
+    return t;
+}
+
 // Tabulated angle; table column y holds -dU/dtheta per radian.
 __device__ __forceinline__ AngleTerm table_angle_term(float3 dij, float3 dkj, const TableParams& tp,
                                                       const float4* __restrict__ tbl) {

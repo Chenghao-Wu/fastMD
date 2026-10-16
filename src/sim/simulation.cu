@@ -161,7 +161,7 @@ void Simulation::upload_force_field() {
     bp.angle_table_idx = d_angle_table_idx_;
     bp.angle_table_params = d_angle_table_params_;
     bp.angle_table_data = d_angle_table_data_;
-    bp.angle_style = d_angle_table_data_ ? 2 : d_angle_params_ ? 1 : 0;
+    bp.angle_style = d_angle_table_data_ ? 2 : d_angle_params_ ? (topo_.angle_cosine ? 3 : 1) : 0;
     bp.dihedral_type = t_.dihedral_type;
     bp.opls = d_dihedral_params_;
     bp.dihedral_style = d_dihedral_params_ ? 1 : 0;
@@ -437,7 +437,7 @@ void Simulation::launch_forces(bool ev) {
                                   t_.nangles, L, inv_L, st);
     } else if (t_.nangles > 0 && d_angle_params_) {
         launch_angle_kernel(p_.pos, p_.force, d_virial_, t_.angles, d_angle_params_,
-                            t_.nangles, L, inv_L, st);
+                            t_.nangles, L, inv_L, st, topo_.angle_cosine);
     }
     if (t_.ndihedrals > 0 && d_dihedral_params_) {
         launch_dihedral_opls_kernel(p_.pos, p_.force, d_virial_, t_.dihedrals,

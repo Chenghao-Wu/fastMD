@@ -78,6 +78,8 @@ TEST(Config, RejectsUnknownAndDuplicateKeys) {
     expect_reject("nve_and_langevin", std::string(kBase) + "lj 0 0 1 1\nnve\n", "only one ensemble");
     expect_reject("nve_args", "ntypes 1\nnve 1.0\n", "unexpected extra argument");
     expect_reject("pair_shift_bad", std::string(kBase) + "pair_shift maybe\n", "yes");
+    expect_reject("two_angle_styles", std::string(kBase) + "lj 0 0 1 1\nangle_type 0 3 180\n"
+                  "angle_cosine 0 1.5\n", "only one angle style");
     expect_reject("stress_pm", std::string(kBase) + "stress 1 10 s.dat 16 3\n", "multiple of m");
     expect_reject("dup_lj", std::string(kBase) + "lj 0 0 1 1\nlj 0 0 2 1\n", "given twice");
 }

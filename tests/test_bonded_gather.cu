@@ -136,8 +136,9 @@ Result run(const Chains& c, int bond_style, int angle_style, bool gather,
         else
             launch_bond_table_kernel(d_pos, d_force, d_vir, topo.bonds, topo.bond_type, d_tidx, d_tpb, d_btab,
                                      topo.nbonds, L, iL);
-        if (angle_style == 1)
-            launch_angle_kernel(d_pos, d_force, d_vir, topo.angles, d_ang, topo.nangles, L, iL);
+        if (angle_style == 1 || angle_style == 3)
+            launch_angle_kernel(d_pos, d_force, d_vir, topo.angles, d_ang, topo.nangles, L, iL, 0,
+                                angle_style == 3);
         else
             launch_angle_table_kernel(d_pos, d_force, d_vir, topo.angles, d_tidx, d_tpa, d_atab,
                                       topo.nangles, L, iL);
@@ -182,7 +183,7 @@ TEST(BondedGather, MatchesScatterKernelsForAllStyles) {
     std::vector<int> identity(c.pos.size());
     std::iota(identity.begin(), identity.end(), 0);
     for (int bs : {1, 2, 3})
-        for (int as : {1, 2}) {
+        for (int as : {1, 2, 3}) {
             std::string what = "bond style " + std::to_string(bs) + " angle style " + std::to_string(as);
             Result ref = run(c, bs, as, false, identity);
             for (int tpa : {1, 2, 4, 8})
@@ -201,4 +202,30 @@ TEST(BondedGather, PermutationInvariant) {
     std::shuffle(shuffled.begin(), shuffled.end(), std::mt19937(3));
     expect_same(run(c, 1, 1, false, identity), run(c, 1, 1, true, shuffled), "FENE+angle shuffled");
     expect_same(run(c, 2, 2, false, identity), run(c, 2, 2, true, shuffled), "harmonic+table shuffled");
+}
+
+// Forces of all bonded terms (harmonic bonds, cosine angles, OPLS
+// dihedrals) are minus the gradient of the summed per-atom energies.
+TEST(BondedGather, ForcesAreEnergyGradient) {
+    Chains c = make_chains(11);
+    std::vector<int> identity(c.pos.size());
+    std::iota(identity.begin(), identity.end(), 0);
+    auto energy = [&](const Chains& cc) {
+        Result r = run(cc, 2, 3, true, identity, 2);
+        double e = 0;
+        for (auto& v : r.f) e += v.w;
+        return e;
+    };
+    Result r0 = run(c, 2, 3, true, identity, 2);
+    const float h = 2e-3f;
+    for (int i : {0, 5, 17, 40, 60, 90}) {
+        for (int d = 0; d < 3; d++) {
+            Chains cp = c, cm = c;
+            (&cp.pos[i].x)[d] += h;
+            (&cm.pos[i].x)[d] -= h;
+            double fd = -(energy(cp) - energy(cm)) / (2.0 * h);
+            double f = (&r0.f[i].x)[d];
+            EXPECT_NEAR(f, fd, 1e-2 * std::max(1.0, std::fabs(f))) << "atom " << i << " dim " << d;
+        }
+    }
 }
