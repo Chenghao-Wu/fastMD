@@ -6,6 +6,7 @@
 #include "../force/wall.cuh"
 #include "../analysis/film.cuh"
 #include "../analysis/layer_stress.cuh"
+#include "../integrate/fire.cuh"
 #include "../force/lj_coul_long.cuh"
 #include "../force/ewald_recip.cuh"
 #include "../force/ewald_excl.cuh"
@@ -912,6 +913,11 @@ void Simulation::run() {
     t_start_ = last_progress_time_ = std::chrono::steady_clock::now();
     last_progress_step_ = step_;
 
+    if (params_.min_ftol > 0.0f) {
+        MinimizeResult m = minimize(params_.min_ftol, params_.min_max_iter, params_.min_dt_max);
+        printf("Minimization: %s after %d FIRE iterations, max |F| = %.3e, PE = %.6g\n",
+               m.converged ? "converged" : "NOT converged", m.iterations, m.fmax, m.potential_energy);
+    }
     const int first = step_;
     advance(params_.nsteps, true);
     flush_velocities();
@@ -1044,6 +1050,65 @@ void Simulation::sample_layers() {
                         &d_status_->film_center, layer_spec_,
                         velocities_pending_ ? &d_nh_state_->s_post : nullptr, d_layer_accum_,
                         d_layer_ticket_, d_layer_out_, d_layer_shear_, stream_);
+}
+
+Simulation::MinimizeResult Simulation::minimize(float ftol, int max_iter, float dt_max) {
+    if (!(ftol > 0.0f) || max_iter < 1) throw std::invalid_argument("minimize: ftol > 0, max_iter >= 1");
+    flush_velocities();
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+    read_status();
+    invalidate_graphs();
+    const int n = params_.natoms;
+    float4* d_vel_save = nullptr;
+    FireState* d_fire = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_vel_save, n * sizeof(float4)));
+    CUDA_CHECK(cudaMalloc(&d_fire, sizeof(FireState)));
+    CUDA_CHECK(cudaMemcpyAsync(d_vel_save, p_.vel, n * sizeof(float4), cudaMemcpyDeviceToDevice, stream_));
+    CUDA_CHECK(cudaMemsetAsync(p_.vel, 0, n * sizeof(float4), stream_));
+    FireParams fp;
+    fp.dt_max = dt_max;
+    fp.dt_start = std::min(fp.dt_start, dt_max);
+    fire_init(d_fire, fp, stream_);
+    rebuild_neighbors(false);
+    launch_film_center();
+    launch_forces(false);
+    MinimizeResult res{0, 0.0f, 0.0, false};
+    const int check = 20;
+    FireState h{};
+    for (int it = 0; it < max_iter;) {
+        const int k_end = std::min(max_iter, it + check);
+        for (; it < k_end; it++) {
+            launch_fire_reduce(p_.vel, p_.force, n, d_fire, fp, stream_);
+            launch_fire_update(p_.pos, p_.vel, p_.force, p_.pos_ref, &d_status_->max_dr2_bits,
+                               p_.image, n, &d_status_->box, d_fire, stream_);
+            verlet_.step(p_.pos, p_.pos_ref, &d_status_->box, &d_status_->max_dr2_bits, p_.tag,
+                         t_.excl_offsets, t_.excl_list, stream_);
+            launch_forces(false);
+        }
+        if (!validate()) {   // list overflow / grid: rebuild, recompute, restart FIRE
+            rebuild_neighbors(false);
+            launch_forces(false);
+            CUDA_CHECK(cudaMemsetAsync(p_.vel, 0, n * sizeof(float4), stream_));
+            fire_init(d_fire, fp, stream_);
+            continue;
+        }
+        // max |F| at the current positions
+        launch_fire_reduce(p_.vel, p_.force, n, d_fire, fp, stream_);
+        CUDA_CHECK(cudaMemcpyAsync(&h, d_fire, sizeof(FireState), cudaMemcpyDeviceToHost, stream_));
+        CUDA_CHECK(cudaStreamSynchronize(stream_));
+        res.fmax = std::sqrt(h.fmax2);
+        if (!std::isfinite(res.fmax)) throw std::runtime_error("minimize: forces became non-finite");
+        if (res.fmax < ftol) { res.converged = true; break; }
+    }
+    res.iterations = std::min(max_iter, h.iterations);
+    CUDA_CHECK(cudaMemcpyAsync(p_.vel, d_vel_save, n * sizeof(float4), cudaMemcpyDeviceToDevice, stream_));
+    rebuild_neighbors(false);
+    launch_forces(true);
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+    CUDA_CHECK(cudaFree(d_vel_save));
+    CUDA_CHECK(cudaFree(d_fire));
+    res.potential_energy = (double)thermo().potential_energy * n;
+    return res;
 }
 
 std::vector<double> Simulation::layer_stress() {

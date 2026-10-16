@@ -116,6 +116,9 @@ struct SimParams {
     int   layer_freq = 0;
     char  layer_file[256] = {0};
     int   layer_p = 16, layer_m = 2;
+    float min_ftol = 0.0f;      // minimize before the run (0 = off)
+    int   min_max_iter = 0;
+    float min_dt_max = 0.02f;
 
     // Nosé-Hoover
     Ensemble ensemble = Ensemble::Langevin;

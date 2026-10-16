@@ -96,6 +96,7 @@ add_library(core STATIC
     src/force/bonded_gather.cu
     src/integrate/langevin.cu
     src/integrate/nose_hoover.cu
+    src/integrate/fire.cu
     src/analysis/thermo.cu
     src/analysis/rg.cu
     src/analysis/film.cu

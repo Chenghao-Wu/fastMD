@@ -339,6 +339,13 @@ SimParams parse_config(std::istream& in, const std::string& filename, TopologyDa
                 w.e_shift = (float)(w.eps * (2.0 / 15.0 * sr3 * sr3 * sr3 - sr3));
             }
             params.walls.w[params.walls.n++] = w;
+        } else if (key == "minimize") {
+            // minimize <ftol> <max_iter> [dt_max]: FIRE before the run
+            params.min_ftol = (float)a.positive("ftol");
+            long it = a.integer("max_iter");
+            if (it < 1) a.fail("<max_iter> must be >= 1");
+            params.min_max_iter = (int)it;
+            if (a.more()) params.min_dt_max = (float)a.positive("dt_max");
         } else if (key == "layer_stress") {
             // layer_stress <nlayers> <width> <freq> <file> [p m]
             long n = a.integer("nlayers");

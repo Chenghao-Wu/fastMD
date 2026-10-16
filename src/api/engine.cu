@@ -139,6 +139,10 @@ void Engine::set_tilt(double xy, bool affine) { sim_->set_tilt((float)xy, affine
 std::vector<double> Engine::layer_stress() { return sim_->layer_stress(); }
 int Engine::nlayers() const { return sim_->layer_spec().n; }
 double Engine::layer_width() const { return sim_->layer_spec().width; }
+Engine::MinimizeResult Engine::minimize(double ftol, int max_iter, double dt_max) {
+    Simulation::MinimizeResult r = sim_->minimize((float)ftol, max_iter, (float)dt_max);
+    return {r.iterations, r.fmax, r.potential_energy, r.converged};
+}
 int Engine::nwalls() const { return sim_->walls().n; }
 double Engine::film_center() { return sim_->film_center(); }
 void Engine::remove_walls() { sim_->set_walls(WallSet{}); }

@@ -11,6 +11,7 @@
 #include "../force/pme.cuh"
 #include "../integrate/langevin.cuh"
 #include "../integrate/nose_hoover.cuh"
+#include "../integrate/fire.cuh"
 #include "../analysis/thermo.cuh"
 #include "../analysis/correlator.cuh"
 #include "../analysis/rg.cuh"
@@ -80,6 +81,15 @@ public:
     // state (needs layer_stress); layer k spans
     // [(k - n/2) w, (k + 1 - n/2) w) about the film reference plane.
     std::vector<double> layer_stress();
+    // FIRE energy minimisation at fixed box (velocities are restored
+    // afterwards); converged when max |F| < ftol.
+    struct MinimizeResult {
+        int iterations;
+        float fmax;
+        double potential_energy;   // total
+        bool converged;
+    };
+    MinimizeResult minimize(float ftol, int max_iter, float dt_max = 0.02f);
     const LayerSpec& layer_spec() const { return layer_spec_; }
     // Replace the walls (e.g. remove them after confined preparation).
     void set_walls(const WallSet& walls);

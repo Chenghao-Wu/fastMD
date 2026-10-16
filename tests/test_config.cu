@@ -88,6 +88,7 @@ TEST(Config, RejectsUnknownAndDuplicateKeys) {
     expect_reject("andersen_nu", "ntypes 1\nnvt_andersen 1 1 0\n", "must be > 0");
     expect_reject("friction_kind", std::string(kBase) + "friction_profile cubic 1 1 1\n", "analytic");
     expect_reject("layers_n", std::string(kBase) + "layer_stress 40 2 10 l.dat\n", "[1, 32]");
+    expect_reject("minimize_iter", std::string(kBase) + "minimize 1e-4 0\n", ">= 1");
     expect_reject("stress_pm", std::string(kBase) + "stress 1 10 s.dat 16 3\n", "multiple of m");
     expect_reject("dup_lj", std::string(kBase) + "lj 0 0 1 1\nlj 0 0 2 1\n", "given twice");
 }

@@ -159,6 +159,21 @@ y + iy Ly, z + iz Lz.
              "`layer_stress`.")
         .def_property_readonly("nlayers", &Engine::nlayers)
         .def_property_readonly("layer_width", &Engine::layer_width)
+        .def("minimize", [](Engine& e, double ftol, int max_iter, double dt_max) {
+                 Engine::MinimizeResult r;
+                 {
+                     py::gil_scoped_release release;
+                     r = e.minimize(ftol, max_iter, dt_max);
+                 }
+                 py::dict d;
+                 d["iterations"] = r.iterations;
+                 d["fmax"] = r.fmax;
+                 d["potential_energy"] = r.potential_energy;
+                 d["converged"] = r.converged;
+                 return d;
+             }, py::arg("ftol") = 1e-4, py::arg("max_iter") = 10000, py::arg("dt_max") = 0.02,
+             "FIRE energy minimisation at fixed box (velocities restored afterwards). Returns "
+             "{iterations, fmax, potential_energy, converged}.")
         .def_property_readonly("nwalls", &Engine::nwalls, "Number of active walls.")
         .def_property_readonly("film_center", &Engine::film_center,
                                "Film reference plane: mass-weighted mean unwrapped coordinate "

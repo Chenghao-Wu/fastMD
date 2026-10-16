@@ -594,3 +594,75 @@ TEST(Simulation, LayerCorrelationsSumToGlobal) {
         EXPECT_NEAR(sum, ref, 2e-3 * std::fabs(V * V * G[0][2])) << "lag " << L[r][0];
     }
 }
+
+namespace {
+std::unique_ptr<Simulation> sim_from_text(const std::string& name, const std::string& conf) {
+    std::ofstream(name) << conf;
+    SimParams p;
+    TopologyData t;
+    load_config(name, p, t);
+    return std::make_unique<Simulation>(p, std::move(t));
+}
+
+std::string fcc_data(const std::string& path, int cells, float density, float jitter, unsigned seed) {
+    const float a = std::cbrt(4.0f / density), L = cells * a;
+    const float basis[4][3] = {{0, 0, 0}, {0.5f, 0.5f, 0}, {0.5f, 0, 0.5f}, {0, 0.5f, 0.5f}};
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<float> u(-jitter, jitter);
+    std::ostringstream os;
+    const int n = 4 * cells * cells * cells;
+    os << "fcc\n\n" << n << " atoms\n1 atom types\n\n0 " << L << " xlo xhi\n0 " << L << " ylo yhi\n0 "
+       << L << " zlo zhi\n\nMasses\n\n1 1\n\nAtoms # atomic\n\n";
+    int id = 1;
+    for (int x = 0; x < cells; x++)
+        for (int y = 0; y < cells; y++)
+            for (int z = 0; z < cells; z++)
+                for (auto& b : basis)
+                    os << id++ << " 1 " << (x + b[0]) * a + u(rng) << " " << (y + b[1]) * a + u(rng) << " "
+                       << (z + b[2]) * a + u(rng) << "\n";
+    std::ofstream(path) << os.str();
+    return path;
+}
+}  // namespace
+
+TEST(Minimize, TwoParticlesReachLJMinimum) {
+    std::ofstream("min2.data") << "two\n\n2 atoms\n1 atom types\n\n0 10 xlo xhi\n0 10 ylo yhi\n0 10 zlo zhi\n"
+                                  "\nAtoms # atomic\n\n1 1 4.0 5.0 5.0\n2 1 5.5 5.2 5.0\n";
+    auto sim = sim_from_text("min2.conf", "ntypes 1\nrc 2.5\nskin 0.3\ndt 0.005\nnsteps 1\nnve\n"
+                                          "lj 0 0 1.0 1.0\nlammps_data_file min2.data\n");
+    auto r = sim->minimize(1e-5f, 5000);
+    EXPECT_TRUE(r.converged);
+    std::vector<float4> x = sim->positions();
+    const float d = std::sqrt(std::pow(x[1].x - x[0].x, 2) + std::pow(x[1].y - x[0].y, 2) +
+                              std::pow(x[1].z - x[0].z, 2));
+    EXPECT_NEAR(d, std::pow(2.0f, 1.0f / 6.0f), 1e-4f);
+    EXPECT_NEAR(r.potential_energy, -1.0, 1e-4);
+}
+
+TEST(Minimize, PerturbedCrystalReturnsToLattice) {
+    const char* conf = "ntypes 1\nrc 2.5\nskin 0.3\ndt 0.005\nnsteps 1\nnve\nlj 0 0 1.0 1.0\n"
+                       "pair_shift yes\nlammps_data_file %s\n";
+    char buf[512];
+    snprintf(buf, sizeof(buf), conf, fcc_data("fcc_perfect.data", 5, 1.0f, 0.0f, 1).c_str());
+    auto perfect = sim_from_text("fcc_p.conf", buf);
+    snprintf(buf, sizeof(buf), conf, fcc_data("fcc_jitter.data", 5, 1.0f, 0.08f, 2).c_str());
+    auto jitter = sim_from_text("fcc_j.conf", buf);
+    const double e_perfect = perfect->thermo().potential_energy;
+    auto r = jitter->minimize(1e-4f, 20000);
+    EXPECT_TRUE(r.converged) << r.iterations << " iterations, fmax " << r.fmax;
+    EXPECT_NEAR(r.potential_energy / 500.0, e_perfect, 1e-5 * std::fabs(e_perfect));
+}
+
+TEST(Minimize, BeadSpringMeltConvergesAndKeepsVelocities) {
+    std::string data = write_melt("min_melt.data", 12, 20, 0.85f, 81);
+    auto sim = make_sim(data, "", 10, "nvt_langevin 1.0 1.0 1.0 3");
+    std::vector<float4> v0 = sim->velocities();
+    const double e0 = sim->thermo().potential_energy;
+    auto r = sim->minimize(1e-3f, 50000);
+    EXPECT_TRUE(r.converged) << r.iterations << " iterations, fmax " << r.fmax;
+    EXPECT_LT(r.potential_energy / 240.0, e0);
+    std::vector<float4> v1 = sim->velocities();
+    for (size_t t = 0; t < v0.size(); t++) EXPECT_EQ(v0[t].x, v1[t].x);
+    sim->run(100);   // dynamics continue normally
+    EXPECT_TRUE(std::isfinite(sim->thermo().temperature));
+}

@@ -71,6 +71,8 @@ public:
     std::vector<double> layer_stress();
     int    nlayers() const;
     double layer_width() const;
+    struct MinimizeResult { int iterations; double fmax, potential_energy; bool converged; };
+    MinimizeResult minimize(double ftol, int max_iter, double dt_max);
     int  nwalls() const;
     double film_center();   // film reference plane (needs `film <axis>`)
     void remove_walls();

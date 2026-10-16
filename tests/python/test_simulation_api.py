@@ -295,6 +295,16 @@ class SimulationAPITest(unittest.TestCase):
                                    V * P[[0, 1, 2, 0, 0, 1], [0, 1, 2, 1, 2, 2]],
                                    rtol=1e-4, atol=1e-2)
 
+    def test_minimize(self):
+        sim = self.make()
+        v0 = sim.velocities
+        e0 = sim.thermo().potential_energy
+        r = sim.minimize(ftol=1e-2, max_iter=50000)
+        self.assertTrue(r["converged"])
+        self.assertLess(r["fmax"], 1e-2)
+        self.assertLess(r["potential_energy"], e0)
+        np.testing.assert_array_equal(sim.velocities, v0)   # restored
+
     def test_errors(self):
         sim = self.make()
         with self.assertRaises(ValueError):
