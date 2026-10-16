@@ -14,6 +14,7 @@ import unittest
 import numpy as np
 
 import fastmd
+from fastmd import analysis as A
 
 SRC = os.environ.get("FASTMD_SOURCE_DIR",
                      os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
@@ -212,6 +213,41 @@ class SimulationAPITest(unittest.TestCase):
         r2 = (d ** 2).sum(axis=2) + np.eye(len(x)) * 100
         self.assertGreater(np.sqrt(r2.min()), 0.7)   # overlaps removed
         self.assertTrue(np.isfinite(sim.forces).all())
+
+    def test_film_pipeline(self):
+        """Generated chains -> push-off -> bulk -> unwrap, compress, anneal, release."""
+        fmd = os.environ.get("FASTMD_BINARY")
+        if not fmd:
+            self.skipTest("FASTMD_BINARY not set")
+        work = os.path.join(self.tmp, "filmpipe")
+        os.makedirs(work, exist_ok=True)
+        tools = os.path.join(SRC, "tools")
+        raw = os.path.join(work, "raw.data")
+
+        def run(*cmd):
+            r = subprocess.run([sys.executable, *cmd], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            return r.stdout
+        run(os.path.join(tools, "make_kg_chains.py"), "--nchains", "80", "--chain-length", "25",
+            "--kbend", "1.5", "--aspect", "2.0", "-o", raw)
+        run(os.path.join(tools, "equilibrate_melt.py"), raw, "--fastmd", fmd, "--kbend", "1.5",
+            "--rc", "2.5", "--soft-steps", "2000", "--cap-steps", "500", "--equil-steps", "4000",
+            "--workdir", os.path.join(work, "bulk"))
+        out = run(os.path.join(tools, "build_film.py"), os.path.join(work, "bulk", "equil_final.data"),
+                  "--fastmd", fmd, "--kbend", "1.5", "--compress-steps", "4000", "--anneal-steps", "1000",
+                  "--release-steps", "3000", "--workdir", os.path.join(work, "film"))
+        sys.path.insert(0, tools)
+        from equilibrate_melt import read_data
+        x, mol, L = read_data(os.path.join(work, "film", "release_final.data"))
+        xb, _, Lb = read_data(os.path.join(work, "bulk", "equil_final.data"))
+        idx = A.chain_index(mol)
+        bonds = np.linalg.norm(np.diff(x[idx], axis=1), axis=2)
+        self.assertLess(bonds.max(), 1.5)                      # no chain was cut
+        z, rho = A.density_profile(x, axis=2, area=L[0] * L[1], bin_width=0.5)
+        t, lo, hi, plateau = A.film_thickness(z, rho)
+        self.assertAlmostEqual(t, Lb[2], delta=0.25 * Lb[2])   # about the bulk-density thickness
+        self.assertGreater(L[2] - (x[:, 2].max() - x[:, 2].min()), 10.0)   # vacuum remains
+        self.assertIn("thickness", out)
 
     def test_errors(self):
         sim = self.make()

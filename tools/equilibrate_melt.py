@@ -31,10 +31,10 @@ sys.path.insert(0, os.path.join(HERE, "..", "python"))
 
 
 def read_data(path):
-    """Unwrapped positions, molecule ids (atom-id order) and box length of a
-    LAMMPS data file written by fastMD or tools/make_kg_chains.py."""
+    """Unwrapped positions, molecule ids (atom-id order) and box edge lengths
+    (Lx, Ly, Lz) of a LAMMPS data file written by fastMD or the tools."""
     lines = open(path).read().splitlines()
-    L = None
+    L = np.zeros(3)
     atoms = []
     section = None
     for line in lines[1:]:
@@ -44,8 +44,8 @@ def read_data(path):
         if tok[0][0].isalpha():
             section = tok[0]
             continue
-        if section is None and len(tok) == 4 and tok[2] == "xlo":
-            L = float(tok[1]) - float(tok[0])
+        if section is None and len(tok) == 4 and tok[2] in ("xlo", "ylo", "zlo"):
+            L["xyz".index(tok[2][0])] = float(tok[1]) - float(tok[0])
         elif section == "Atoms":
             atoms.append(tok)
     atoms.sort(key=lambda t: int(t[0]))

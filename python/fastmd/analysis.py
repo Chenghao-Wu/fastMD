@@ -24,7 +24,8 @@ import numpy as np
 __all__ = [
     "chain_index", "internal_distances", "time_correlation", "msd", "end_to_end_acf",
     "rouse_mode_acf", "self_intermediate_scattering", "stress_relaxation", "storage_loss_moduli",
-    "radius_of_gyration_tensor",
+    "radius_of_gyration_tensor", "film_center", "density_profile", "film_thickness",
+    "conformation_profile",
 ]
 
 
@@ -239,3 +240,91 @@ def storage_loss_moduli(t, G, omega):
     Gp = w[:, 0] * (int_sin(b) - int_sin(a)).sum(axis=1)
     Gpp = w[:, 0] * (int_cos(b) - int_cos(a)).sum(axis=1)
     return Gp, Gpp
+
+
+# --------------------------------------------------------------------------
+# films (normal along `axis`; positions unwrapped along the normal)
+
+def film_center(x, axis=2, masses=None):
+    """Mass-weighted mean coordinate along the film normal (the film
+    reference plane, as fastMD's `film` keyword computes it)."""
+    z = np.asarray(x, dtype=np.float64)[:, axis]
+    return float(np.average(z, weights=masses)) if masses is not None else float(z.mean())
+
+
+def density_profile(x, axis=2, area=1.0, bin_width=0.5, center=None, extent=None):
+    """Number density along the film normal relative to the film centre.
+
+    x: positions (natoms, 3) unwrapped along the normal; area: lateral box
+    area. Returns (bin centres z - z_c, density)."""
+    z = np.asarray(x, dtype=np.float64)[:, axis]
+    c = film_center(x, axis) if center is None else center
+    d = z - c
+    half = extent if extent is not None else np.abs(d).max() + bin_width
+    edges = np.arange(-half, half + bin_width, bin_width)
+    counts, _ = np.histogram(d, bins=edges)
+    return 0.5 * (edges[1:] + edges[:-1]), counts / (area * bin_width)
+
+
+def film_thickness(zc, rho, plateau_fraction=0.3):
+    """Thickness between the dividing surfaces where the density falls to
+    half its plateau value (the mean density over the central
+    `plateau_fraction` of the occupied region). Returns (thickness,
+    z_lo, z_hi, plateau density), positions relative to the film centre."""
+    zc = np.asarray(zc, dtype=np.float64)
+    rho = np.asarray(rho, dtype=np.float64)
+    occ = np.nonzero(rho > 0)[0]
+    a, b = zc[occ[0]], zc[occ[-1]]
+    mid = 0.5 * (a + b)
+    core = np.abs(zc - mid) <= 0.5 * plateau_fraction * (b - a)
+    plateau = rho[core].mean()
+    half = 0.5 * plateau
+    above = rho >= half
+    i_lo = np.argmax(above)
+    i_hi = len(rho) - 1 - np.argmax(above[::-1])
+
+    def cross(i0, i1):   # linear interpolation of rho = half between bins i0, i1
+        r0, r1 = rho[i0], rho[i1]
+        return zc[i0] + (half - r0) * (zc[i1] - zc[i0]) / (r1 - r0) if r1 != r0 else zc[i0]
+    z_lo = cross(i_lo - 1, i_lo) if i_lo > 0 else zc[0]
+    z_hi = cross(i_hi, i_hi + 1) if i_hi + 1 < len(rho) else zc[-1]
+    return z_hi - z_lo, z_lo, z_hi, plateau
+
+
+def conformation_profile(x, mol_ids, axis=2, bin_width=2.0, center=None):
+    """Chain conformations versus depth of the chain centre of mass.
+
+    Returns a dict of arrays per bin of z_cm - z_c: 'z', 'count' (chains),
+    'rg2_par' (in-plane Rg^2), 'rg2_perp' (normal Rg^2), 'p2' (orientational
+    order <(3 cos^2 - 1)/2> of the end-to-end vector relative to the
+    normal), 'end_density' (chain ends per unit length along the normal,
+    divide by the lateral area for a volume density) and 'bead_density'
+    likewise for all beads."""
+    x = np.asarray(x, dtype=np.float64)
+    idx = chain_index(mol_ids)
+    c = x[idx]                                   # (nchains, N, 3)
+    zc0 = film_center(x, axis) if center is None else center
+    com = c.mean(axis=1)
+    d = c - com[:, None, :]
+    others = [k for k in range(3) if k != axis]
+    rg2_perp = (d[:, :, axis] ** 2).mean(axis=1)
+    rg2_par = (d[:, :, others] ** 2).sum(axis=2).mean(axis=1)
+    ree = c[:, -1] - c[:, 0]
+    cos2 = ree[:, axis] ** 2 / (ree ** 2).sum(axis=1)
+    p2 = 1.5 * cos2 - 0.5
+    zcm = com[:, axis] - zc0
+    half = max(np.abs(x[:, axis] - zc0).max(), np.abs(zcm).max()) + bin_width
+    edges = np.arange(-half, half + bin_width, bin_width)
+    k = np.clip(np.digitize(zcm, edges) - 1, 0, len(edges) - 2)
+    nb = len(edges) - 1
+    cnt = np.bincount(k, minlength=nb).astype(float)
+
+    def mean(v):
+        with np.errstate(invalid="ignore", divide="ignore"):
+            return np.bincount(k, weights=v, minlength=nb) / cnt
+    ends = np.concatenate([c[:, 0, axis], c[:, -1, axis]]) - zc0
+    end_hist, _ = np.histogram(ends, bins=edges)
+    bead_hist, _ = np.histogram(x[:, axis] - zc0, bins=edges)
+    return {"z": 0.5 * (edges[1:] + edges[:-1]), "count": cnt, "rg2_par": mean(rg2_par),
+            "rg2_perp": mean(rg2_perp), "p2": mean(p2), "end_density": end_hist / bin_width,
+            "bead_density": bead_hist / bin_width}

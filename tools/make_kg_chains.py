@@ -62,6 +62,8 @@ def random_unit(n, rng):
 
 
 def make_chains(nchains, length, L, bond, rng, kappa=None, cinf=None, min13=1.0):
+    """L: box edge lengths (3,) or a scalar for a cubic box."""
+    L = np.broadcast_to(np.asarray(L, dtype=np.float64), (3,))
     pos = np.empty((nchains, length, 3))
     pos[:, 0] = rng.random((nchains, 3)) * L
     if length == 1:
@@ -87,6 +89,7 @@ def make_chains(nchains, length, L, bond, rng, kappa=None, cinf=None, min13=1.0)
 
 
 def write_data(path, pos, L, rng, temp, angles=True):
+    L = np.broadcast_to(np.asarray(L, dtype=np.float64), (3,))
     nchains, length, _ = pos.shape
     n = nchains * length
     flat = pos.reshape(n, 3)
@@ -104,7 +107,7 @@ def write_data(path, pos, L, rng, temp, angles=True):
         f.write("1 atom types\n1 bond types\n")
         if angles:
             f.write("1 angle types\n")
-        f.write(f"\n0 {L:.10f} xlo xhi\n0 {L:.10f} ylo yhi\n0 {L:.10f} zlo zhi\n\n")
+        f.write(f"\n0 {L[0]:.10f} xlo xhi\n0 {L[1]:.10f} ylo yhi\n0 {L[2]:.10f} zlo zhi\n\n")
         f.write("Masses\n\n1 1.0\n\nAtoms # molecular\n\n")
         for c in range(nchains):
             for k in range(length):
@@ -137,6 +140,8 @@ def main():
     ap.add_argument("--nchains", type=int, required=True)
     ap.add_argument("--chain-length", type=int, required=True)
     ap.add_argument("--density", type=float, default=0.85)
+    ap.add_argument("--aspect", type=float, default=1.0,
+                    help="Lx/Lz = Ly/Lz (> 1: laterally wide box, e.g. to build thin films)")
     ap.add_argument("--bond", type=float, default=0.97, help="bond length (default 0.97)")
     stiff = ap.add_mutually_exclusive_group()
     stiff.add_argument("--kbend", type=float, default=0.0,
@@ -153,13 +158,14 @@ def main():
         ap.error("--cinf must be >= 1")
     rng = np.random.default_rng(args.seed)
     n = args.nchains * args.chain_length
-    L = (n / args.density) ** (1.0 / 3.0)
+    lz = (n / (args.density * args.aspect ** 2)) ** (1.0 / 3.0)
+    L = np.array([args.aspect * lz, args.aspect * lz, lz])
     pos = make_chains(args.nchains, args.chain_length, L, args.bond, rng,
                       kappa=args.kbend / args.temp if args.cinf is None else None,
                       cinf=args.cinf, min13=args.min13)
     write_data(args.output, pos, L, rng, args.temp, angles=not args.no_angles)
     r2 = ((pos[:, -1] - pos[:, 0]) ** 2).sum(axis=1).mean()
-    print(f"wrote {args.output}: {n} beads, box {L:.4f}, "
+    print(f"wrote {args.output}: {n} beads, box {L[0]:.4f} x {L[1]:.4f} x {L[2]:.4f}, "
           f"<R^2>/((N-1) b^2) = {r2 / ((args.chain_length - 1) * args.bond ** 2):.3f}")
 
 

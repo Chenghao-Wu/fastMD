@@ -10,6 +10,7 @@ import unittest
 import numpy as np
 
 from fastmd import analysis as A
+A_mod = A
 from fastmd.trajectory import Trajectory, write_trajectory
 
 SRC = os.environ.get("FASTMD_SOURCE_DIR",
@@ -117,6 +118,37 @@ class AnalysisTest(unittest.TestCase):
         np.testing.assert_allclose(G, 1000 / 2.0 * (C - 0.25))
         _, Gf = A.stress_relaxation(path, temperature=2.0, volume=400.0)   # film: V_poly
         np.testing.assert_allclose(Gf, 1000 ** 2 / (2.0 * 400.0) * (C - 0.25))
+
+
+class FilmAnalysisTest(unittest.TestCase):
+    def test_density_profile_and_thickness(self):
+        rng = np.random.default_rng(4)
+        n, A = 200000, 100.0
+        x = np.column_stack([rng.random(n) * 10, rng.random(n) * 10, 20.0 + rng.random(n) * 8.0])
+        z, rho = A_mod.density_profile(x, axis=2, area=A, bin_width=0.25)
+        self.assertAlmostEqual(A_mod.film_center(x), 24.0, delta=0.02)
+        t, lo, hi, plateau = A_mod.film_thickness(z, rho)
+        self.assertAlmostEqual(plateau, n / (A * 8.0), delta=0.03 * n / (A * 8.0))
+        self.assertAlmostEqual(t, 8.0, delta=0.3)
+        self.assertAlmostEqual(lo, -4.0, delta=0.2)
+
+    def test_conformation_profile(self):
+        N = 10
+        flat = np.stack([np.arange(N) * 0.97, np.zeros(N), np.zeros(N)], axis=1)       # in-plane
+        upright = np.stack([np.zeros(N), np.zeros(N), np.arange(N) * 0.97], axis=1)    # along z
+        x = np.concatenate([flat + [0, 0, -6.0], flat + [3, 3, 6.0], upright + [5, 5, -4.4]])
+        mol = np.repeat([1, 2, 3], N)
+        prof = A_mod.conformation_profile(x, mol, axis=2, bin_width=4.0, center=0.0)
+        edges = prof["z"] - 2.0
+        k_of = lambda zc: int(np.digitize(zc, edges) - 1)
+        k_flat = k_of(-6.0)
+        self.assertEqual(prof["count"][k_flat], 1)
+        self.assertAlmostEqual(prof["p2"][k_flat], -0.5)
+        self.assertAlmostEqual(prof["rg2_perp"][k_flat], 0.0)
+        k_up = k_of(-4.4 + 4.5 * 0.97)
+        self.assertAlmostEqual(prof["p2"][k_up], 1.0)
+        self.assertAlmostEqual(prof["rg2_par"][k_up], 0.0)
+        self.assertEqual(prof["end_density"].sum() * 4.0, 6)
 
 
 class ChainGeneratorTest(unittest.TestCase):
