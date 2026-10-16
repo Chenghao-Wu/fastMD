@@ -50,6 +50,13 @@
       "P_stop": 0.0,
       "Pdamp": 1.0,
       "chain_length": 3
+    },
+    {
+      "type": "nvt_langevin",
+      "T_start": 1.0,
+      "T_stop": 1.0,
+      "Tdamp": 1.0,
+      "seed": 42
     }
   ]
 }

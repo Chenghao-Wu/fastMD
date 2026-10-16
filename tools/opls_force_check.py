@@ -101,8 +101,11 @@ def _fft_friendly(n):
 
 
 def convert_data_nm(src, dst):
+    """Convert a LAMMPS `real` data file to nm (positions, box) and nm/ps
+    (velocities: 1 A/fs = 100 nm/ps). Coordinates keep 9 decimals: rounding
+    to 1e-6 nm visibly moves stiff bond forces."""
     out = []
-    in_atoms = False
+    in_atoms = in_vel = False
     with open(src) as f:
         for line in f:
             stripped = line.strip()
@@ -114,12 +117,17 @@ def convert_data_nm(src, dst):
                 continue
             if stripped and stripped[0].isupper():
                 in_atoms = stripped.startswith('Atoms')
+                in_vel = stripped.startswith('Velocities')
                 out.append(line)
                 continue
             if in_atoms and len(parts) >= 7:
-                parts[4] = "%.9f" % (float(parts[4]) * A2NM)
-                parts[5] = "%.9f" % (float(parts[5]) * A2NM)
-                parts[6] = "%.9f" % (float(parts[6]) * A2NM)
+                for k in (4, 5, 6):
+                    parts[k] = "%.9f" % (float(parts[k]) * A2NM)
+                out.append(' '.join(parts) + '\n')
+                continue
+            if in_vel and len(parts) >= 4:
+                for k in (1, 2, 3):
+                    parts[k] = "%.9g" % (float(parts[k]) * 100.0)
                 out.append(' '.join(parts) + '\n')
                 continue
             out.append(line)

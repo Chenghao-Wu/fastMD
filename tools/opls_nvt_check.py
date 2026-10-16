@@ -14,6 +14,9 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from opls_force_check import convert_data_nm  # noqa: E402
+
 KCAL2KJ = 4.184
 A2NM = 0.1
 KB = 0.00831446
@@ -81,40 +84,6 @@ def lammps_input(data, rc, acc, pj, eq_steps, prod_steps, temp, seed,
     return '\n'.join(lines) + '\n'
 
 
-def convert_nm(src, dst):
-    out = []
-    in_atoms = in_vel = False
-    with open(src) as f:
-        for line in f:
-            s = line.strip()
-            parts = s.split()
-            if len(parts) == 4 and parts[2] in ('xlo', 'ylo', 'zlo'):
-                out.append("%.6f %.6f %s %s\n" % (float(parts[0]) * A2NM,
-                                                  float(parts[1]) * A2NM,
-                                                  parts[2], parts[3]))
-                continue
-            if s and s[0].isupper():
-                in_atoms = s.startswith('Atoms')
-                in_vel = s.startswith('Velocities')
-                out.append(line)
-                continue
-            if in_atoms and len(parts) >= 7:
-                parts[4] = "%.6f" % (float(parts[4]) * A2NM)
-                parts[5] = "%.6f" % (float(parts[5]) * A2NM)
-                parts[6] = "%.6f" % (float(parts[6]) * A2NM)
-                out.append(' '.join(parts) + '\n')
-                continue
-            if in_vel and len(parts) >= 4:
-                parts[1] = "%.6f" % (float(parts[1]) * 100.0)
-                parts[2] = "%.6f" % (float(parts[2]) * 100.0)
-                parts[3] = "%.6f" % (float(parts[3]) * 100.0)
-                out.append(' '.join(parts) + '\n')
-                continue
-            out.append(line)
-    with open(dst, 'w') as f:
-        f.writelines(out)
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--data', required=True)
@@ -166,7 +135,7 @@ def main():
         print(r.stdout[-2500:]); sys.exit("production failed")
 
     print("[3/4] fastMD production ...")
-    convert_nm('equil.data', 'equil_nm.data')
+    convert_data_nm('equil.data', 'equil_nm.data')
     gewald = None
     with open('log.eq') as f:
         for line in f:
