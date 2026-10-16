@@ -281,6 +281,8 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
             long n = a.integer("N");
             if (n < 0) a.fail("<N> must be >= 0 (0 = never sort)");
             params.sort_every = (int)n;
+        } else if (key == "cuda_graphs") {
+            params.cuda_graphs = a.flag("0|1");
         } else if (key == "check_every") {
             long n = a.integer("N");
             if (n < 1) a.fail("<N> must be >= 1");

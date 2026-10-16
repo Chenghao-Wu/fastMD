@@ -67,6 +67,8 @@ private:
     void tune_bonded_tpa();
     void integrate_pre_force();
     void integrate_post_force();
+    void launch_step(bool with_stress);   // all device work of one step
+    void invalidate_graphs();
     void write_outputs();
     void flush_velocities();     // apply a pending thermostat scale (fused NVT)
     void write_restart(const std::string& fname, int64_t step);
@@ -150,6 +152,9 @@ private:
     // All device work is ordered on one stream; host waits only for the
     // per-step status read-back and for output.
     cudaStream_t stream_ = nullptr;
+    // captured single steps: [0] plain, [1] with a stress sample
+    cudaGraphExec_t graph_exec_[2] = {nullptr, nullptr};
+    int n_graph_captures_ = 0;
     void read_status();
 
     int step_ = 0;

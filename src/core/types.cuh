@@ -132,4 +132,8 @@ struct SimParams {
     // particle (0 = estimate from density; mainly for testing the rollback).
     int   check_every = 100;
     int   neigh_capacity = 0;
+
+    // Replay each time step as a captured CUDA graph (1) or launch kernels
+    // individually (0).
+    int   cuda_graphs = 1;
 };

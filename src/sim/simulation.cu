@@ -253,6 +253,7 @@ void Simulation::print_setup() const {
 // order (ParticleData moves every per-particle field, DeviceTopology remaps
 // the bonded lists). Grows the capacity / regrids until the build is valid.
 void Simulation::rebuild_neighbors(bool sort) {
+    invalidate_graphs();   // capacity / grid (kernel parameters) may change
     if (box_L_ < 2.0f * params_.rc)
         throw std::runtime_error("box length " + std::to_string(box_L_) +
                                  " is smaller than 2*rc: minimum image is invalid");
@@ -307,6 +308,7 @@ bool Simulation::validate() {
     if (st.grid_error) verlet_.set_grid(box_L_);
     if (st.overflow) verlet_.grow(st.overflow);
     verlet_.clear_errors(stream_);
+    invalidate_graphs();
     return false;
 }
 
@@ -566,21 +568,57 @@ void Simulation::integrate_post_force() {
     CUDA_CHECK(cudaGetLastError());
 }
 
-void Simulation::step() {
-    ++step_;
+// Device work of one time step. Every per-step quantity (step counter,
+// ramps, box, rebuild decision) lives in device memory, so the sequence is
+// identical from step to step and can be captured as a CUDA graph.
+void Simulation::launch_step(bool with_stress) {
     integrate_pre_force();
-    // the per-term bonded kernels take the box by value; NPT then needs it
-    if (params_.ensemble == Ensemble::NPT_NH && !params_.bonded_gather) read_status();
     verlet_.step(p_.pos, p_.pos_ref, &d_status_->L, &d_status_->max_dr2_bits, p_.tag,
                  t_.excl_offsets, t_.excl_list, stream_);
     launch_forces();
     integrate_post_force();
-    if (params_.stress_on && step_ % params_.stress_freq == 0) {
+    if (with_stress) {
         // device-only sample; a pending fused-NVT velocity scale is applied in the kernel
         stress_sampler_.sample(p_.vel, p_.pos, d_virial_, params_.natoms, &d_status_->L,
                                velocities_pending_ ? &d_nh_state_->s_post : nullptr, stream_);
         correlator_.push_sample(stress_sampler_.d_stress, stream_);
     }
+}
+
+void Simulation::invalidate_graphs() {
+    for (cudaGraphExec_t& g : graph_exec_)
+        if (g) {
+            CUDA_CHECK(cudaGraphExecDestroy(g));
+            g = nullptr;
+        }
+}
+
+void Simulation::step() {
+    ++step_;
+    const bool with_stress = params_.stress_on && step_ % params_.stress_freq == 0;
+    // the per-term bonded kernels take the box by value, so NPT then needs it
+    // on the host every step and cannot be replayed from a graph
+    const bool host_box = params_.ensemble == Ensemble::NPT_NH && !params_.bonded_gather;
+    if (host_box) read_status();
+    if (!params_.cuda_graphs || host_box) {
+        launch_step(with_stress);
+        return;
+    }
+    cudaGraphExec_t& exec = graph_exec_[with_stress ? 1 : 0];
+    if (!exec) {
+        const bool pending = velocities_pending_;   // host bookkeeping replayed below
+        cudaGraph_t graph;
+        CUDA_CHECK(cudaStreamBeginCapture(stream_, cudaStreamCaptureModeThreadLocal));
+        launch_step(with_stress);
+        CUDA_CHECK(cudaStreamEndCapture(stream_, &graph));
+        CUDA_CHECK(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0));
+        CUDA_CHECK(cudaGraphDestroy(graph));
+        velocities_pending_ = pending;
+        n_graph_captures_++;
+    }
+    CUDA_CHECK(cudaGraphLaunch(exec, stream_));
+    // after a step the fused NVT path leaves the post-force scale pending
+    velocities_pending_ = params_.ensemble == Ensemble::NVT_NH;
 }
 
 bool Simulation::output_due(int s) const {
@@ -735,9 +773,9 @@ void Simulation::run() {
     if (params_.restart_freq >= 0)
         write_restart(build_restart_final_filename(params_.restart_file), step_);
 
-    printf("Wall time: %.3f s  |  Steps/s: %.1f  |  ns/day: %.3f  |  rebuilds: %d  sorts: %d  rollbacks: %d\n",
+    printf("Wall time: %.3f s  |  Steps/s: %.1f  |  ns/day: %.3f  |  rebuilds: %d  sorts: %d  rollbacks: %d  graph captures: %d\n",
            elapsed, nrun / elapsed, (nrun * params_.dt / 1000.0) / (elapsed / 86400.0),
-           verlet_.h_state->n_builds, n_sorts_, n_rollbacks_);
+           verlet_.h_state->n_builds, n_sorts_, n_rollbacks_, n_graph_captures_);
     finish();
 }
 
@@ -790,5 +828,6 @@ Simulation::~Simulation() {
     free_dev(d_out4_);
     t_.free();
     p_.free();
+    invalidate_graphs();
     if (stream_) cudaStreamDestroy(stream_);
 }
