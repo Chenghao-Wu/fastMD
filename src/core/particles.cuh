@@ -57,7 +57,14 @@ struct ParticleData {
     std::vector<float>  download_charges() const;
     std::vector<int>    download_mol_ids() const;
 
+    // Overwrite from host data in tag order (synchronous; the order of the
+    // particles on the device is unchanged).
+    void set_positions(const std::vector<float4>& positions);
+    void set_velocities(const std::vector<float4>& velocities);
+    void set_images(const std::vector<int>& images);
+
 private:
     void* scratch_ = nullptr;   // natoms_padded * sizeof(float4)
     template <typename T> std::vector<T> download_by_tag(const T* d, int width) const;
+    template <typename T> void upload_by_tag(T* d, const std::vector<T>& h, int width);
 };

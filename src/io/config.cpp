@@ -1,5 +1,6 @@
 #include "config.hpp"
 #include "table_parser.hpp"
+#include "lammps_data.hpp"
 #include "../core/system.cuh"
 #include <cmath>
 #include <cstring>
@@ -83,12 +84,15 @@ void copy_path(char* dst, const std::string& src, Args& a) {
 }  // namespace
 
 SimParams parse_config(const std::string& filename, TopologyData& topo) {
+    std::ifstream in(filename);
+    if (!in.is_open()) throw std::runtime_error("Cannot open config: " + filename);
+    return parse_config(in, filename, topo);
+}
+
+SimParams parse_config(std::istream& in, const std::string& filename, TopologyData& topo) {
     SimParams params = {};
     params.restart_freq = -1;
     std::string coords_file;
-
-    std::ifstream in(filename);
-    if (!in.is_open()) throw std::runtime_error("Cannot open config: " + filename);
 
     std::set<std::string> seen;          // keys that may appear only once
     std::string ensemble_key;
@@ -589,4 +593,20 @@ void finalize_params(SimParams& params) {
     params.half_L = params.box_L / 2.0f;
     params.rc2 = params.rc * params.rc;
     params.ntiles = div_ceil(params.natoms, TILE_SIZE);
+}
+
+void load_config(std::istream& in, const std::string& source, SimParams& params,
+                 TopologyData& topo) {
+    params = parse_config(in, source, topo);
+    if (!topo.data_file.empty()) parse_lammps_data(topo.data_file, topo);
+    if (params.natoms == 0) params.natoms = (int)topo.positions.size();
+    params.box_L = topo.box_L;
+    validate_system(params, topo);
+    finalize_params(params);
+}
+
+void load_config(const std::string& path, SimParams& params, TopologyData& topo) {
+    std::ifstream in(path);
+    if (!in.is_open()) throw std::runtime_error("Cannot open config: " + path);
+    load_config(in, path, params, topo);
 }

@@ -1,14 +1,35 @@
 """fastMD — GPU-accelerated molecular dynamics simulator.
 
-Provides ``get_binary_path()`` to locate the compiled ``fastmd`` executable
-installed alongside this package (or found on ``PATH``).
+``Simulation`` is the stateful interface to a simulation resident on the GPU
+(compiled extension ``fastmd._core``)::
+
+    import fastmd
+    sim = fastmd.Simulation("run.conf")
+    sim.run(1000)
+    x, f = sim.positions, sim.forces        # (natoms, 3) numpy arrays
+    print(sim.thermo())
+
+``get_binary_path()`` locates the command-line ``fastmd`` executable.
 """
 
 import os
 import shutil
 from pathlib import Path
 
-__all__ = ["get_binary_path"]
+__all__ = ["Simulation", "Thermo", "get_binary_path"]
+
+try:
+    from ._core import Simulation, Thermo  # noqa: F401
+except ImportError as _err:  # extension not built (e.g. CMake build without FASTMD_BUILD_PYTHON)
+    _import_error = _err
+
+    def __getattr__(name):
+        if name in ("Simulation", "Thermo"):
+            raise ImportError(
+                f"fastmd._core is not available ({_import_error}); build with "
+                "-DFASTMD_BUILD_PYTHON=ON or install the wheel (pip install .)"
+            ) from _import_error
+        raise AttributeError(name)
 
 
 def get_binary_path() -> str:

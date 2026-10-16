@@ -6,6 +6,7 @@
 #include "../force/dihedral_opls.cuh"
 #include "../integrate/nose_hoover.cuh"
 #include "table_parser.hpp"
+#include <iosfwd>
 #include <string>
 #include <vector>
 
@@ -66,3 +67,12 @@ void finalize_params(SimParams& params);
 void validate_system(const SimParams& params, const TopologyData& topo);
 
 SimParams parse_config(const std::string& filename, TopologyData& topo);
+// Same, reading the config text from a stream; `source` names it in errors.
+SimParams parse_config(std::istream& in, const std::string& source, TopologyData& topo);
+
+// Everything the command-line driver does before constructing a Simulation:
+// parse the config, read the LAMMPS data file it names, validate and
+// finalize. Relative paths in the config are relative to the working directory.
+void load_config(const std::string& path, SimParams& params, TopologyData& topo);
+void load_config(std::istream& in, const std::string& source, SimParams& params,
+                 TopologyData& topo);

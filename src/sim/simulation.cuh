@@ -23,8 +23,15 @@
 // One MD simulation: owns all device state and drives the time loop.
 //
 // Construction uploads the system, builds the neighbor list and evaluates the
-// initial forces. step() advances one time step; run() advances
-// params.nsteps steps and writes the configured outputs.
+// initial forces. run() is the command-line driver: it advances
+// params.nsteps steps with progress output, then writes the final restart and
+// the stress correlation. run(n) advances n steps (writing the configured
+// periodic outputs) and can be called repeatedly, interleaved with reading or
+// replacing the state (the Python binding).
+//
+// State accessors work in tag order (the order of the input data file), with
+// positions wrapped into [0, L) (the data-file box shifted to the origin);
+// unwrapped positions are pos + image * L.
 class Simulation {
 public:
     Simulation(const SimParams& params, TopologyData topo);
@@ -34,6 +41,7 @@ public:
 
     void print_setup() const;
     void run();
+    void run(int nsteps);
     void step();
 
     // Evaluate forces/energies/virial at the current positions (rebuilding
@@ -44,6 +52,21 @@ public:
 
     // Write per-atom forces (tag order) to a text file.
     void write_forces(const std::string& path) const;
+
+    // Current state (synchronous). velocities() first applies a pending
+    // thermostat scale, so it returns the full-step velocities.
+    std::vector<float4> positions() const { return p_.download_positions(); }   // w: type bits
+    std::vector<int>    images() const { return p_.download_images(); }         // [3 N]
+    std::vector<float4> velocities();
+    std::vector<float4> forces() const { return p_.download_forces(); }         // w: per-atom PE
+    std::vector<float>  charges() const { return p_.download_charges(); }
+    // Replace positions (xyz in tag order; wrapped into the box; image counts
+    // reset to 0 unless given, [3 N]) and recompute the neighbor list and forces.
+    void set_positions(const std::vector<float3>& xyz, const std::vector<int>* images = nullptr);
+    void set_velocities(const std::vector<float3>& v);
+    // Kinetic/potential energy, temperature and pressure tensor (xx xy xz yy
+    // yz zz) of the current state.
+    ThermoOutput thermo();
 
     int  current_step() const { return step_; }
     const SimParams& params() const { return params_; }
@@ -58,6 +81,7 @@ private:
     void setup_analysis();
     void rebuild_neighbors(bool sort);   // synchronous, host-driven
     bool output_due(int step) const;
+    void advance(int nsteps, bool progress);
     void save_checkpoint();
     void restore_checkpoint();
     bool validate();                     // neighbor/grid flags since the checkpoint

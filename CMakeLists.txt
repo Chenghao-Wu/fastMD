@@ -55,6 +55,14 @@ else()
     set(_fastmd_tests_default ON)
 endif()
 option(FASTMD_BUILD_TESTS "Build the fastMD unit tests (fetches GoogleTest)" ${_fastmd_tests_default})
+# The Python extension (fastmd._core, pybind11) is built for wheels and on request.
+if(DEFINED SKBUILD)
+    set(_fastmd_python_default ON)
+else()
+    set(_fastmd_python_default OFF)
+endif()
+option(FASTMD_BUILD_PYTHON "Build the Python extension module fastmd._core (needs pybind11)"
+       ${_fastmd_python_default})
 
 # Global CUDA flags
 add_compile_options(
@@ -110,6 +118,21 @@ add_executable(fastmd src/main.cu)
 target_link_libraries(fastmd PRIVATE core)
 set_target_properties(fastmd PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
+if(FASTMD_BUILD_PYTHON)
+    find_package(Python 3.8 REQUIRED COMPONENTS Interpreter Development.Module)
+    find_package(pybind11 CONFIG REQUIRED)
+    # NO_EXTRAS: no LTO/strip (host LTO flags would reach nvcc). The CUDA
+    # source engine.cu makes CMake device-link core's relocatable device code
+    # into the module.
+    pybind11_add_module(_core MODULE NO_EXTRAS python/src/core_module.cpp src/api/engine.cu)
+    target_link_libraries(_core PRIVATE core)
+    # The build tree gets an importable package: build/python/fastmd.
+    set_target_properties(_core PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/python/fastmd)
+    configure_file(python/fastmd/__init__.py ${CMAKE_BINARY_DIR}/python/fastmd/__init__.py COPYONLY)
+endif()
+
 if(FASTMD_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
@@ -119,6 +142,9 @@ endif()
 # (site-packages/fastmd/_binary/fastmd); plain CMake installs go to bin/.
 if(DEFINED SKBUILD)
     install(TARGETS fastmd DESTINATION fastmd/_binary)
+    if(FASTMD_BUILD_PYTHON)
+        install(TARGETS _core DESTINATION fastmd)
+    endif()
 else()
     install(TARGETS fastmd DESTINATION bin)
 endif()

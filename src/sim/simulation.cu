@@ -761,15 +761,11 @@ void Simulation::print_progress() {
     }
 }
 
-void Simulation::run() {
-    progress_interval_ = 1000;
-    if (params_.nsteps < 100) progress_interval_ = 1;
-    else if (params_.nsteps < 1000) progress_interval_ = params_.nsteps / 2;
-    t_start_ = last_progress_time_ = std::chrono::steady_clock::now();
-    last_progress_step_ = step_;
-
-    const int first = step_;
-    const int target = step_ + params_.nsteps;
+// Advance nsteps with periodic check points: neighbor-list overflow / grid
+// errors roll back to the last checkpoint, particles are re-sorted every
+// sort_every steps, and the configured outputs are written when due.
+void Simulation::advance(int nsteps, bool progress) {
+    const int target = step_ + nsteps;
     save_checkpoint();
     while (step_ < target) {
         step();
@@ -786,11 +782,28 @@ void Simulation::run() {
             write_outputs();
             save_checkpoint();
         }
-        print_progress();
+        if (progress) print_progress();
     }
-    flush_velocities();
     CUDA_CHECK(cudaStreamSynchronize(stream_));
     read_status();
+}
+
+void Simulation::run(int nsteps) {
+    if (nsteps < 0) throw std::invalid_argument("run: nsteps must be >= 0");
+    advance(nsteps, false);
+}
+
+void Simulation::run() {
+    progress_interval_ = 1000;
+    if (params_.nsteps < 100) progress_interval_ = 1;
+    else if (params_.nsteps < 1000) progress_interval_ = params_.nsteps / 2;
+    t_start_ = last_progress_time_ = std::chrono::steady_clock::now();
+    last_progress_step_ = step_;
+
+    const int first = step_;
+    advance(params_.nsteps, true);
+    flush_velocities();
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
     verlet_.read_state(stream_);
     auto t_end = std::chrono::steady_clock::now();
     double elapsed = std::chrono::duration<double>(t_end - t_start_).count();
@@ -803,6 +816,74 @@ void Simulation::run() {
            elapsed, nrun / elapsed, (nrun * params_.dt / 1000.0) / (elapsed / 86400.0),
            verlet_.h_state->n_builds, n_sorts_, n_rollbacks_, n_graph_captures_);
     finish();
+}
+
+// ---------------------------------------------------------------------------
+// State access (tag order)
+// ---------------------------------------------------------------------------
+
+std::vector<float4> Simulation::velocities() {
+    flush_velocities();
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+    return p_.download_velocities();
+}
+
+void Simulation::set_positions(const std::vector<float3>& xyz, const std::vector<int>* images) {
+    const int n = params_.natoms;
+    if ((int)xyz.size() != n)
+        throw std::invalid_argument("set_positions: expected " + std::to_string(n) + " positions");
+    if (images && (int)images->size() != 3 * n)
+        throw std::invalid_argument("set_positions: expected " + std::to_string(3 * n) + " image counts");
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+    read_status();
+    std::vector<float4> pos = p_.download_positions();   // keeps the packed types
+    std::vector<int> img = images ? *images : std::vector<int>(3 * n, 0);
+    const float L = box_L_;
+    for (int t = 0; t < n; t++) {
+        const float in[3] = {xyz[t].x, xyz[t].y, xyz[t].z};
+        float out[3];
+        for (int d = 0; d < 3; d++) {
+            if (!std::isfinite(in[d]))
+                throw std::invalid_argument("set_positions: non-finite coordinate for particle " +
+                                            std::to_string(t));
+            int shift = (int)std::floor(in[d] / L);
+            float x = in[d] - shift * L;
+            if (x >= L) { x -= L; shift++; }
+            if (x < 0.0f) { x += L; shift--; }
+            out[d] = x;
+            img[3 * t + d] += shift;
+        }
+        pos[t].x = out[0];
+        pos[t].y = out[1];
+        pos[t].z = out[2];
+    }
+    p_.set_positions(pos);
+    p_.set_images(img);
+    rebuild_neighbors(false);
+    launch_forces();
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+}
+
+void Simulation::set_velocities(const std::vector<float3>& v) {
+    const int n = params_.natoms;
+    if ((int)v.size() != n)
+        throw std::invalid_argument("set_velocities: expected " + std::to_string(n) + " velocities");
+    // drop a pending fused-NVT scale (it belonged to the old velocities)
+    flush_velocities();
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+    std::vector<float4> vel(n);
+    for (int t = 0; t < n; t++) vel[t] = make_float4(v[t].x, v[t].y, v[t].z, 0.0f);
+    p_.set_velocities(vel);
+}
+
+ThermoOutput Simulation::thermo() {
+    flush_velocities();
+    read_status();
+    ThermoOutput out;
+    compute_thermo(p_.vel, p_.pos, p_.force, d_virial_, params_.natoms, box_L_, &out,
+                   thermo_bufs_, step_, nullptr, stream_,
+                   params_.ewald_on ? params_.ewald_self_offset / params_.natoms : 0.0f);
+    return out;
 }
 
 void Simulation::finish() {

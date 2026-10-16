@@ -1,6 +1,7 @@
 #include "particles.cuh"
 #include <algorithm>
 #include <stdexcept>
+#include <string>
 
 namespace {
 
@@ -159,3 +160,21 @@ std::vector<float4> ParticleData::download_forces() const { return download_by_t
 std::vector<int>    ParticleData::download_images() const { return download_by_tag(image, 3); }
 std::vector<float>  ParticleData::download_charges() const { return download_by_tag(charge, 1); }
 std::vector<int>    ParticleData::download_mol_ids() const { return download_by_tag(mol_id, 1); }
+
+template <typename T>
+void ParticleData::upload_by_tag(T* d, const std::vector<T>& h, int width) {
+    if (h.size() != (size_t)natoms * width)
+        throw std::runtime_error("per-particle array has " + std::to_string(h.size()) +
+                                 " entries, expected " + std::to_string((size_t)natoms * width));
+    std::vector<int> h_tag(natoms);
+    CUDA_CHECK(cudaMemcpy(h_tag.data(), tag, natoms * sizeof(int), cudaMemcpyDeviceToHost));
+    std::vector<T> raw(h.size());
+    for (int i = 0; i < natoms; i++)
+        for (int c = 0; c < width; c++)
+            raw[(size_t)i * width + c] = h[(size_t)h_tag[i] * width + c];
+    CUDA_CHECK(cudaMemcpy(d, raw.data(), raw.size() * sizeof(T), cudaMemcpyHostToDevice));
+}
+
+void ParticleData::set_positions(const std::vector<float4>& p) { upload_by_tag(pos, p, 1); }
+void ParticleData::set_velocities(const std::vector<float4>& v) { upload_by_tag(vel, v, 1); }
+void ParticleData::set_images(const std::vector<int>& im) { upload_by_tag(image, im, 3); }

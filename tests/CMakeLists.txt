@@ -56,3 +56,13 @@ add_fastmd_test(test_bonded_gather)
 add_fastmd_test(test_ewald)
 add_fastmd_test(test_pme)
 add_fastmd_test(test_simulation)
+
+# Python interface (built with -DFASTMD_BUILD_PYTHON=ON; needs numpy)
+if(TARGET _core)
+    add_test(NAME test_python_api
+             COMMAND ${Python_EXECUTABLE} -m unittest -v test_simulation_api
+             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/python)
+    set_tests_properties(test_python_api PROPERTIES
+        LABELS gpu
+        ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python;FASTMD_SOURCE_DIR=${PROJECT_SOURCE_DIR}")
+endif()
