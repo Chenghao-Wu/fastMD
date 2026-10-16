@@ -139,7 +139,7 @@ __global__ void sum_pe_kernel(const float4* __restrict__ force,
 }
 
 void compute_thermo(const float4* vel, const float4* pos, const float4* force,
-                     const float* virial, int natoms, float box_L,
+                     const double* virial, int natoms, float box_L,
                      ThermoOutput* h_output, ThermoBuffers& bufs,
                      int step, FILE* fp,
                      cudaStream_t stream,
@@ -166,8 +166,8 @@ void compute_thermo(const float4* vel, const float4* pos, const float4* force,
     CUDA_CHECK(cudaMemcpyAsync(h_max_force, bufs.d_max_force, 2 * sizeof(float),
                                 cudaMemcpyDeviceToHost, stream));
 
-    float h_virial[6];
-    CUDA_CHECK(cudaMemcpyAsync(h_virial, virial, 6 * sizeof(float),
+    double h_virial[6];
+    CUDA_CHECK(cudaMemcpyAsync(h_virial, virial, 6 * sizeof(double),
                                 cudaMemcpyDeviceToHost, stream));
 
     CUDA_CHECK(cudaStreamSynchronize(stream));
@@ -187,7 +187,7 @@ void compute_thermo(const float4* vel, const float4* pos, const float4* force,
     float vol = box_L * box_L * box_L;
     float inv_vol = 1.0f / vol;
     for (int c = 0; c < 6; c++) {
-        h_output->stress[c] = (h_kin_stress[c] + h_virial[c]) * inv_vol;
+        h_output->stress[c] = (float)((h_kin_stress[c] + h_virial[c]) * inv_vol);
     }
 
     if (fp) {

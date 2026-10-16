@@ -28,9 +28,9 @@ TEST(Thermo, KineticEnergyAndTemperature) {
     float4* d_force;
     CUDA_CHECK(cudaMalloc(&d_force, np * sizeof(float4)));
     CUDA_CHECK(cudaMemset(d_force, 0, np * sizeof(float4)));
-    float* d_virial;
-    CUDA_CHECK(cudaMalloc(&d_virial, 6 * sizeof(float)));
-    CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(float)));
+    double* d_virial;
+    CUDA_CHECK(cudaMalloc(&d_virial, 6 * sizeof(double)));
+    CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(double)));
 
     ThermoBuffers bufs;
     bufs.allocate();
@@ -60,11 +60,11 @@ TEST(Thermo, StressColumnsMatchHeader) {
     CUDA_CHECK(cudaMemcpyToSymbol(c_masses, h_masses, sizeof(h_masses)));
 
     // internal order: xx xy xz yy yz zz
-    std::vector<float> vir = {5 * V, 1 * V, 2 * V, 6 * V, 3 * V, 7 * V};
+    std::vector<double> vir = {5.0 * V, 1.0 * V, 2.0 * V, 6.0 * V, 3.0 * V, 7.0 * V};
     float4* d_vel = to_device(zeros);
     float4* d_force = to_device(zeros);
     float4* d_pos = to_device(h_pos);
-    float* d_virial = to_device(vir);
+    double* d_virial = to_device(vir);
 
     const char* path = "thermo_columns_test.dat";
     ThermoBuffers bufs;

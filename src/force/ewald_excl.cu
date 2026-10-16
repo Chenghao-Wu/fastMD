@@ -1,5 +1,6 @@
 #include "ewald_excl.cuh"
 #include "../core/pbc.cuh"
+#include "../core/reduce.cuh"
 
 // erf(x) via Abramowitz & Stegun 7.1.26 (same polynomial as erfc kernel)
 __device__ inline float erf_poly(float x) {
@@ -23,7 +24,7 @@ __global__ void ewald_excl_kernel(
     const float4* __restrict__ pos,
     const float* __restrict__ charges,
     float4* __restrict__ force,
-    float* __restrict__ virial,
+    double* __restrict__ virial,
     const int* __restrict__ excl_offsets,
     const int* __restrict__ excl_list,
     const int* __restrict__ rank,
@@ -96,32 +97,8 @@ __global__ void ewald_excl_kernel(
         }
     }
 
-    extern __shared__ float s_virial[];
-    s_virial[tid * 6 + 0] = v0;
-    s_virial[tid * 6 + 1] = v1;
-    s_virial[tid * 6 + 2] = v2;
-    s_virial[tid * 6 + 3] = v3;
-    s_virial[tid * 6 + 4] = v4;
-    s_virial[tid * 6 + 5] = v5;
-    __syncthreads();
-
-    if (tid == 0) {
-        float s0 = 0, s1 = 0, s2 = 0, s3 = 0, s4 = 0, s5 = 0;
-        for (int u = 0; u < blockDim.x; u++) {
-            s0 += s_virial[u * 6 + 0];
-            s1 += s_virial[u * 6 + 1];
-            s2 += s_virial[u * 6 + 2];
-            s3 += s_virial[u * 6 + 3];
-            s4 += s_virial[u * 6 + 4];
-            s5 += s_virial[u * 6 + 5];
-        }
-        atomicAdd(&virial[0], s0);
-        atomicAdd(&virial[1], s1);
-        atomicAdd(&virial[2], s2);
-        atomicAdd(&virial[3], s3);
-        atomicAdd(&virial[4], s4);
-        atomicAdd(&virial[5], s5);
-    }
+    float vir[6] = {v0, v1, v2, v3, v4, v5};
+    block_reduce_virial(vir, virial);
 }
 
 // ---------------------------------------------------------------------------
@@ -133,7 +110,7 @@ __global__ void pair14_kernel(
     const float4* __restrict__ pos,
     const float* __restrict__ charges,
     float4* __restrict__ force,
-    float* __restrict__ virial,
+    double* __restrict__ virial,
     const int2* __restrict__ pairs,
     const float2* __restrict__ lj_params,
     int npairs, int ntypes,
@@ -207,36 +184,12 @@ __global__ void pair14_kernel(
         v5 = fiz * dz;
     }
 
-    extern __shared__ float s_virial[];
-    s_virial[tid * 6 + 0] = v0;
-    s_virial[tid * 6 + 1] = v1;
-    s_virial[tid * 6 + 2] = v2;
-    s_virial[tid * 6 + 3] = v3;
-    s_virial[tid * 6 + 4] = v4;
-    s_virial[tid * 6 + 5] = v5;
-    __syncthreads();
-
-    if (tid == 0) {
-        float s0 = 0, s1 = 0, s2 = 0, s3 = 0, s4 = 0, s5 = 0;
-        for (int u = 0; u < blockDim.x; u++) {
-            s0 += s_virial[u * 6 + 0];
-            s1 += s_virial[u * 6 + 1];
-            s2 += s_virial[u * 6 + 2];
-            s3 += s_virial[u * 6 + 3];
-            s4 += s_virial[u * 6 + 4];
-            s5 += s_virial[u * 6 + 5];
-        }
-        atomicAdd(&virial[0], s0);
-        atomicAdd(&virial[1], s1);
-        atomicAdd(&virial[2], s2);
-        atomicAdd(&virial[3], s3);
-        atomicAdd(&virial[4], s4);
-        atomicAdd(&virial[5], s5);
-    }
+    float vir[6] = {v0, v1, v2, v3, v4, v5};
+    block_reduce_virial(vir, virial);
 }
 
 void launch_ewald_excl_kernel(const float4* pos, const float* charges,
-                               float4* force, float* virial,
+                               float4* force, double* virial,
                                const int* excl_offsets, const int* excl_list,
                                const int* rank,
                                int natoms, int nexcl,
@@ -245,14 +198,14 @@ void launch_ewald_excl_kernel(const float4* pos, const float* charges,
                                cudaStream_t stream) {
     if (nexcl == 0) return;
     int blocks = div_ceil(nexcl, 256);
-    int smem = 256 * 6 * sizeof(float);
+    int smem = 0;
     ewald_excl_kernel<<<blocks, 256, smem, stream>>>(
         pos, charges, force, virial, excl_offsets, excl_list, rank,
         natoms, nexcl, coul_const, alpha, L, inv_L);
 }
 
 void launch_pair14_kernel(const float4* pos, const float* charges,
-                           float4* force, float* virial,
+                           float4* force, double* virial,
                            const int2* pairs, const float2* lj_params,
                            int npairs, int ntypes,
                            float coul_const, float alpha,
@@ -261,7 +214,7 @@ void launch_pair14_kernel(const float4* pos, const float* charges,
                            cudaStream_t stream) {
     if (npairs == 0) return;
     int blocks = div_ceil(npairs, 256);
-    int smem = 256 * 6 * sizeof(float);
+    int smem = 0;
     pair14_kernel<<<blocks, 256, smem, stream>>>(
         pos, charges, force, virial, pairs, lj_params,
         npairs, ntypes, coul_const, alpha, lj14, ewald14, L, inv_L);

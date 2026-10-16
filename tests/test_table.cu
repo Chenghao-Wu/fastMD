@@ -55,8 +55,8 @@ TEST(Table, MatchesLJWithinInterpolationTolerance) {
     float4* d_pos = to_device(h_pos_pad);
     float4* d_force;
     CUDA_CHECK(cudaMalloc(&d_force, np * sizeof(float4)));
-    float* d_virial;
-    CUDA_CHECK(cudaMalloc(&d_virial, 6 * sizeof(float)));
+    double* d_virial;
+    CUDA_CHECK(cudaMalloc(&d_virial, 6 * sizeof(double)));
     float2* d_lj = to_device(h_lj);
     int* d_table_idx = to_device(h_table_idx);
     TableParams* d_table_params = to_device(std::vector<TableParams>{tp});
@@ -68,26 +68,26 @@ TEST(Table, MatchesLJWithinInterpolationTolerance) {
 
     // Run LJ
     CUDA_CHECK(cudaMemset(d_force, 0, np * sizeof(float4)));
-    CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(float)));
+    CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(double)));
     launch_lj_kernel(d_pos, d_force, d_virial, d_lj,
                      verlet.neighbors, verlet.num_neighbors,
                      N, ntypes, rc2, L, inv_L);
     CUDA_CHECK(cudaDeviceSynchronize());
     auto h_force_lj = to_host(d_force, N);
-    float h_virial_lj[6];
-    CUDA_CHECK(cudaMemcpy(h_virial_lj, d_virial, 6 * sizeof(float), cudaMemcpyDeviceToHost));
+    double h_virial_lj[6];
+    CUDA_CHECK(cudaMemcpy(h_virial_lj, d_virial, 6 * sizeof(double), cudaMemcpyDeviceToHost));
 
     // Run table
     CUDA_CHECK(cudaMemset(d_force, 0, np * sizeof(float4)));
-    CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(float)));
+    CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(double)));
     launch_table_kernel(d_pos, d_force, d_virial,
                         d_table_idx, d_table_params, d_table_data,
                         verlet.neighbors, verlet.num_neighbors,
                         N, ntypes, rc2, L, inv_L);
     CUDA_CHECK(cudaDeviceSynchronize());
     auto h_force_table = to_host(d_force, N);
-    float h_virial_table[6];
-    CUDA_CHECK(cudaMemcpy(h_virial_table, d_virial, 6 * sizeof(float), cudaMemcpyDeviceToHost));
+    double h_virial_table[6];
+    CUDA_CHECK(cudaMemcpy(h_virial_table, d_virial, 6 * sizeof(double), cudaMemcpyDeviceToHost));
 
     for (int i = 0; i < N; i++) {
         float3 lj_f = make_float3(h_force_lj[i].x, h_force_lj[i].y, h_force_lj[i].z);

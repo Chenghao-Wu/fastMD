@@ -107,4 +107,18 @@ struct SimParams {
     // 1-4 pairs: 0 = from bond-graph distance (LAMMPS default),
     // 1 = only end atoms of listed dihedrals (LAMMPS 'special_bonds dihedral yes').
     int   special_dihedral = 0;
+
+    // Force a neighbor-list rebuild after this many steps even if no particle
+    // moved more than the skin criterion allows (0 = never; the displacement
+    // criterion alone is exact, as with LAMMPS 'neigh_modify check yes').
+    int   neigh_max_age = 0;
+
+    // Reorder particles into cell (Morton) order every this many neighbor
+    // rebuilds (0 = never). Improves memory locality of the neighbor build
+    // and pair kernels; all per-particle data and topology move together.
+    int   sort_every = 1;
+
+    // Threads per particle in the neighbor-list pair kernels (1, 2, 4, 8);
+    // 0 = pick the fastest by timing at start-up.
+    int   pair_tpa = 0;
 };

@@ -10,7 +10,7 @@
 // F = -dU/dr holds everywhere.
 void launch_lj_kernel(const float4* __restrict__ pos,
                        float4* __restrict__ force,
-                       float* __restrict__ virial,
+                       double* __restrict__ virial,
                        const float2* __restrict__ lj_params,
                        const int* __restrict__ neighbors,
                        const int* __restrict__ num_neighbors,
@@ -18,7 +18,8 @@ void launch_lj_kernel(const float4* __restrict__ pos,
                        float rc2, float L, float inv_L,
                        cudaStream_t stream = 0,
                        const float2* __restrict__ lj_cap = nullptr,
-                       float force_cap = 0.0f);
+                       float force_cap = 0.0f,
+                       int tpa = 0);   // threads per atom: 1,2,4,8 or 0 = heuristic
 
 // Host: (r_cap, U(r_cap)) per type pair for a force cap; r_cap = 0 when the
 // pair never reaches the cap (eps == 0).

@@ -20,8 +20,21 @@ void init_nh_device_state(const NoseHooverState& host,
     h.nh_scale = 1.0f;
     h.T_target = host.T_target;
     h.P_target = host.P_target;
+    h.T_start = host.T_start;
+    h.T_stop = host.T_stop;
+    h.P_start = host.P_start;
+    h.P_stop = host.P_stop;
+    h.nsteps = host.nsteps;
+    h.step = 1;
     CUDA_CHECK(cudaMemcpy(d_state, &h, sizeof(NoseHooverDeviceState),
                           cudaMemcpyHostToDevice));
+}
+
+// Ramp targets for the current step (called by the pre-force chain kernels).
+__device__ inline void nh_update_targets(NoseHooverDeviceState* s) {
+    float frac = s->nsteps > 0 ? (float)(s->step - 1) / (float)s->nsteps : 0.0f;
+    s->T_target = s->T_start + (s->T_stop - s->T_start) * frac;
+    s->P_target = s->P_start + (s->P_stop - s->P_start) * frac;
 }
 
 void free_nh_device_state(NoseHooverDeviceState* d_state) {
@@ -33,21 +46,11 @@ void set_nh_scale_device(NoseHooverDeviceState* d_state, float scale) {
                           cudaMemcpyHostToDevice));
 }
 
-void set_nh_targets_device(NoseHooverDeviceState* d_state,
-                           float T_target, float P_target) {
-    NoseHooverDeviceState h;
-    CUDA_CHECK(cudaMemcpy(&h, d_state, sizeof(NoseHooverDeviceState),
-                          cudaMemcpyDeviceToHost));
-    h.T_target = T_target;
-    h.P_target = P_target;
-    CUDA_CHECK(cudaMemcpy(d_state, &h, sizeof(NoseHooverDeviceState),
-                          cudaMemcpyHostToDevice));
-}
-
-void allocate_npt_scratch(NoseHooverNPTScratch& s) {
-    CUDA_CHECK(cudaMalloc(&s.d_V, sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&s.d_L, sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&s.d_inv_L, sizeof(float)));
+void allocate_npt_scratch(NoseHooverNPTScratch& s, float* d_box_V, float* d_box_L,
+                          float* d_box_inv_L) {
+    s.d_V = d_box_V;
+    s.d_L = d_box_L;
+    s.d_inv_L = d_box_inv_L;
     CUDA_CHECK(cudaMalloc(&s.d_baro_scale, sizeof(float)));
     CUDA_CHECK(cudaMalloc(&s.d_exp_vW, sizeof(float)));
     CUDA_CHECK(cudaMalloc(&s.d_v_eps_W, sizeof(float)));
@@ -56,14 +59,12 @@ void allocate_npt_scratch(NoseHooverNPTScratch& s) {
 }
 
 void free_npt_scratch(NoseHooverNPTScratch& s) {
-    CUDA_CHECK(cudaFree(s.d_V));
-    CUDA_CHECK(cudaFree(s.d_L));
-    CUDA_CHECK(cudaFree(s.d_inv_L));
     CUDA_CHECK(cudaFree(s.d_baro_scale));
     CUDA_CHECK(cudaFree(s.d_exp_vW));
     CUDA_CHECK(cudaFree(s.d_v_eps_W));
     CUDA_CHECK(cudaFree(s.d_v_eps_W_dt));
     CUDA_CHECK(cudaFree(s.d_virial_trace));
+    s = NoseHooverNPTScratch{};
 }
 
 // Bit-identical exp approximation for NH chain.
@@ -90,6 +91,7 @@ __global__ void nh_propagate_chain_kernel(
     int M, float Q1, float Q_rest,
     float half_dt, int natoms)
 {
+    if (use_carry) nh_update_targets(d_state);
     float total_KE = use_carry ? d_state->chain_KE_carry : (*d_ke_buf * 0.5f);
     float kT_target = d_state->T_target;
     float N_f = 3.0f * static_cast<float>(natoms);
@@ -171,9 +173,11 @@ __global__ void nh_propagate_chain_kernel(
 
     d_state->nh_scale = scale;
 
-    // Carry KE forward only for post-force calls (use_carry=false)
+    // Carry KE forward only for post-force calls (use_carry=false); the
+    // post-force call ends the step.
     if (!use_carry) {
         d_state->chain_KE_carry = total_KE * scale * scale;
+        d_state->step++;
     }
 }
 
@@ -193,6 +197,7 @@ __global__ void nh_npt_chain_baro_kernel(
     float* d_V, float* d_L, float* d_inv_L,
     float* d_baro_scale, float* d_exp_vW, float* d_v_eps_W, float* d_v_eps_W_dt)
 {
+    if (use_carry) nh_update_targets(d_state);
     float total_KE = use_carry ? d_state->chain_KE_carry : (*d_ke_buf * 0.5f);
     float virial_trace_raw = *d_virial_trace;
     float N_f = 3.0f * static_cast<float>(natoms);
@@ -301,6 +306,7 @@ __global__ void nh_npt_chain_baro_kernel(
     d_state->nh_scale = scale;
     if (!use_carry) {
         d_state->chain_KE_carry = KE * scale * scale;
+        d_state->step++;
     }
 }
 
@@ -692,11 +698,12 @@ __global__ void nh_npt_pre_force_fused_kernel(
     const float* __restrict__ d_exp_vW,
     const float* __restrict__ d_v_eps_W_dt,
     float half_dt, float dt,
-    float L, float inv_L, int natoms)
+    const float* __restrict__ d_L, const float* __restrict__ d_inv_L, int natoms)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= natoms) return;
 
+    const float L = *d_L, inv_L = *d_inv_L;
     float nh_scale = d_state->nh_scale;
     float baro_scale = *d_baro_scale;
     float exp_vW = *d_exp_vW;
@@ -764,13 +771,13 @@ void launch_nh_npt_pre_force_fused(float4* pos, float4* vel, const float4* force
                                     const float* d_exp_vW,
                                     const float* d_v_eps_W_dt,
                                     float half_dt, float dt,
-                                    int natoms, float L, float inv_L,
+                                    int natoms, const float* d_L, const float* d_inv_L,
                                     cudaStream_t stream) {
     int blocks = div_ceil(natoms, 256);
     nh_npt_pre_force_fused_kernel<<<blocks, 256, 0, stream>>>(
         pos, vel, force, pos_ref, d_max_dr2_int, d_image,
         d_state, d_baro_scale, d_exp_vW, d_v_eps_W_dt,
-        half_dt, dt, L, inv_L, natoms);
+        half_dt, dt, d_L, d_inv_L, natoms);
 }
 
 // --- Lightweight KE + virial-trace kernel for NPT ---
@@ -779,7 +786,7 @@ void launch_nh_npt_pre_force_fused(float4* pos, float4* vel, const float4* force
 
 __global__ void nh_npt_ke_virial_trace_kernel(
     const float4* __restrict__ vel,
-    const float* __restrict__ virial,
+    const double* __restrict__ virial,
     const float4* __restrict__ pos,
     float* __restrict__ d_ke_out,
     float* __restrict__ d_virial_trace_out,
@@ -819,13 +826,13 @@ __global__ void nh_npt_ke_virial_trace_kernel(
 
     // Virial trace: only block 0 writes it (once)
     if (blockIdx.x == 0 && tid == 0) {
-        float vt = virial[0] + virial[3] + virial[5];
+        float vt = (float)(virial[VXX] + virial[VYY] + virial[VZZ]);
         *d_virial_trace_out = vt;
     }
 }
 
 void launch_nh_npt_ke_and_virial_trace(
-    const float4* vel, const float* virial,
+    const float4* vel, const double* virial,
     const float4* pos,
     float* d_ke_out, float* d_virial_trace_out,
     int natoms, cudaStream_t stream)

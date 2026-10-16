@@ -2,7 +2,6 @@
 #include "../core/types.cuh"
 #include "../core/particles.cuh"
 #include "../core/topology.cuh"
-#include "../core/morton.cuh"
 #include "../neighbor/verlet_list.cuh"
 #include "../force/fene.cuh"
 #include "../force/angle.cuh"
@@ -53,8 +52,9 @@ private:
     void setup_analysis();
     void build_neighbor_list();
     bool need_rebuild();
-    void spatial_sort();
     void launch_forces();
+    void launch_pair_kernel(int tpa);     // the overwriting nonbonded kernel
+    void tune_pair_tpa();
     void integrate_pre_force();
     void integrate_post_force();
     void write_outputs();
@@ -67,7 +67,6 @@ private:
     ParticleData p_;
     DeviceTopology t_;
     bool opls_mode_ = false;
-    bool sort_enabled_ = false;
 
     // box (cubic). box_L_ is the host mirror of the current box length.
     float box_L_ = 0.0f, inv_L_ = 0.0f;
@@ -91,13 +90,25 @@ private:
     float4*      d_angle_table_data_ = nullptr;
     int3*  d_ewald_kvecs_ = nullptr;
     float* d_ewald_sfac_ = nullptr;
-    float* d_virial_ = nullptr;          // [6] xx xy xz yy yz zz
+    double* d_virial_ = nullptr;         // [6] xx xy xz yy yz zz
 
     VerletList   verlet_;
-    MortonSorter morton_;
-    int* d_max_dr2_int_ = nullptr;
     int  steps_since_rebuild_ = 0;
     int  n_rebuilds_ = 0;
+    int  n_sorts_ = 0;
+    int  pair_tpa_ = 1;
+
+    // Small device state read back once per step (one 16-byte copy):
+    // maximum squared displacement since the last build (float bits, written
+    // with atomicMax) and the current box. The NPT barostat writes the box
+    // here; integrators read it on the device.
+    struct DeviceStatus {
+        int   max_dr2_bits;
+        float L, inv_L, V;
+    };
+    DeviceStatus* d_status_ = nullptr;
+    DeviceStatus* h_status_ = nullptr;   // pinned
+    int* d_step_ = nullptr;              // device step counter (Langevin; NH keeps its own)
 
     // integrators
     LangevinState langevin_;
@@ -113,8 +124,10 @@ private:
     BinaryDumper dumper_;
     float4* d_out4_ = nullptr;           // tag-ordered scratch for output
 
-    cudaStream_t stream_lj_ = nullptr, stream_bonded_ = nullptr, stream_io_ = nullptr;
-    cudaEvent_t force_done_lj_ = nullptr, force_done_bonded_ = nullptr, pos_ready_ = nullptr;
+    // All device work is ordered on one stream; host waits only for the
+    // per-step status read-back and for output.
+    cudaStream_t stream_ = nullptr;
+    void read_status();
 
     int step_ = 0;
     std::chrono::steady_clock::time_point t_start_, last_progress_time_;

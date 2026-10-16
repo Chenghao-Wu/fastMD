@@ -26,7 +26,7 @@ void launch_ewald_recip_kernel(const float4* __restrict__ pos,
                                 const int3* __restrict__ kvecs,
                                 const float* __restrict__ sfac,
                                 float4* __restrict__ force,
-                                float* __restrict__ virial,
+                                double* __restrict__ virial,
                                 int natoms, int kcount,
                                 float coul_const, float alpha, float L,
                                 cudaStream_t stream = 0);

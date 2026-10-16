@@ -38,9 +38,9 @@ TEST(LJ, SmallSystemMatchesCPU) {
     CUDA_CHECK(cudaMalloc(&d_force, np * sizeof(float4)));
     CUDA_CHECK(cudaMemset(d_force, 0, np * sizeof(float4)));
 
-    float* d_virial;
-    CUDA_CHECK(cudaMalloc(&d_virial, 6 * sizeof(float)));
-    CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(float)));
+    double* d_virial;
+    CUDA_CHECK(cudaMalloc(&d_virial, 6 * sizeof(double)));
+    CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(double)));
 
     float2* d_lj = to_device(h_lj);
 
@@ -60,8 +60,8 @@ TEST(LJ, SmallSystemMatchesCPU) {
         assert_float3_near(gpu_f, ref_f, 1e-3f);
     }
 
-    float h_virial[6];
-    CUDA_CHECK(cudaMemcpy(h_virial, d_virial, 6 * sizeof(float),
+    double h_virial[6];
+    CUDA_CHECK(cudaMemcpy(h_virial, d_virial, 6 * sizeof(double),
                            cudaMemcpyDeviceToHost));
     for (int k = 0; k < 6; k++) {
         float denom = fmaxf(fabsf(ref.virial[k]), 1e-6f);
@@ -93,10 +93,10 @@ TEST(LJ, ForceCapIsEnergyConsistent) {
         pos[1] = make_float4(5.0f + r, 5.0f, 5.0f, pack_type_id(0));
         float4* d_pos = to_device(pos);
         float4* d_f;
-        float* d_v;
+        double* d_v;
         CUDA_CHECK(cudaMalloc(&d_f, 32 * sizeof(float4)));
-        CUDA_CHECK(cudaMalloc(&d_v, 6 * sizeof(float)));
-        CUDA_CHECK(cudaMemset(d_v, 0, 6 * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_v, 6 * sizeof(double)));
+        CUDA_CHECK(cudaMemset(d_v, 0, 6 * sizeof(double)));
         VerletList v;
         v.allocate(2, rc + 0.3f, L);
         v.build(d_pos, 2, L, 1.0f / L, nullptr, nullptr, rc + 0.3f);

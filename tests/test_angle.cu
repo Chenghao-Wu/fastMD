@@ -28,9 +28,9 @@ TEST(Angle, TriangleMatchesCPU) {
     float4* d_force;
     CUDA_CHECK(cudaMalloc(&d_force, np * sizeof(float4)));
     CUDA_CHECK(cudaMemset(d_force, 0, np * sizeof(float4)));
-    float* d_virial;
-    CUDA_CHECK(cudaMalloc(&d_virial, 6 * sizeof(float)));
-    CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(float)));
+    double* d_virial;
+    CUDA_CHECK(cudaMalloc(&d_virial, 6 * sizeof(double)));
+    CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(double)));
 
     int4* d_angles = to_device(h_angles);
     AngleParams h_params = {100.0f, theta0};

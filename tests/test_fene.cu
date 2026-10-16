@@ -28,9 +28,9 @@ TEST(FENE, TwoBondChainMatchesCPU) {
     float4* d_force;
     CUDA_CHECK(cudaMalloc(&d_force, np * sizeof(float4)));
     CUDA_CHECK(cudaMemset(d_force, 0, np * sizeof(float4)));
-    float* d_virial;
-    CUDA_CHECK(cudaMalloc(&d_virial, 6 * sizeof(float)));
-    CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(float)));
+    double* d_virial;
+    CUDA_CHECK(cudaMalloc(&d_virial, 6 * sizeof(double)));
+    CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(double)));
 
     int2* d_bonds = to_device(h_bonds);
     int* d_btypes = to_device(h_types);

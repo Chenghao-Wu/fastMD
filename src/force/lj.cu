@@ -1,12 +1,19 @@
 #include "lj.cuh"
 #include "../core/pbc.cuh"
+#include "../core/reduce.cuh"
+#include "../core/launch.cuh"
 #include <cmath>
 
-template <bool CAP>
+// TPA threads cooperate on one particle: lane `sub` of the group takes
+// neighbors sub, sub+TPA, ... (rows of the transposed list stay contiguous
+// across the consecutive particles of a warp), then the group sums its
+// partial forces with shuffles. TPA > 1 raises occupancy when the system is
+// small relative to the GPU.
+template <bool CAP, int TPA>
 __global__ void lj_verlet_kernel(
     const float4* __restrict__ pos,
     float4* __restrict__ force,
-    float* __restrict__ virial,
+    double* __restrict__ virial,
     const float2* __restrict__ lj_params,
     const float2* __restrict__ lj_cap,
     float force_cap,
@@ -15,8 +22,9 @@ __global__ void lj_verlet_kernel(
     int natoms, int ntypes,
     float rc2, float L, float inv_L)
 {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    int lane = threadIdx.x & 31;
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    const int i = t / TPA;
+    const int sub = t & (TPA - 1);
 
     float fx = 0.0f, fy = 0.0f, fz = 0.0f, pe_i = 0.0f;
     float vir_xx = 0.0f, vir_xy = 0.0f, vir_xz = 0.0f;
@@ -27,8 +35,8 @@ __global__ void lj_verlet_kernel(
         int type_i = __float_as_int(pos_i.w);
 
         int nneigh = __ldg(&num_neighbors[i]);
-        #pragma unroll 8
-        for (int k = 0; k < nneigh; k++) {
+        #pragma unroll 4
+        for (int k = sub; k < nneigh; k += TPA) {
             int j = neighbors[k * natoms + i];
             float4 pos_j = __ldg(&pos[j]);
             int type_j = __float_as_int(pos_j.w);
@@ -72,69 +80,48 @@ __global__ void lj_verlet_kernel(
                 vir_zz += 0.5f * fzij * dz;
             }
         }
-
-        force[i] = make_float4(fx, fy, fz, pe_i);
     }
-
-    for (int offset = 16; offset > 0; offset >>= 1) {
-        vir_xx += __shfl_down_sync(0xFFFFFFFF, vir_xx, offset);
-        vir_xy += __shfl_down_sync(0xFFFFFFFF, vir_xy, offset);
-        vir_xz += __shfl_down_sync(0xFFFFFFFF, vir_xz, offset);
-        vir_yy += __shfl_down_sync(0xFFFFFFFF, vir_yy, offset);
-        vir_yz += __shfl_down_sync(0xFFFFFFFF, vir_yz, offset);
-        vir_zz += __shfl_down_sync(0xFFFFFFFF, vir_zz, offset);
-    }
-
-    extern __shared__ float s_virial[];
-    if (lane == 0) {
-        int wid = threadIdx.x >> 5;
-        s_virial[wid * 6 + 0] = vir_xx;
-        s_virial[wid * 6 + 1] = vir_xy;
-        s_virial[wid * 6 + 2] = vir_xz;
-        s_virial[wid * 6 + 3] = vir_yy;
-        s_virial[wid * 6 + 4] = vir_yz;
-        s_virial[wid * 6 + 5] = vir_zz;
-    }
-    __syncthreads();
-
-    if (threadIdx.x == 0) {
-        int num_warps = blockDim.x >> 5;
-        float b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0;
-        for (int w = 0; w < num_warps; w++) {
-            b0 += s_virial[w * 6 + 0];
-            b1 += s_virial[w * 6 + 1];
-            b2 += s_virial[w * 6 + 2];
-            b3 += s_virial[w * 6 + 3];
-            b4 += s_virial[w * 6 + 4];
-            b5 += s_virial[w * 6 + 5];
+    if (TPA > 1) {
+#pragma unroll
+        for (int o = TPA / 2; o > 0; o >>= 1) {
+            fx += __shfl_down_sync(0xffffffffu, fx, o, TPA);
+            fy += __shfl_down_sync(0xffffffffu, fy, o, TPA);
+            fz += __shfl_down_sync(0xffffffffu, fz, o, TPA);
+            pe_i += __shfl_down_sync(0xffffffffu, pe_i, o, TPA);
         }
-        atomicAdd(&virial[0], b0);
-        atomicAdd(&virial[1], b1);
-        atomicAdd(&virial[2], b2);
-        atomicAdd(&virial[3], b3);
-        atomicAdd(&virial[4], b4);
-        atomicAdd(&virial[5], b5);
     }
+    if (i < natoms && sub == 0) force[i] = make_float4(fx, fy, fz, pe_i);
+
+    float vir[6] = {vir_xx, vir_xy, vir_xz, vir_yy, vir_yz, vir_zz};
+    block_reduce_virial(vir, virial);
 }
 
-void launch_lj_kernel(const float4* pos, float4* force, float* virial,
+void launch_lj_kernel(const float4* pos, float4* force, double* virial,
                        const float2* lj_params,
                        const int* neighbors, const int* num_neighbors,
                        int natoms, int ntypes,
                        float rc2, float L, float inv_L,
                        cudaStream_t stream,
-                       const float2* lj_cap, float force_cap)
+                       const float2* lj_cap, float force_cap, int tpa)
 {
-    int blocks = div_ceil(natoms, 256);
-    int smem = (256 / 32) * 6 * sizeof(float);
-    if (lj_cap && force_cap > 0.0f)
-        lj_verlet_kernel<true><<<blocks, 256, smem, stream>>>(
-            pos, force, virial, lj_params, lj_cap, force_cap,
-            neighbors, num_neighbors, natoms, ntypes, rc2, L, inv_L);
-    else
-        lj_verlet_kernel<false><<<blocks, 256, smem, stream>>>(
-            pos, force, virial, lj_params, nullptr, 0.0f,
-            neighbors, num_neighbors, natoms, ntypes, rc2, L, inv_L);
+    if (tpa <= 0) tpa = pair_threads_per_atom(natoms);
+    const bool cap = lj_cap && force_cap > 0.0f;
+    const int blocks = div_ceil(natoms * tpa, 256);
+#define FASTMD_LJ_LAUNCH(C, T)                                                     \
+    lj_verlet_kernel<C, T><<<blocks, 256, 0, stream>>>(                           \
+        pos, force, virial, lj_params, lj_cap, force_cap,                         \
+        neighbors, num_neighbors, natoms, ntypes, rc2, L, inv_L)
+    switch ((cap ? 16 : 0) + tpa) {
+        case 1:  FASTMD_LJ_LAUNCH(false, 1); break;
+        case 2:  FASTMD_LJ_LAUNCH(false, 2); break;
+        case 4:  FASTMD_LJ_LAUNCH(false, 4); break;
+        case 8:  FASTMD_LJ_LAUNCH(false, 8); break;
+        case 17: FASTMD_LJ_LAUNCH(true, 1); break;
+        case 18: FASTMD_LJ_LAUNCH(true, 2); break;
+        case 20: FASTMD_LJ_LAUNCH(true, 4); break;
+        default: FASTMD_LJ_LAUNCH(true, 8); break;
+    }
+#undef FASTMD_LJ_LAUNCH
 }
 
 std::vector<float2> lj_force_cap_table(const std::vector<float2>& lj_params,

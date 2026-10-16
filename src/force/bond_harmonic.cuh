@@ -9,7 +9,7 @@ struct BondHarmonicParams {
 
 void launch_bond_harmonic_kernel(const float4* __restrict__ pos,
                                   float4* __restrict__ force,
-                                  float* __restrict__ virial,
+                                  double* __restrict__ virial,
                                   const int2* __restrict__ bonds,
                                   const int* __restrict__ bond_types,
                                   const BondHarmonicParams* __restrict__ params,

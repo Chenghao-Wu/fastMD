@@ -64,37 +64,33 @@ Simulation::Simulation(const SimParams& params, TopologyData topo)
 
     upload_force_field();
 
-    morton_.allocate(p_.natoms_padded);
     verlet_.allocate(params_.natoms, params_.rc + params_.skin, box_L_);
-    CUDA_CHECK(cudaMalloc(&d_max_dr2_int_, sizeof(int)));
-    CUDA_CHECK(cudaMemset(d_max_dr2_int_, 0, sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&d_virial_, 6 * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_status_, sizeof(DeviceStatus)));
+    CUDA_CHECK(cudaHostAlloc(&h_status_, sizeof(DeviceStatus), cudaHostAllocDefault));
+    *h_status_ = DeviceStatus{0, box_L_, inv_L_, box_L_ * box_L_ * box_L_};
+    CUDA_CHECK(cudaMemcpy(d_status_, h_status_, sizeof(DeviceStatus), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMalloc(&d_step_, sizeof(int)));
+    const int first_step = 1;
+    CUDA_CHECK(cudaMemcpy(d_step_, &first_step, sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMalloc(&d_virial_, 6 * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_out4_, p_.natoms_padded * sizeof(float4)));
 
-    // Spatial sorting is kept to the previous policy (systems without
-    // topology or Ewald) until it has been benchmarked for polymers; the
-    // permutation itself is now complete for every per-particle field.
-    sort_enabled_ = topo_.bonds.empty() && topo_.angles.empty() &&
-                    topo_.dihedrals.empty() && !params_.ewald_on;
 
-    CUDA_CHECK(cudaStreamCreate(&stream_lj_));
-    CUDA_CHECK(cudaStreamCreate(&stream_bonded_));
-    CUDA_CHECK(cudaStreamCreate(&stream_io_));
-    CUDA_CHECK(cudaEventCreateWithFlags(&force_done_lj_, cudaEventDisableTiming));
-    CUDA_CHECK(cudaEventCreateWithFlags(&force_done_bonded_, cudaEventDisableTiming));
-    CUDA_CHECK(cudaEventCreateWithFlags(&pos_ready_, cudaEventDisableTiming));
+    // Blocking stream: stray legacy-default-stream operations (synchronous
+    // copies in output code) still order after it.
+    CUDA_CHECK(cudaStreamCreate(&stream_));
 
     setup_integrator();
     setup_analysis();
 
-    if (sort_enabled_) spatial_sort();
     build_neighbor_list();
+    tune_pair_tpa();
     launch_forces();
-    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
 
     if (params_.ensemble != Ensemble::Langevin) {
         // first pre-force thermostat half-step uses the raw kinetic energy
-        float init_ke = compute_ke_only(p_.vel, p_.pos, params_.natoms, d_ke_buf_);
+        float init_ke = compute_ke_only(p_.vel, p_.pos, params_.natoms, d_ke_buf_, stream_);
         CUDA_CHECK(cudaMemcpy(&d_nh_state_->chain_KE_carry, &init_ke, sizeof(float),
                               cudaMemcpyHostToDevice));
     }
@@ -144,20 +140,16 @@ void Simulation::upload_force_field() {
 }
 
 void Simulation::setup_integrator() {
-    langevin_.init(p_.natoms_padded, params_.Tdamp, params_.dt, params_.T_start, params_.seed);
+    langevin_.init(p_.natoms_padded, params_.Tdamp, params_.dt, params_.T_start, params_.seed,
+                   params_.T_stop, params_.nsteps);
     if (params_.ensemble != Ensemble::Langevin) {
         nose_hoover_.init(params_);
         allocate_nh_device_state(d_nh_state_);
         init_nh_device_state(nose_hoover_, d_nh_state_);
         CUDA_CHECK(cudaMalloc(&d_ke_buf_, sizeof(float)));
     }
-    if (params_.ensemble == Ensemble::NPT_NH) {
-        allocate_npt_scratch(npt_scratch_);
-        float V0 = nose_hoover_.V, L0 = nose_hoover_.L, inv_L0 = nose_hoover_.inv_L;
-        CUDA_CHECK(cudaMemcpy(npt_scratch_.d_V, &V0, sizeof(float), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(npt_scratch_.d_L, &L0, sizeof(float), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(npt_scratch_.d_inv_L, &inv_L0, sizeof(float), cudaMemcpyHostToDevice));
-    }
+    if (params_.ensemble == Ensemble::NPT_NH)
+        allocate_npt_scratch(npt_scratch_, &d_status_->V, &d_status_->L, &d_status_->inv_L);
 }
 
 void Simulation::setup_analysis() {
@@ -203,32 +195,47 @@ void Simulation::print_setup() const {
     if (params_.rg_on) printf("  rg_on");
     if (params_.stress_on) printf("  stress_on");
     if (params_.restart_freq >= 0) printf("  restart_on");
-    printf("\n[setup]  neighbor list: capacity=%d  max_count=%d  cells=%d^3\n\n",
-           verlet_.max_neighbors, verlet_.max_count, verlet_.nx);
+    printf("\n[setup]  neighbor list: capacity=%d  max_count=%d  cells=%d^3  pair threads/atom=%d\n\n",
+           verlet_.max_neighbors, verlet_.max_count, verlet_.nx, pair_tpa_);
 }
 
 // ---------------------------------------------------------------------------
 // Neighbor list / spatial sorting
 // ---------------------------------------------------------------------------
 
-void Simulation::spatial_sort() {
-    const int* order = morton_.compute_order(p_.pos, p_.natoms, inv_L_);
-    p_.apply_permutation(order);
-    t_.remap(p_.rank);
-}
-
+// Rebuild the neighbor list; every sort_every-th rebuild first reorders all
+// particle data into cell order (ParticleData moves every per-particle field,
+// DeviceTopology remaps the bonded lists).
 void Simulation::build_neighbor_list() {
     if (box_L_ < 2.0f * params_.rc)
         throw std::runtime_error("box length " + std::to_string(box_L_) +
                                  " is smaller than 2*rc: minimum image is invalid");
-    CUDA_CHECK(cudaMemcpy(p_.pos_ref, p_.pos, p_.natoms_padded * sizeof(float4),
-                          cudaMemcpyDeviceToDevice));
-    CUDA_CHECK(cudaMemset(d_max_dr2_int_, 0, sizeof(int)));
-    verlet_.build(p_.pos, params_.natoms, box_L_, inv_L_, p_.tag,
-                  t_.excl_offsets, t_.excl_list, params_.rc + params_.skin);
+    const float rc_skin = params_.rc + params_.skin;
+    verlet_.bin(p_.pos, box_L_, rc_skin, stream_);
+    bool sort_now = params_.sort_every > 0 && (n_rebuilds_ % params_.sort_every == 0);
+    if (sort_now) {
+        p_.apply_permutation(verlet_.order_padded(), stream_);
+        t_.remap(p_.rank, stream_);
+        n_sorts_++;
+    }
+    verlet_.build_from_bins(p_.pos, sort_now, box_L_, inv_L_, p_.tag,
+                            t_.excl_offsets, t_.excl_list, rc_skin, stream_);
+    CUDA_CHECK(cudaMemcpyAsync(p_.pos_ref, p_.pos, p_.natoms_padded * sizeof(float4),
+                               cudaMemcpyDeviceToDevice, stream_));
+    CUDA_CHECK(cudaMemsetAsync(&d_status_->max_dr2_bits, 0, sizeof(int), stream_));
     box_L_at_build_ = box_L_;
     steps_since_rebuild_ = 0;
     n_rebuilds_++;
+}
+
+void Simulation::read_status() {
+    CUDA_CHECK(cudaMemcpyAsync(h_status_, d_status_, sizeof(DeviceStatus),
+                               cudaMemcpyDeviceToHost, stream_));
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+    if (params_.ensemble == Ensemble::NPT_NH) {
+        box_L_ = h_status_->L;
+        inv_L_ = h_status_->inv_L;
+    }
 }
 
 // A pair outside the list (distance > rc + skin at build time) can come
@@ -238,15 +245,14 @@ void Simulation::build_neighbor_list() {
 // stays valid while  s (rc + skin) - 2 d > rc.
 bool Simulation::need_rebuild() {
     steps_since_rebuild_++;
-    int max_int;
-    CUDA_CHECK(cudaMemcpy(&max_int, d_max_dr2_int_, sizeof(int), cudaMemcpyDeviceToHost));
+    read_status();
     float max_dr2;
-    std::memcpy(&max_dr2, &max_int, sizeof(float));
+    std::memcpy(&max_dr2, &h_status_->max_dr2_bits, sizeof(float));
     float s = box_L_ / box_L_at_build_;
     float half_margin = 0.5f * (s * (params_.rc + params_.skin) - params_.rc);
     bool triggered = half_margin <= 0.0f || max_dr2 > half_margin * half_margin;
-    const int max_steps_between_rebuilds = 20;
-    return triggered || steps_since_rebuild_ >= max_steps_between_rebuilds;
+    bool too_old = params_.neigh_max_age > 0 && steps_since_rebuild_ >= params_.neigh_max_age;
+    return triggered || too_old;
 }
 
 // ---------------------------------------------------------------------------
@@ -257,85 +263,112 @@ void Simulation::launch_forces() {
     const float L = box_L_, inv_L = inv_L_;
     const int n = params_.natoms;
 
-    CUDA_CHECK(cudaEventRecord(pos_ready_, 0));
-    CUDA_CHECK(cudaStreamWaitEvent(stream_lj_, pos_ready_, 0));
-    CUDA_CHECK(cudaStreamWaitEvent(stream_bonded_, pos_ready_, 0));
-    CUDA_CHECK(cudaMemsetAsync(d_virial_, 0, 6 * sizeof(float), stream_lj_));
+    cudaStream_t st = stream_;
+    CUDA_CHECK(cudaMemsetAsync(d_virial_, 0, 6 * sizeof(double), st));
 
     // Nonbonded kernels overwrite force[i] (=), everything after accumulates.
+    launch_pair_kernel(pair_tpa_);
     if (params_.ewald_on) {
-        launch_lj_coul_long_kernel(p_.pos, p_.charge, p_.force, d_virial_, d_lj_params_,
-                                   verlet_.neighbors, verlet_.num_neighbors,
-                                   n, params_.ntypes, params_.coul_const, params_.ewald_alpha,
-                                   params_.rc2, L, inv_L, stream_lj_);
         launch_ewald_sf_kernel(p_.pos, p_.charge, d_ewald_kvecs_, d_ewald_sfac_,
-                               n, params_.ewald_kcount, L, stream_lj_);
+                               n, params_.ewald_kcount, L, st);
         launch_ewald_recip_kernel(p_.pos, p_.charge, d_ewald_kvecs_, d_ewald_sfac_,
                                   p_.force, d_virial_, n, params_.ewald_kcount,
-                                  params_.coul_const, params_.ewald_alpha, L, stream_lj_);
+                                  params_.coul_const, params_.ewald_alpha, L, st);
         launch_ewald_excl_kernel(p_.pos, p_.charge, p_.force, d_virial_,
                                  t_.excl13_offsets, t_.excl13_list, p_.rank,
                                  n, t_.nexcl13, params_.coul_const, params_.ewald_alpha,
-                                 L, inv_L, stream_lj_);
-    } else {
-        launch_lj_kernel(p_.pos, p_.force, d_virial_, d_lj_params_,
-                         verlet_.neighbors, verlet_.num_neighbors,
-                         n, params_.ntypes, params_.rc2, L, inv_L, stream_lj_,
-                         d_lj_cap_, params_.lj_force_cap);
+                                 L, inv_L, st);
     }
     if (t_.npairs14 > 0) {
         launch_pair14_kernel(p_.pos, p_.charge, p_.force, d_virial_, t_.pairs14, d_lj_params_,
                              t_.npairs14, params_.ntypes, params_.coul_const,
                              params_.ewald_alpha, params_.lj14, params_.ewald14_coul,
-                             L, inv_L, stream_lj_);
+                             L, inv_L, st);
     }
     if (d_table_params_) {
         launch_table_kernel(p_.pos, p_.force, d_virial_, d_table_idx_, d_table_params_,
                             d_table_data_, verlet_.neighbors, verlet_.num_neighbors,
-                            n, params_.ntypes, params_.rc2, L, inv_L, stream_lj_);
+                            n, params_.ntypes, params_.rc2, L, inv_L, st, pair_tpa_);
     }
-    CUDA_CHECK(cudaEventRecord(force_done_lj_, stream_lj_));
 
-    // Bonded terms accumulate into the same force buffer, so they must follow
-    // the overwriting nonbonded kernel.
-    CUDA_CHECK(cudaStreamWaitEvent(stream_bonded_, force_done_lj_, 0));
+    // Bonded terms accumulate into the same force buffer, so they follow the
+    // overwriting nonbonded kernel on the same stream.
     if (t_.nbonds > 0 && d_bond_table_data_) {
         launch_bond_table_kernel(p_.pos, p_.force, d_virial_, t_.bonds, t_.bond_type,
                                  d_bond_table_idx_, d_bond_table_params_, d_bond_table_data_,
-                                 t_.nbonds, L, inv_L, stream_bonded_);
+                                 t_.nbonds, L, inv_L, st);
     } else if (t_.nbonds > 0 && d_hbond_params_) {
         launch_bond_harmonic_kernel(p_.pos, p_.force, d_virial_, t_.bonds, t_.bond_type,
-                                    d_hbond_params_, t_.nbonds, L, inv_L, stream_bonded_);
+                                    d_hbond_params_, t_.nbonds, L, inv_L, st);
     } else if (t_.nbonds > 0 && d_fene_params_) {
         launch_fene_kernel(p_.pos, p_.force, d_virial_, t_.bonds, t_.bond_type,
-                           d_fene_params_, t_.nbonds, 1, L, inv_L, stream_bonded_);
+                           d_fene_params_, t_.nbonds, 1, L, inv_L, st);
     }
     if (t_.nangles > 0 && d_angle_table_data_) {
         launch_angle_table_kernel(p_.pos, p_.force, d_virial_, t_.angles, d_angle_table_idx_,
                                   d_angle_table_params_, d_angle_table_data_,
-                                  t_.nangles, L, inv_L, stream_bonded_);
+                                  t_.nangles, L, inv_L, st);
     } else if (t_.nangles > 0 && d_angle_params_) {
         launch_angle_kernel(p_.pos, p_.force, d_virial_, t_.angles, d_angle_params_,
-                            t_.nangles, L, inv_L, stream_bonded_);
+                            t_.nangles, L, inv_L, st);
     }
     if (t_.ndihedrals > 0 && d_dihedral_params_) {
         launch_dihedral_opls_kernel(p_.pos, p_.force, d_virial_, t_.dihedrals,
                                     t_.dihedral_type, d_dihedral_params_,
-                                    t_.ndihedrals, L, inv_L, stream_bonded_);
+                                    t_.ndihedrals, L, inv_L, st);
     }
-    CUDA_CHECK(cudaEventRecord(force_done_bonded_, stream_bonded_));
-    CUDA_CHECK(cudaStreamWaitEvent(0, force_done_lj_, 0));
-    CUDA_CHECK(cudaStreamWaitEvent(0, force_done_bonded_, 0));
     CUDA_CHECK(cudaGetLastError());
+}
+
+void Simulation::launch_pair_kernel(int tpa) {
+    const int n = params_.natoms;
+    if (params_.ewald_on)
+        launch_lj_coul_long_kernel(p_.pos, p_.charge, p_.force, d_virial_, d_lj_params_,
+                                   verlet_.neighbors, verlet_.num_neighbors,
+                                   n, params_.ntypes, params_.coul_const, params_.ewald_alpha,
+                                   params_.rc2, box_L_, inv_L_, stream_, tpa);
+    else
+        launch_lj_kernel(p_.pos, p_.force, d_virial_, d_lj_params_,
+                         verlet_.neighbors, verlet_.num_neighbors,
+                         n, params_.ntypes, params_.rc2, box_L_, inv_L_, stream_,
+                         d_lj_cap_, params_.lj_force_cap, tpa);
+}
+
+// Time the overwriting pair kernel with 1, 2, 4 and 8 threads per particle on
+// the actual system and keep the fastest (a few milliseconds at start-up).
+// The optimum depends on system size, neighbor count and GPU.
+void Simulation::tune_pair_tpa() {
+    if (params_.pair_tpa > 0) { pair_tpa_ = params_.pair_tpa; return; }
+    cudaEvent_t e0, e1;
+    CUDA_CHECK(cudaEventCreate(&e0));
+    CUDA_CHECK(cudaEventCreate(&e1));
+    float best_ms = 1e30f;
+    for (int tpa : {1, 2, 4, 8}) {
+        launch_pair_kernel(tpa);   // warm-up
+        CUDA_CHECK(cudaEventRecord(e0, stream_));
+        const int reps = 10;
+        for (int r = 0; r < reps; r++) launch_pair_kernel(tpa);
+        CUDA_CHECK(cudaEventRecord(e1, stream_));
+        CUDA_CHECK(cudaEventSynchronize(e1));
+        float ms = 0;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, e0, e1));
+        if (ms < 0.97f * best_ms) {   // prefer fewer threads unless clearly faster
+            best_ms = ms;
+            pair_tpa_ = tpa;
+        }
+    }
+    CUDA_CHECK(cudaEventDestroy(e0));
+    CUDA_CHECK(cudaEventDestroy(e1));
 }
 
 void Simulation::compute_forces() {
     if (need_rebuild()) build_neighbor_list();
     launch_forces();
-    CUDA_CHECK(cudaStreamSynchronize(0));
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
 }
 
 void Simulation::write_forces(const std::string& path) const {
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
     std::vector<float4> f = p_.download_forces();
     FILE* fp = fopen(path.c_str(), "w");
     if (!fp) throw std::runtime_error("cannot open forces_dump_file " + path);
@@ -351,92 +384,74 @@ void Simulation::write_forces(const std::string& path) const {
 
 void Simulation::integrate_pre_force() {
     const float hdt = 0.5f * params_.dt;
-    const float frac = (float)(step_ - 1) / (float)params_.nsteps;
+    const int n = params_.natoms;
+    int* d_max_dr2 = &d_status_->max_dr2_bits;
 
     if (params_.ensemble == Ensemble::Langevin) {
-        langevin_.kT = params_.T_start + (params_.T_stop - params_.T_start) * frac;
-        launch_integrator_pre_force(p_.pos, p_.vel, p_.force, p_.pos_ref, d_max_dr2_int_,
-                                    p_.image, p_.tag, (uint64_t)step_, langevin_,
-                                    params_.natoms, box_L_, inv_L_, hdt);
-        return;
-    }
-
-    nose_hoover_.T_target = nose_hoover_.T_start + (nose_hoover_.T_stop - nose_hoover_.T_start) * frac;
-    if (nose_hoover_.is_npt) {
-        nose_hoover_.P_target = nose_hoover_.P_start + (nose_hoover_.P_stop - nose_hoover_.P_start) * frac;
-        set_nh_targets_device(d_nh_state_, nose_hoover_.T_target, nose_hoover_.P_target);
+        launch_integrator_pre_force(p_.pos, p_.vel, p_.force, p_.pos_ref, d_max_dr2,
+                                    p_.image, p_.tag, d_step_, langevin_,
+                                    n, box_L_, inv_L_, hdt, stream_);
+    } else if (nose_hoover_.is_npt) {
         launch_nh_npt_ke_and_virial_trace(p_.vel, d_virial_, p_.pos, d_ke_buf_,
-                                          npt_scratch_.d_virial_trace, params_.natoms);
-        nh_npt_chain_baro_kernel<<<1, 32>>>(
+                                          npt_scratch_.d_virial_trace, n, stream_);
+        nh_npt_chain_baro_kernel<<<1, 32, 0, stream_>>>(
             d_nh_state_, d_ke_buf_, npt_scratch_.d_virial_trace, true,
             nose_hoover_.M, nose_hoover_.Q1, nose_hoover_.Q_rest, nose_hoover_.W,
-            hdt, params_.dt, nose_hoover_.V0, params_.natoms,
+            hdt, params_.dt, nose_hoover_.V0, n,
             npt_scratch_.d_V, npt_scratch_.d_L, npt_scratch_.d_inv_L,
             npt_scratch_.d_baro_scale, npt_scratch_.d_exp_vW,
             npt_scratch_.d_v_eps_W, npt_scratch_.d_v_eps_W_dt);
-        CUDA_CHECK(cudaMemcpy(&nose_hoover_.L, npt_scratch_.d_L, sizeof(float), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(&nose_hoover_.inv_L, npt_scratch_.d_inv_L, sizeof(float), cudaMemcpyDeviceToHost));
-        box_L_ = nose_hoover_.L;
-        inv_L_ = nose_hoover_.inv_L;
-        launch_nh_npt_pre_force_fused(p_.pos, p_.vel, p_.force, p_.pos_ref, d_max_dr2_int_,
+        launch_nh_npt_pre_force_fused(p_.pos, p_.vel, p_.force, p_.pos_ref, d_max_dr2,
                                       p_.image, d_nh_state_, npt_scratch_.d_baro_scale,
                                       npt_scratch_.d_exp_vW, npt_scratch_.d_v_eps_W_dt,
-                                      hdt, params_.dt, params_.natoms, box_L_, inv_L_);
+                                      hdt, params_.dt, n, npt_scratch_.d_L,
+                                      npt_scratch_.d_inv_L, stream_);
     } else {
-        set_nh_targets_device(d_nh_state_, nose_hoover_.T_target, 0.0f);
-        nh_propagate_chain_kernel<<<1, 32>>>(d_nh_state_, d_ke_buf_, true,
-                                             nose_hoover_.M, nose_hoover_.Q1, nose_hoover_.Q_rest,
-                                             hdt, params_.natoms);
-        launch_nh_nvt_pre_force_fused(p_.pos, p_.vel, p_.force, p_.pos_ref, d_max_dr2_int_,
+        nh_propagate_chain_kernel<<<1, 32, 0, stream_>>>(
+            d_nh_state_, d_ke_buf_, true, nose_hoover_.M, nose_hoover_.Q1,
+            nose_hoover_.Q_rest, hdt, n);
+        launch_nh_nvt_pre_force_fused(p_.pos, p_.vel, p_.force, p_.pos_ref, d_max_dr2,
                                       p_.image, d_nh_state_, hdt, params_.dt,
-                                      params_.natoms, box_L_, inv_L_);
+                                      n, box_L_, inv_L_, stream_);
     }
 }
 
 void Simulation::integrate_post_force() {
     const float hdt = 0.5f * params_.dt;
+    const int n = params_.natoms;
     if (params_.ensemble == Ensemble::Langevin) {
-        launch_integrator_post_force(p_.vel, p_.force, p_.pos, params_.natoms, hdt);
-        return;
-    }
-    if (nose_hoover_.is_npt) {
-        launch_nh_v_verlet_half(p_.vel, p_.force, p_.pos, params_.natoms, hdt);
+        launch_integrator_post_force(p_.vel, p_.force, p_.pos, n, hdt, stream_, d_step_);
+    } else if (nose_hoover_.is_npt) {
+        launch_nh_v_verlet_half(p_.vel, p_.force, p_.pos, n, hdt, stream_);
         launch_nh_npt_ke_and_virial_trace(p_.vel, d_virial_, p_.pos, d_ke_buf_,
-                                          npt_scratch_.d_virial_trace, params_.natoms);
-        nh_npt_chain_baro_kernel<<<1, 32>>>(
+                                          npt_scratch_.d_virial_trace, n, stream_);
+        nh_npt_chain_baro_kernel<<<1, 32, 0, stream_>>>(
             d_nh_state_, d_ke_buf_, npt_scratch_.d_virial_trace, false,
             nose_hoover_.M, nose_hoover_.Q1, nose_hoover_.Q_rest, nose_hoover_.W,
-            hdt, params_.dt, nose_hoover_.V0, params_.natoms,
+            hdt, params_.dt, nose_hoover_.V0, n,
             npt_scratch_.d_V, npt_scratch_.d_L, npt_scratch_.d_inv_L,
             npt_scratch_.d_baro_scale, npt_scratch_.d_exp_vW,
             npt_scratch_.d_v_eps_W, npt_scratch_.d_v_eps_W_dt);
-        launch_nh_barostat_vel_half(p_.vel, npt_scratch_.d_v_eps_W,
-                                    1.0f / (3.0f * params_.natoms), params_.natoms, hdt);
-        launch_nh_global_scale_vel(p_.vel, d_nh_state_, params_.natoms);
-        CUDA_CHECK(cudaMemcpy(&nose_hoover_.L, npt_scratch_.d_L, sizeof(float), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(&nose_hoover_.inv_L, npt_scratch_.d_inv_L, sizeof(float), cudaMemcpyDeviceToHost));
-        box_L_ = nose_hoover_.L;
-        inv_L_ = nose_hoover_.inv_L;
+        launch_nh_barostat_vel_half(p_.vel, npt_scratch_.d_v_eps_W, 1.0f / (3.0f * n), n, hdt,
+                                    stream_);
+        launch_nh_global_scale_vel(p_.vel, d_nh_state_, n, stream_);
     } else {
-        CUDA_CHECK(cudaMemsetAsync(d_ke_buf_, 0, sizeof(float), 0));
-        launch_nh_nvt_v_half_ke_reduce(p_.vel, p_.force, p_.pos, d_ke_buf_, params_.natoms, hdt);
-        nh_propagate_chain_kernel<<<1, 32>>>(d_nh_state_, d_ke_buf_, false,
-                                             nose_hoover_.M, nose_hoover_.Q1, nose_hoover_.Q_rest,
-                                             hdt, params_.natoms);
-        launch_nh_global_scale_vel(p_.vel, d_nh_state_, params_.natoms);
+        CUDA_CHECK(cudaMemsetAsync(d_ke_buf_, 0, sizeof(float), stream_));
+        launch_nh_nvt_v_half_ke_reduce(p_.vel, p_.force, p_.pos, d_ke_buf_, n, hdt, stream_);
+        nh_propagate_chain_kernel<<<1, 32, 0, stream_>>>(
+            d_nh_state_, d_ke_buf_, false, nose_hoover_.M, nose_hoover_.Q1,
+            nose_hoover_.Q_rest, hdt, n);
+        launch_nh_global_scale_vel(p_.vel, d_nh_state_, n, stream_);
     }
+    CUDA_CHECK(cudaGetLastError());
 }
 
 void Simulation::step() {
     ++step_;
     integrate_pre_force();
-    if (need_rebuild()) {
-        if (sort_enabled_ && params_.ensemble == Ensemble::Langevin) spatial_sort();
-        build_neighbor_list();
-    }
+    if (need_rebuild()) build_neighbor_list();
     launch_forces();
     integrate_post_force();
-    CUDA_CHECK(cudaStreamSynchronize(0));
 }
 
 // ---------------------------------------------------------------------------
@@ -444,6 +459,7 @@ void Simulation::step() {
 // ---------------------------------------------------------------------------
 
 void Simulation::write_restart(const std::string& fname, int64_t step) {
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
     RestartFrame f;
     f.pos = p_.download_positions();
     f.vel = p_.download_velocities();
@@ -466,11 +482,18 @@ void Simulation::write_outputs() {
     const int s = step_;
     bool need_thermo = params_.thermo_on && (s % params_.thermo_freq == 0);
     bool need_stress = params_.stress_on && (s % params_.stress_freq == 0);
+    bool need_rg = params_.rg_on && s % params_.rg_freq == 0;
+    bool need_dump = params_.dump_freq > 0 && s % params_.dump_freq == 0;
+    bool need_restart = params_.restart_freq > 0 && s % params_.restart_freq == 0 &&
+                        s != params_.nsteps;
+    if (!(need_thermo || need_stress || need_rg || need_dump || need_restart)) return;
+    // the barostat may have changed the box during the post-force half step
+    read_status();
 
     if (need_thermo || need_stress) {
         ThermoOutput thermo;
         compute_thermo(p_.vel, p_.pos, p_.force, d_virial_, params_.natoms, box_L_, &thermo,
-                       thermo_bufs_, s, need_thermo ? thermo_bufs_.fp : nullptr, 0,
+                       thermo_bufs_, s, need_thermo ? thermo_bufs_.fp : nullptr, stream_,
                        params_.ewald_on ? params_.ewald_self_offset / params_.natoms : 0.0f);
         if (need_thermo) {
             float etot = thermo.kinetic_energy + thermo.potential_energy;
@@ -488,18 +511,17 @@ void Simulation::write_outputs() {
         }
     }
 
-    if (params_.rg_on && s % params_.rg_freq == 0) {
+    if (need_rg) {
         float rg;
-        compute_rg(p_.pos, p_.image, p_.rank, rg_bufs_, box_L_, s, &rg);
+        compute_rg(p_.pos, p_.image, p_.rank, rg_bufs_, box_L_, s, &rg, stream_);
     }
 
-    if (params_.dump_freq > 0 && s % params_.dump_freq == 0) {
-        p_.gather_float4_by_tag(d_out4_, p_.pos, stream_io_);
-        dumper_.dump_frame(d_out4_, s, box_L_, stream_io_);
+    if (need_dump) {
+        p_.gather_float4_by_tag(d_out4_, p_.pos, stream_);
+        dumper_.dump_frame(d_out4_, s, box_L_, stream_);
     }
 
-    if (params_.restart_freq > 0 && s % params_.restart_freq == 0 && s != params_.nsteps)
-        write_restart(build_restart_filename(params_.restart_file, s), s);
+    if (need_restart) write_restart(build_restart_filename(params_.restart_file, s), s);
 }
 
 void Simulation::print_progress() {
@@ -555,7 +577,8 @@ void Simulation::run() {
         write_outputs();
         print_progress();
     }
-    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+    read_status();
     auto t_end = std::chrono::steady_clock::now();
     double elapsed = std::chrono::duration<double>(t_end - t_start_).count();
     int nrun = step_ - first;
@@ -563,9 +586,9 @@ void Simulation::run() {
     if (params_.restart_freq >= 0)
         write_restart(build_restart_final_filename(params_.restart_file), step_);
 
-    printf("Wall time: %.3f s  |  Steps/s: %.1f  |  ns/day: %.3f  |  rebuilds: %d\n",
+    printf("Wall time: %.3f s  |  Steps/s: %.1f  |  ns/day: %.3f  |  rebuilds: %d  sorts: %d\n",
            elapsed, nrun / elapsed, (nrun * params_.dt / 1000.0) / (elapsed / 86400.0),
-           n_rebuilds_);
+           n_rebuilds_, n_sorts_);
     finish();
 }
 
@@ -587,7 +610,6 @@ Simulation::~Simulation() {
     free_dev(d_ke_buf_);
     langevin_.free();
     verlet_.free();
-    morton_.free();
     free_dev(d_lj_params_);
     free_dev(d_lj_cap_);
     free_dev(d_fene_params_);
@@ -606,12 +628,11 @@ Simulation::~Simulation() {
     free_dev(d_ewald_kvecs_);
     free_dev(d_ewald_sfac_);
     free_dev(d_virial_);
-    free_dev(d_max_dr2_int_);
+    free_dev(d_status_);
+    if (h_status_) cudaFreeHost(h_status_);
+    free_dev(d_step_);
     free_dev(d_out4_);
     t_.free();
     p_.free();
-    for (cudaEvent_t e : {force_done_lj_, force_done_bonded_, pos_ready_})
-        if (e) cudaEventDestroy(e);
-    for (cudaStream_t s : {stream_lj_, stream_bonded_, stream_io_})
-        if (s) cudaStreamDestroy(s);
+    if (stream_) cudaStreamDestroy(stream_);
 }

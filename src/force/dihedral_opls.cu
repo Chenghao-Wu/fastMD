@@ -1,5 +1,6 @@
 #include "dihedral_opls.cuh"
 #include "../core/pbc.cuh"
+#include "../core/reduce.cuh"
 
 // Port of LAMMPS DihedralOPLS::compute() (src/MOLECULE/dihedral_opls.cpp).
 // Energy and force depend only on c = cos(phi); the gradient w.r.t. c is a
@@ -9,7 +10,7 @@
 __global__ void dihedral_opls_kernel(
     const float4* __restrict__ pos,
     float4* __restrict__ force,
-    float* __restrict__ virial,
+    double* __restrict__ virial,
     const int4* __restrict__ dihedrals,
     const int* __restrict__ dihedral_types,
     const OPLSDihedralParams* __restrict__ params,
@@ -153,42 +154,18 @@ __global__ void dihedral_opls_kernel(
         v4 = vb1y * f1z + vb2y * f3z + (vb3y + vb2y) * f4z;
     }
 
-    extern __shared__ float s_virial[];
-    s_virial[tid * 6 + 0] = v0;
-    s_virial[tid * 6 + 1] = v1;
-    s_virial[tid * 6 + 2] = v2;
-    s_virial[tid * 6 + 3] = v3;
-    s_virial[tid * 6 + 4] = v4;
-    s_virial[tid * 6 + 5] = v5;
-    __syncthreads();
-
-    if (tid == 0) {
-        float s0 = 0, s1 = 0, s2 = 0, s3 = 0, s4 = 0, s5 = 0;
-        for (int t = 0; t < blockDim.x; t++) {
-            s0 += s_virial[t * 6 + 0];
-            s1 += s_virial[t * 6 + 1];
-            s2 += s_virial[t * 6 + 2];
-            s3 += s_virial[t * 6 + 3];
-            s4 += s_virial[t * 6 + 4];
-            s5 += s_virial[t * 6 + 5];
-        }
-        atomicAdd(&virial[0], s0);
-        atomicAdd(&virial[1], s1);
-        atomicAdd(&virial[2], s2);
-        atomicAdd(&virial[3], s3);
-        atomicAdd(&virial[4], s4);
-        atomicAdd(&virial[5], s5);
-    }
+    float vir[6] = {v0, v1, v2, v3, v4, v5};
+    block_reduce_virial(vir, virial);
 }
 
-void launch_dihedral_opls_kernel(const float4* pos, float4* force, float* virial,
+void launch_dihedral_opls_kernel(const float4* pos, float4* force, double* virial,
                                   const int4* dihedrals, const int* dihedral_types,
                                   const OPLSDihedralParams* params,
                                   int ndihedrals, float L, float inv_L,
                                   cudaStream_t stream) {
     if (ndihedrals == 0) return;
     int blocks = div_ceil(ndihedrals, 256);
-    int smem = 256 * 6 * sizeof(float);
+    int smem = 0;
     dihedral_opls_kernel<<<blocks, 256, smem, stream>>>(
         pos, force, virial, dihedrals, dihedral_types, params,
         ndihedrals, L, inv_L);

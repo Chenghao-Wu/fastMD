@@ -53,8 +53,8 @@ TEST(Integrator, NVEEnergyConservation) {
     CUDA_CHECK(cudaMalloc(&d_pos_ref, np * sizeof(float4)));
     int* d_max_dr2;
     CUDA_CHECK(cudaMalloc(&d_max_dr2, sizeof(int)));
-    float* d_virial;
-    CUDA_CHECK(cudaMalloc(&d_virial, 6 * sizeof(float)));
+    double* d_virial;
+    CUDA_CHECK(cudaMalloc(&d_virial, 6 * sizeof(double)));
 
     std::vector<float2> h_lj = {{1.0f, 1.0f}};
     float2* d_lj = to_device(h_lj);
@@ -62,6 +62,10 @@ TEST(Integrator, NVEEnergyConservation) {
     VerletList verlet;
     verlet.allocate(N, rc + skin, L);
 
+    int one = 1;
+    int* d_step;
+    CUDA_CHECK(cudaMalloc(&d_step, sizeof(int)));
+    CUDA_CHECK(cudaMemcpy(d_step, &one, sizeof(int), cudaMemcpyHostToDevice));
     LangevinState lang;
     lang.init(np, 1e10f, dt, 1.0f, 12345);  // Tdamp≈∞ → gamma≈0 → NVE limit
 
@@ -71,7 +75,7 @@ TEST(Integrator, NVEEnergyConservation) {
     verlet.build(d_pos, N, L, inv_L, nullptr, nullptr, rc + skin);
 
     CUDA_CHECK(cudaMemset(d_force, 0, np * sizeof(float4)));
-    CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(float)));
+    CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(double)));
     launch_lj_kernel(d_pos, d_force, d_virial, d_lj,
                       verlet.neighbors, verlet.num_neighbors,
                       N, ntypes, rc2, L, inv_L);
@@ -91,7 +95,7 @@ TEST(Integrator, NVEEnergyConservation) {
 
     for (int step = 0; step < nsteps; step++) {
         launch_integrator_pre_force(d_pos, d_vel, d_force, d_pos_ref,
-                                     d_max_dr2, nullptr, nullptr, (uint64_t)step,
+                                     d_max_dr2, nullptr, nullptr, d_step,
                                      lang, N, L, inv_L, lang.half_dt);
 
         if (check_and_reset_trigger(d_max_dr2, skin)) {
@@ -101,12 +105,12 @@ TEST(Integrator, NVEEnergyConservation) {
         }
 
         CUDA_CHECK(cudaMemset(d_force, 0, np * sizeof(float4)));
-        CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(float)));
+        CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(double)));
         launch_lj_kernel(d_pos, d_force, d_virial, d_lj,
                           verlet.neighbors, verlet.num_neighbors,
                           N, ntypes, rc2, L, inv_L);
 
-        launch_integrator_post_force(d_vel, d_force, d_pos, N, lang.half_dt);
+        launch_integrator_post_force(d_vel, d_force, d_pos, N, lang.half_dt, 0, d_step);
         CUDA_CHECK(cudaDeviceSynchronize());
     }
 
@@ -116,6 +120,7 @@ TEST(Integrator, NVEEnergyConservation) {
     EXPECT_LT(drift, 0.01f) << "E0=" << E0 << " E_final=" << E_final;
 
     lang.free();
+    CUDA_CHECK(cudaFree(d_step));
     verlet.free();
     free_device(d_pos);
     free_device(d_vel);

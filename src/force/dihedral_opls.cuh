@@ -13,7 +13,7 @@ struct OPLSDihedralParams {
 
 void launch_dihedral_opls_kernel(const float4* __restrict__ pos,
                                   float4* __restrict__ force,
-                                  float* __restrict__ virial,
+                                  double* __restrict__ virial,
                                   const int4* __restrict__ dihedrals,
                                   const int* __restrict__ dihedral_types,
                                   const OPLSDihedralParams* __restrict__ params,

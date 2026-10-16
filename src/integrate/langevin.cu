@@ -5,12 +5,14 @@
 #include <curand_kernel.h>
 
 void LangevinState::init(int /*natoms_padded*/, float Tdamp, float dt,
-                         float temperature, uint64_t seed_in) {
+                         float T_start_in, uint64_t seed_in, float T_stop_in, int nsteps_in) {
     float gamma = 1.0f / Tdamp;
     c1 = expf(-gamma * dt);
     c2 = sqrtf(1.0f - c1 * c1);
     half_dt = 0.5f * dt;
-    kT = temperature;  // initial target, updated each step during ramping
+    T_start = T_start_in;
+    T_stop = T_stop_in < 0.0f ? T_start_in : T_stop_in;
+    nsteps = nsteps_in;
     seed = seed_in;
 }
 
@@ -22,12 +24,16 @@ __global__ void integrator_pre_force_kernel(
     int* __restrict__ d_max_dr2_int,
     int* __restrict__ image,
     const int* __restrict__ tag,
-    uint64_t seed, uint64_t step,
+    uint64_t seed, const int* __restrict__ d_step,
     int natoms, float L, float inv_L,
-    float half_dt, float c1, float c2, float kT)
+    float half_dt, float c1, float c2,
+    float T_start, float T_stop, int nsteps)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= natoms) return;
+    const int step = *d_step;
+    const float kT = T_start + (T_stop - T_start) *
+                     (nsteps > 0 ? (float)(step - 1) / (float)nsteps : 0.0f);
 
     float4 r = pos[i];
     float4 v = vel[i];
@@ -47,7 +53,7 @@ __global__ void integrator_pre_force_kernel(
 
     // Philox stream: subsequence = particle tag, one 4-word block per step
     curandStatePhilox4_32_10_t rs;
-    curand_init(seed, (unsigned long long)(tag ? tag[i] : i), step * 4ull, &rs);
+    curand_init(seed, (unsigned long long)(tag ? tag[i] : i), (unsigned long long)step * 4ull, &rs);
     float4 rand4 = curand_normal4(&rs);
 
     float noise_scale = c2 * sqrtf(kT / m_i);
@@ -80,24 +86,25 @@ __global__ void integrator_pre_force_kernel(
 
 void launch_integrator_pre_force(float4* pos, float4* vel, const float4* force,
                                   float4* pos_ref, int* d_max_dr2_int,
-                                  int* image, const int* tag, uint64_t step,
+                                  int* image, const int* tag, const int* d_step,
                                   const LangevinState& lang,
                                   int natoms, float L, float inv_L,
                                   float half_dt, cudaStream_t stream) {
     int blocks = div_ceil(natoms, 256);
     integrator_pre_force_kernel<<<blocks, 256, 0, stream>>>(
         pos, vel, force, pos_ref, d_max_dr2_int, image, tag,
-        lang.seed, step, natoms, L, inv_L,
-        half_dt, lang.c1, lang.c2, lang.kT);
+        lang.seed, d_step, natoms, L, inv_L,
+        half_dt, lang.c1, lang.c2, lang.T_start, lang.T_stop, lang.nsteps);
 }
 
 __global__ void integrator_post_force_kernel(
     float4* __restrict__ vel,
     const float4* __restrict__ force,
     const float4* __restrict__ pos,
-    int natoms, float half_dt)
+    int natoms, float half_dt, int* __restrict__ d_step)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i == 0 && d_step) (*d_step)++;   // no other thread reads the counter here
     if (i >= natoms) return;
 
     float4 v = vel[i];
@@ -117,8 +124,8 @@ __global__ void integrator_post_force_kernel(
 void launch_integrator_post_force(float4* vel, const float4* force,
                                    const float4* pos,
                                    int natoms, float half_dt,
-                                   cudaStream_t stream) {
+                                   cudaStream_t stream, int* d_step) {
     int blocks = div_ceil(natoms, 256);
     integrator_post_force_kernel<<<blocks, 256, 0, stream>>>(
-        vel, force, pos, natoms, half_dt);
+        vel, force, pos, natoms, half_dt, d_step);
 }

@@ -1,4 +1,5 @@
 #include "ewald_recip.cuh"
+#include "../core/reduce.cuh"
 #include <cmath>
 #include <vector>
 
@@ -88,25 +89,21 @@ __global__ void ewald_sf_kernel(
         im += q * s;
     }
 
-    // block reduction over 256 threads (8 warps)
-    for (int offset = 16; offset > 0; offset >>= 1) {
-        rl += __shfl_down_sync(0xFFFFFFFF, rl, offset);
-        im += __shfl_down_sync(0xFFFFFFFF, im, offset);
-    }
-    __shared__ float s_rl[8], s_im[8];
-    if ((threadIdx.x & 31) == 0) {
-        s_rl[threadIdx.x >> 5] = rl;
-        s_im[threadIdx.x >> 5] = im;
+    // block reduction in double: S(k) sums N terms of either sign
+    double w[2] = {rl, im};
+    __shared__ double s_part[2][32];
+    int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    for (int c = 0; c < 2; c++) {
+        double t = warp_sum(w[c]);
+        if (lane == 0) s_part[c][warp] = t;
     }
     __syncthreads();
-    if (threadIdx.x == 0) {
-        float trl = 0, tim = 0;
-        for (int w = 0; w < (blockDim.x >> 5); w++) {
-            trl += s_rl[w];
-            tim += s_im[w];
+    if (warp == 0) {
+        int nwarps = blockDim.x >> 5;
+        for (int c = 0; c < 2; c++) {
+            double t = warp_sum(lane < nwarps ? s_part[c][lane] : 0.0);
+            if (lane == 0) sfac[2 * k + c] = (float)t;
         }
-        sfac[2 * k] = trl;
-        sfac[2 * k + 1] = tim;
     }
 }
 
@@ -124,13 +121,11 @@ __global__ void ewald_recip_kernel(
     const int3* __restrict__ kvecs,
     const float* __restrict__ sfac,
     float4* __restrict__ force,
-    float* __restrict__ virial,
+    double* __restrict__ virial,
     int natoms, int kcount,
     float coul_const, float alpha, float L)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    int lane = threadIdx.x & 31;
-
     float unitk = 2.0f * 3.14159265358979323846f / L;
     float V = L * L * L;
     float preu = 4.0f * 3.14159265358979323846f / V;
@@ -206,23 +201,9 @@ __global__ void ewald_recip_kernel(
             v[4] += uk * vterm * ky * kz;
             v[5] += uk * (1.0f + vterm * kz * kz);
         }
-        // block 0 only: warp shuffle, then the first warp combines warp sums
-        __shared__ float s_v[6 * 32];
-        for (int c = 0; c < 6; c++)
-            for (int offset = 16; offset > 0; offset >>= 1)
-                v[c] += __shfl_down_sync(0xFFFFFFFF, v[c], offset);
-        if (lane == 0)
-            for (int c = 0; c < 6; c++) s_v[c * 32 + (threadIdx.x >> 5)] = v[c];
-        __syncthreads();
-        if (threadIdx.x < 32) {
-            int nwarps = blockDim.x >> 5;
-            for (int c = 0; c < 6; c++) {
-                float t = threadIdx.x < nwarps ? s_v[c * 32 + threadIdx.x] : 0.0f;
-                for (int offset = 16; offset > 0; offset >>= 1)
-                    t += __shfl_down_sync(0xFFFFFFFF, t, offset);
-                if (threadIdx.x == 0) atomicAdd(&virial[c], coul_const * t);
-            }
-        }
+        // do_virial is uniform within the block, so the barrier inside is safe
+        for (int c = 0; c < 6; c++) v[c] *= coul_const;
+        block_reduce_virial(v, virial);
     }
 }
 
@@ -237,7 +218,7 @@ void launch_ewald_sf_kernel(const float4* pos, const float* charges,
 
 void launch_ewald_recip_kernel(const float4* pos, const float* charges,
                                 const int3* kvecs, const float* sfac,
-                                float4* force, float* virial,
+                                float4* force, double* virial,
                                 int natoms, int kcount,
                                 float coul_const, float alpha, float L,
                                 cudaStream_t stream) {

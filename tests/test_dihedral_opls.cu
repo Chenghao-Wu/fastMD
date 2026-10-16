@@ -36,9 +36,9 @@ TEST(DihedralOPLS, ForceMatchesCPU) {
     float4* d_force;
     CUDA_CHECK(cudaMalloc(&d_force, np * sizeof(float4)));
     CUDA_CHECK(cudaMemset(d_force, 0, np * sizeof(float4)));
-    float* d_virial;
-    CUDA_CHECK(cudaMalloc(&d_virial, 6 * sizeof(float)));
-    CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(float)));
+    double* d_virial;
+    CUDA_CHECK(cudaMalloc(&d_virial, 6 * sizeof(double)));
+    CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(double)));
 
     int4* d_dih = to_device(h_dih);
     int* d_dt = to_device(h_dt);
@@ -109,9 +109,9 @@ TEST(DihedralOPLS, ForceIsNegativeEnergyGradient) {
         float4* d_force;
         CUDA_CHECK(cudaMalloc(&d_force, np * sizeof(float4)));
         CUDA_CHECK(cudaMemset(d_force, 0, np * sizeof(float4)));
-        float* d_virial;
-        CUDA_CHECK(cudaMalloc(&d_virial, 6 * sizeof(float)));
-        CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(float)));
+        double* d_virial;
+        CUDA_CHECK(cudaMalloc(&d_virial, 6 * sizeof(double)));
+        CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(double)));
         launch_dihedral_opls_kernel(d_pos, d_force, d_virial, d_dih, d_dt,
                                      d_params, 1, L, inv_L);
         CUDA_CHECK(cudaDeviceSynchronize());

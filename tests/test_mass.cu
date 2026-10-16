@@ -6,12 +6,6 @@
 #include "integrate/langevin.cuh"
 #include "analysis/thermo.cuh"
 
-extern __global__ void integrator_post_force_kernel(
-    float4* __restrict__ vel,
-    const float4* __restrict__ force,
-    const float4* __restrict__ pos,
-    int natoms, float half_dt);
-
 extern __global__ void kinetic_stress_kernel(
     const float4* __restrict__ vel,
     const float4* __restrict__ pos,
@@ -44,8 +38,7 @@ TEST(MassTest, VelocityHalfStepMassScaling) {
 
     float half_dt = 0.001f;
     int blocks = div_ceil(natoms, 256);
-    integrator_post_force_kernel<<<blocks, 256>>>(d_vel, d_force, d_pos,
-                                                   natoms, half_dt);
+    launch_integrator_post_force(d_vel, d_force, d_pos, natoms, half_dt);
     CUDA_CHECK(cudaDeviceSynchronize());
 
     std::vector<float4> result_vel = to_host(d_vel, natoms);

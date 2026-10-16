@@ -268,6 +268,19 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
             e.keyword = a.str("keyword");
             if (a.more()) e.conv = parse_table_convention(a.str("convention"), angle);
             (angle ? angle_table_entries : bond_table_entries).push_back(e);
+        } else if (key == "pair_tpa") {
+            long n = a.integer("N");
+            if (n != 0 && n != 1 && n != 2 && n != 4 && n != 8)
+                a.fail("<N> must be 0 (auto), 1, 2, 4 or 8");
+            params.pair_tpa = (int)n;
+        } else if (key == "sort_every") {
+            long n = a.integer("N");
+            if (n < 0) a.fail("<N> must be >= 0 (0 = never sort)");
+            params.sort_every = (int)n;
+        } else if (key == "neigh_max_age") {
+            long n = a.integer("N");
+            if (n < 0) a.fail("<N> must be >= 0 (0 = rebuild only when needed)");
+            params.neigh_max_age = (int)n;
         } else if (key == "forces_dump_file") {
             copy_path(params.forces_dump_file, a.str("path"), a);
         } else if (key == "temperature" || key == "gamma" || key == "seed") {

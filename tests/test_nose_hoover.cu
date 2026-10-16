@@ -89,8 +89,8 @@ TEST(NoseHoover, NVTLimitEnergyConservation) {
     CUDA_CHECK(cudaMalloc(&d_pos_ref, np * sizeof(float4)));
     int* d_max_dr2;
     CUDA_CHECK(cudaMalloc(&d_max_dr2, sizeof(int)));
-    float* d_virial;
-    CUDA_CHECK(cudaMalloc(&d_virial, 6 * sizeof(float)));
+    double* d_virial;
+    CUDA_CHECK(cudaMalloc(&d_virial, 6 * sizeof(double)));
 
     std::vector<float2> h_lj = {{1.0f, 1.0f}};
     float2* d_lj = to_device(h_lj);
@@ -124,7 +124,7 @@ TEST(NoseHoover, NVTLimitEnergyConservation) {
     CUDA_CHECK(cudaMemset(d_max_dr2, 0, sizeof(int)));
     verlet.build(d_pos, N, L, inv_L, nullptr, nullptr, rc + skin);
     CUDA_CHECK(cudaMemset(d_force, 0, np * sizeof(float4)));
-    CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(float)));
+    CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(double)));
     launch_lj_kernel(d_pos, d_force, d_virial, d_lj,
                       verlet.neighbors, verlet.num_neighbors,
                       N, ntypes, rc2, L, inv_L);
@@ -156,7 +156,7 @@ TEST(NoseHoover, NVTLimitEnergyConservation) {
         }
 
         CUDA_CHECK(cudaMemset(d_force, 0, np * sizeof(float4)));
-        CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(float)));
+        CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(double)));
         launch_lj_kernel(d_pos, d_force, d_virial, d_lj,
                           verlet.neighbors, verlet.num_neighbors,
                           N, ntypes, rc2, L, inv_L);
@@ -239,8 +239,8 @@ TEST(NoseHoover, NVTReachesTargetTemperature) {
     CUDA_CHECK(cudaMalloc(&d_pos_ref, np * sizeof(float4)));
     int* d_max_dr2;
     CUDA_CHECK(cudaMalloc(&d_max_dr2, sizeof(int)));
-    float* d_virial;
-    CUDA_CHECK(cudaMalloc(&d_virial, 6 * sizeof(float)));
+    double* d_virial;
+    CUDA_CHECK(cudaMalloc(&d_virial, 6 * sizeof(double)));
 
     std::vector<float2> h_lj = {{1.0f, 1.0f}};
     float2* d_lj = to_device(h_lj);
@@ -274,7 +274,7 @@ TEST(NoseHoover, NVTReachesTargetTemperature) {
     CUDA_CHECK(cudaMemset(d_max_dr2, 0, sizeof(int)));
     verlet.build(d_pos, N, L, inv_L, nullptr, nullptr, rc + skin);
     CUDA_CHECK(cudaMemset(d_force, 0, np * sizeof(float4)));
-    CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(float)));
+    CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(double)));
     launch_lj_kernel(d_pos, d_force, d_virial, d_lj,
                       verlet.neighbors, verlet.num_neighbors,
                       N, ntypes, rc2, L, inv_L);
@@ -305,7 +305,7 @@ TEST(NoseHoover, NVTReachesTargetTemperature) {
         }
 
         CUDA_CHECK(cudaMemset(d_force, 0, np * sizeof(float4)));
-        CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(float)));
+        CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(double)));
         launch_lj_kernel(d_pos, d_force, d_virial, d_lj,
                           verlet.neighbors, verlet.num_neighbors,
                           N, ntypes, rc2, L, inv_L);

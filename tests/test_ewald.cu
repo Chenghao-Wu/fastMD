@@ -92,9 +92,9 @@ TEST(EwaldOPLS, SmallClusterMatchesBruteForce) {
     float4* d_force;
     CUDA_CHECK(cudaMalloc(&d_force, np * sizeof(float4)));
     CUDA_CHECK(cudaMemset(d_force, 0, np * sizeof(float4)));
-    float* d_virial;
-    CUDA_CHECK(cudaMalloc(&d_virial, 6 * sizeof(float)));
-    CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(float)));
+    double* d_virial;
+    CUDA_CHECK(cudaMalloc(&d_virial, 6 * sizeof(double)));
+    CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(double)));
     float2* d_lj = to_device(lj);
 
     // verlet neighbor list (skin 0.2)
@@ -248,13 +248,13 @@ TEST(EwaldOPLS, ReciprocalVirialMatchesStrainDerivative) {
     float4* d_force;
     CUDA_CHECK(cudaMalloc(&d_force, np * sizeof(float4)));
     CUDA_CHECK(cudaMemset(d_force, 0, np * sizeof(float4)));
-    float* d_vir;
-    CUDA_CHECK(cudaMalloc(&d_vir, 6 * sizeof(float)));
-    CUDA_CHECK(cudaMemset(d_vir, 0, 6 * sizeof(float)));
+    double* d_vir;
+    CUDA_CHECK(cudaMalloc(&d_vir, 6 * sizeof(double)));
+    CUDA_CHECK(cudaMemset(d_vir, 0, 6 * sizeof(double)));
     launch_ewald_sf_kernel(d_pos, d_q, d_kv, d_sfac, N, (int)kv.size(), L);
     launch_ewald_recip_kernel(d_pos, d_q, d_kv, d_sfac, d_force, d_vir, N, (int)kv.size(), C, alpha, L);
     CUDA_CHECK(cudaDeviceSynchronize());
-    float vir[6];
+    double vir[6];
     CUDA_CHECK(cudaMemcpy(vir, d_vir, sizeof(vir), cudaMemcpyDeviceToHost));
 
     const int comp[6][2] = {{0, 0}, {0, 1}, {0, 2}, {1, 1}, {1, 2}, {2, 2}};  // xx xy xz yy yz zz

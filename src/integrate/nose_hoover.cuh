@@ -53,6 +53,13 @@ struct NoseHooverDeviceState {
     float nh_scale;          // latest thermostat scale, consumed by next kernel
     float T_target;
     float P_target;
+    // Linear ramps evaluated on the device (no per-step host transfer):
+    // target(step) = start + (stop - start) * (step - 1) / nsteps. The
+    // pre-force chain kernel updates the targets, the post-force one
+    // advances step.
+    float T_start, T_stop, P_start, P_stop;
+    int   nsteps;
+    int   step;
 };
 
 void allocate_nh_device_state(NoseHooverDeviceState*& d_state);
@@ -60,8 +67,6 @@ void init_nh_device_state(const NoseHooverState& host,
                           NoseHooverDeviceState* d_state);
 void free_nh_device_state(NoseHooverDeviceState* d_state);
 void set_nh_scale_device(NoseHooverDeviceState* d_state, float scale);
-void set_nh_targets_device(NoseHooverDeviceState* d_state,
-                           float T_target, float P_target);
 
 // Propagate system-wide NH chain on GPU.
 // If use_carry: reads KE from d_state->chain_KE_carry (pre-force call).
@@ -93,7 +98,8 @@ void launch_nh_nvt_pre_force_fused(float4* pos, float4* vel, const float4* force
                                     int natoms, float L, float inv_L,
                                     cudaStream_t stream = 0);
 
-// NPT: barostat+thermostat scale + velocity half-step + position update + PBC + displacement
+// NPT: barostat+thermostat scale + velocity half-step + position update + PBC + displacement.
+// The box (d_L, d_inv_L) is read on the device.
 void launch_nh_npt_pre_force_fused(float4* pos, float4* vel, const float4* force,
                                     float4* pos_ref,
                                     int* d_max_dr2_int, int* d_image,
@@ -102,12 +108,13 @@ void launch_nh_npt_pre_force_fused(float4* pos, float4* vel, const float4* force
                                     const float* d_exp_vW,
                                     const float* d_v_eps_W_dt,
                                     float half_dt, float dt,
-                                    int natoms, float L, float inv_L,
+                                    int natoms, const float* d_L, const float* d_inv_L,
                                     cudaStream_t stream = 0);
 
 // --- NPT scratch buffers ---
 // Holds per-step outputs from the NPT chain+barostat kernel that are
 // consumed by subsequent velocity/position kernels in the same step.
+// d_V / d_L / d_inv_L are owned by the caller (the device box state).
 struct NoseHooverNPTScratch {
     float* d_V;
     float* d_L;
@@ -119,14 +126,15 @@ struct NoseHooverNPTScratch {
     float* d_virial_trace;
 };
 
-void allocate_npt_scratch(NoseHooverNPTScratch& s);
+void allocate_npt_scratch(NoseHooverNPTScratch& s, float* d_box_V, float* d_box_L,
+                          float* d_box_inv_L);
 void free_npt_scratch(NoseHooverNPTScratch& s);
 
 // Lightweight kernel: compute KE (trace of v^2 tensor) into d_ke_out
 // and sum virial trace from d_virial (6-component) into d_virial_trace_out.
 // Replaces the heavy compute_thermo in the NPT inner loop.
 void launch_nh_npt_ke_and_virial_trace(
-    const float4* vel, const float* virial,
+    const float4* vel, const double* virial,
     const float4* pos,
     float* d_ke_out, float* d_virial_trace_out,
     int natoms, cudaStream_t stream = 0);

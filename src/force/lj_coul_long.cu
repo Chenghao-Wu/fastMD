@@ -1,5 +1,7 @@
 #include "lj_coul_long.cuh"
 #include "../core/pbc.cuh"
+#include "../core/reduce.cuh"
+#include "../core/launch.cuh"
 
 // LAMMPS EWALD_P/A1..A5 erfc polynomial (Abramowitz & Stegun 7.1.26)
 __device__ inline float erfc_poly(float x) {
@@ -12,11 +14,12 @@ __device__ inline float erfc_poly(float x) {
     return poly * __expf(-x * x);
 }
 
+template <int TPA>
 __global__ void lj_coul_long_kernel(
     const float4* __restrict__ pos,
     const float* __restrict__ charges,
     float4* __restrict__ force,
-    float* __restrict__ virial,
+    double* __restrict__ virial,
     const float2* __restrict__ lj_params,
     const int* __restrict__ neighbors,
     const int* __restrict__ num_neighbors,
@@ -24,14 +27,13 @@ __global__ void lj_coul_long_kernel(
     float coul_const, float alpha,
     float rc2, float L, float inv_L)
 {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    int lane = threadIdx.x & 31;
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    const int i = t / TPA;
+    const int sub = t & (TPA - 1);
 
     float fx = 0.0f, fy = 0.0f, fz = 0.0f, pe_i = 0.0f;
     float vir_xx = 0.0f, vir_xy = 0.0f, vir_xz = 0.0f;
     float vir_yy = 0.0f, vir_yz = 0.0f, vir_zz = 0.0f;
-
-    float alpha2 = alpha * alpha;
 
     if (i < natoms) {
         float4 pos_i = pos[i];
@@ -40,7 +42,7 @@ __global__ void lj_coul_long_kernel(
 
         int nneigh = __ldg(&num_neighbors[i]);
         #pragma unroll 4
-        for (int k = 0; k < nneigh; k++) {
+        for (int k = sub; k < nneigh; k += TPA) {
             int j = neighbors[k * natoms + i];
             float4 pos_j = __ldg(&pos[j]);
             int type_j = __float_as_int(pos_j.w);
@@ -92,64 +94,41 @@ __global__ void lj_coul_long_kernel(
                 vir_zz += 0.5f * fzij * dz;
             }
         }
-
-        force[i] = make_float4(fx, fy, fz, pe_i);
     }
-
-    for (int offset = 16; offset > 0; offset >>= 1) {
-        vir_xx += __shfl_down_sync(0xFFFFFFFF, vir_xx, offset);
-        vir_xy += __shfl_down_sync(0xFFFFFFFF, vir_xy, offset);
-        vir_xz += __shfl_down_sync(0xFFFFFFFF, vir_xz, offset);
-        vir_yy += __shfl_down_sync(0xFFFFFFFF, vir_yy, offset);
-        vir_yz += __shfl_down_sync(0xFFFFFFFF, vir_yz, offset);
-        vir_zz += __shfl_down_sync(0xFFFFFFFF, vir_zz, offset);
-    }
-
-    extern __shared__ float s_virial[];
-    if (lane == 0) {
-        int wid = threadIdx.x >> 5;
-        s_virial[wid * 6 + 0] = vir_xx;
-        s_virial[wid * 6 + 1] = vir_xy;
-        s_virial[wid * 6 + 2] = vir_xz;
-        s_virial[wid * 6 + 3] = vir_yy;
-        s_virial[wid * 6 + 4] = vir_yz;
-        s_virial[wid * 6 + 5] = vir_zz;
-    }
-    __syncthreads();
-
-    if (threadIdx.x == 0) {
-        int num_warps = blockDim.x >> 5;
-        float b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0;
-        for (int w = 0; w < num_warps; w++) {
-            b0 += s_virial[w * 6 + 0];
-            b1 += s_virial[w * 6 + 1];
-            b2 += s_virial[w * 6 + 2];
-            b3 += s_virial[w * 6 + 3];
-            b4 += s_virial[w * 6 + 4];
-            b5 += s_virial[w * 6 + 5];
+    if (TPA > 1) {
+#pragma unroll
+        for (int o = TPA / 2; o > 0; o >>= 1) {
+            fx += __shfl_down_sync(0xffffffffu, fx, o, TPA);
+            fy += __shfl_down_sync(0xffffffffu, fy, o, TPA);
+            fz += __shfl_down_sync(0xffffffffu, fz, o, TPA);
+            pe_i += __shfl_down_sync(0xffffffffu, pe_i, o, TPA);
         }
-        atomicAdd(&virial[0], b0);
-        atomicAdd(&virial[1], b1);
-        atomicAdd(&virial[2], b2);
-        atomicAdd(&virial[3], b3);
-        atomicAdd(&virial[4], b4);
-        atomicAdd(&virial[5], b5);
     }
+    if (i < natoms && sub == 0) force[i] = make_float4(fx, fy, fz, pe_i);
+
+    float vir[6] = {vir_xx, vir_xy, vir_xz, vir_yy, vir_yz, vir_zz};
+    block_reduce_virial(vir, virial);
 }
 
 void launch_lj_coul_long_kernel(const float4* pos, const float* charges,
-                                 float4* force, float* virial,
+                                 float4* force, double* virial,
                                  const float2* lj_params,
                                  const int* neighbors, const int* num_neighbors,
                                  int natoms, int ntypes,
                                  float coul_const, float alpha,
                                  float rc2, float L, float inv_L,
-                                 cudaStream_t stream)
+                                 cudaStream_t stream, int tpa)
 {
-    int blocks = div_ceil(natoms, 256);
-    int smem = (256 / 32) * 6 * sizeof(float);
-    lj_coul_long_kernel<<<blocks, 256, smem, stream>>>(
-        pos, charges, force, virial, lj_params,
-        neighbors, num_neighbors,
-        natoms, ntypes, coul_const, alpha, rc2, L, inv_L);
+    if (tpa <= 0) tpa = pair_threads_per_atom(natoms);
+    const int blocks = div_ceil(natoms * tpa, 256);
+#define FASTMD_LAUNCH(T) lj_coul_long_kernel<T><<<blocks, 256, 0, stream>>>(       \
+        pos, charges, force, virial, lj_params, neighbors, num_neighbors,          \
+        natoms, ntypes, coul_const, alpha, rc2, L, inv_L)
+    switch (tpa) {
+        case 1: FASTMD_LAUNCH(1); break;
+        case 2: FASTMD_LAUNCH(2); break;
+        case 4: FASTMD_LAUNCH(4); break;
+        default: FASTMD_LAUNCH(8); break;
+    }
+#undef FASTMD_LAUNCH
 }

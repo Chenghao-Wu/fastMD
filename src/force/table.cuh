@@ -4,7 +4,7 @@
 
 void launch_table_kernel(const float4* __restrict__ pos,
                          float4* __restrict__ force,
-                         float* __restrict__ virial,
+                         double* __restrict__ virial,
                          const int* __restrict__ table_idx,
                          const TableParams* __restrict__ table_params,
                          const float4* __restrict__ table_data,
@@ -12,4 +12,4 @@ void launch_table_kernel(const float4* __restrict__ pos,
                          const int* __restrict__ num_neighbors,
                          int natoms, int ntypes,
                          float rc2, float L, float inv_L,
-                         cudaStream_t stream = 0);
+                         cudaStream_t stream = 0, int tpa = 0);

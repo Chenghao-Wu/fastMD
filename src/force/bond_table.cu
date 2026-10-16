@@ -1,12 +1,13 @@
 #include "bond_table.cuh"
 #include "../core/pbc.cuh"
+#include "../core/reduce.cuh"
 
 // Tabulated bond: U(r) over the bond list. Reuses the nonbonded table format
 // (parse_table_file). The force column is packed as F(r)/r so that
 // force_vec = f_scalar * d_component matches the nonbonded table kernel.
 __global__ void bond_table_kernel(
     const float4* __restrict__ pos, float4* __restrict__ force,
-    float* __restrict__ virial,
+    double* __restrict__ virial,
     const int2* __restrict__ bonds, const int* __restrict__ bond_types,
     const int* __restrict__ bond_table_idx,
     const TableParams* __restrict__ table_params,
@@ -46,27 +47,18 @@ __global__ void bond_table_kernel(
         }
     }
 
-    extern __shared__ float s_virial[];
-    s_virial[tid*6+0]=v0; s_virial[tid*6+1]=v1; s_virial[tid*6+2]=v2;
-    s_virial[tid*6+3]=v3; s_virial[tid*6+4]=v4; s_virial[tid*6+5]=v5;
-    __syncthreads();
-    if (tid == 0) {
-        float s0=0,s1=0,s2=0,s3=0,s4=0,s5=0;
-        for (int u=0; u<blockDim.x; u++){ s0+=s_virial[u*6+0]; s1+=s_virial[u*6+1]; s2+=s_virial[u*6+2];
-            s3+=s_virial[u*6+3]; s4+=s_virial[u*6+4]; s5+=s_virial[u*6+5]; }
-        atomicAdd(&virial[0],s0); atomicAdd(&virial[1],s1); atomicAdd(&virial[2],s2);
-        atomicAdd(&virial[3],s3); atomicAdd(&virial[4],s4); atomicAdd(&virial[5],s5);
-    }
+    float vir[6] = {v0, v1, v2, v3, v4, v5};
+    block_reduce_virial(vir, virial);
 }
 
-void launch_bond_table_kernel(const float4* pos, float4* force, float* virial,
+void launch_bond_table_kernel(const float4* pos, float4* force, double* virial,
                               const int2* bonds, const int* bond_types,
                               const int* bond_table_idx,
                               const TableParams* table_params, const float4* table_data,
                               int nbonds, float L, float inv_L, cudaStream_t stream) {
     if (nbonds == 0) return;
     int blocks = div_ceil(nbonds, 256);
-    int smem = 256 * 6 * sizeof(float);
+    int smem = 0;
     bond_table_kernel<<<blocks, 256, smem, stream>>>(
         pos, force, virial, bonds, bond_types, bond_table_idx,
         table_params, table_data, nbonds, L, inv_L);
