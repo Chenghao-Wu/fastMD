@@ -38,8 +38,6 @@ add_fastmd_test(test_trajectory CPU)
 
 # Device tests
 add_fastmd_test(test_pbc)
-add_fastmd_test(test_morton)
-add_fastmd_test(test_tile_list)
 add_fastmd_test(test_lj)
 add_fastmd_test(test_verlet)
 add_fastmd_test(test_integrator)

@@ -41,7 +41,7 @@ TEST(BondHarmonic, TwoAtomMatchesCPU) {
                            cudaMemcpyHostToDevice));
 
     launch_bond_harmonic_kernel(d_pos, d_force, d_virial, d_bonds, d_btypes,
-                                 d_params, 1, L, inv_L);
+                                 d_params, 1, cubic_box(L));
     CUDA_CHECK(cudaDeviceSynchronize());
 
     auto h_force_out = to_host(d_force, N);

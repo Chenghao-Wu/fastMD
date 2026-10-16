@@ -62,8 +62,39 @@ std::string write_melt(const std::string& path, int nchains, int len, float dens
     return path;
 }
 
+// Copies of the system side by side along x, y, z (box nx Lx x ny Ly x nz Lz).
+void replicate(TopologyData& t, int nx, int ny, int nz) {
+    const int n = (int)t.positions.size(), ncopy = nx * ny * nz;
+    const float3 L = t.box;
+    int nmol = 0;
+    for (int m : t.mol_ids) nmol = std::max(nmol, m);
+    auto pos = t.positions; auto vel = t.velocities; auto img = t.images; auto mol = t.mol_ids;
+    auto ids = t.atom_ids; auto bonds = t.bonds; auto btypes = t.bond_types; auto angles = t.angles;
+    t.positions.clear(); t.velocities.clear(); t.images.clear(); t.mol_ids.clear(); t.atom_ids.clear();
+    t.bonds.clear(); t.bond_types.clear(); t.angles.clear();
+    for (int c = 0; c < ncopy; c++) {
+        const int cx = c % nx, cy = (c / nx) % ny, cz = c / (nx * ny), off = c * n;
+        for (int i = 0; i < n; i++) {
+            float4 p = pos[i];
+            p.x += cx * L.x; p.y += cy * L.y; p.z += cz * L.z;
+            t.positions.push_back(p);
+            if (!vel.empty()) t.velocities.push_back(vel[i]);
+            for (int d = 0; d < 3; d++) t.images.push_back(img[3 * i + d]);
+            if (!mol.empty()) t.mol_ids.push_back(mol[i] + c * nmol);
+            t.atom_ids.push_back(off + i + 1);
+        }
+        for (size_t b = 0; b < bonds.size(); b++) {
+            t.bonds.push_back(make_int2(bonds[b].x + off, bonds[b].y + off));
+            t.bond_types.push_back(btypes[b]);
+        }
+        for (const int4& a : angles) t.angles.push_back(make_int4(a.x + off, a.y + off, a.z + off, a.w));
+    }
+    t.box = make_float3(nx * L.x, ny * L.y, nz * L.z);
+}
+
 std::unique_ptr<Simulation> make_sim(const std::string& data, const std::string& extra, int nsteps,
-                                     const std::string& ensemble = "nvt_nh 1.0 1.0 0.5 3") {
+                                     const std::string& ensemble = "nvt_nh 1.0 1.0 0.5 3",
+                                     int3 copies = make_int3(1, 1, 1)) {
     std::string conf = "sim_test_" + std::to_string(std::hash<std::string>{}(extra + ensemble)) + ".conf";
     std::ofstream(conf) << "ntypes 1\nrc 2.5\nskin 0.3\ndt 0.004\nnsteps " << nsteps << "\n"
                         << ensemble << "\nlj 0 0 1.0 1.0\nbond_type 0 30.0 1.5 1.0 1.0\n"
@@ -71,8 +102,9 @@ std::unique_ptr<Simulation> make_sim(const std::string& data, const std::string&
     TopologyData topo;
     SimParams p = parse_config(conf, topo);
     parse_lammps_data(topo.data_file, topo);
+    if (copies.x * copies.y * copies.z > 1) replicate(topo, copies.x, copies.y, copies.z);
     p.natoms = (int)topo.positions.size();
-    p.box_L = topo.box_L;
+    p.box_L3 = topo.box;
     validate_system(p, topo);
     finalize_params(p);
     return std::make_unique<Simulation>(p, std::move(topo));
@@ -99,7 +131,7 @@ TEST(Simulation, ParticleSortingDoesNotChangeTrajectory) {
     ref->run();
     sorted->run();
     double d = max_pos_diff(ref->particles().download_positions(),
-                            sorted->particles().download_positions(), ref->box_length());
+                            sorted->particles().download_positions(), ref->box().L.x);
     EXPECT_LT(d, 2e-3) << "max position difference after 60 steps";
 }
 
@@ -116,7 +148,7 @@ TEST(Simulation, DeviceNeighborOverflowRollsBack) {
     EXPECT_EQ(ref->rollbacks(), 0);
     EXPECT_GT(small->neighbor_capacity(), 8);
     double d = max_pos_diff(ref->particles().download_positions(),
-                            small->particles().download_positions(), ref->box_length());
+                            small->particles().download_positions(), ref->box().L.x);
     EXPECT_LT(d, 2e-3);
 }
 
@@ -170,7 +202,7 @@ TEST(Simulation, TrajectoryFramesFollowScheduleAndState) {
     sim->run(100);
     std::vector<float4> pos = sim->positions();
     std::vector<int> img = sim->images();
-    const double L = sim->box_length();
+    const double L = sim->box().L.x;
     sim.reset();   // closes the file
     std::ifstream in("sim_traj.fmd", std::ios::binary);
     std::vector<char> b((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
@@ -197,4 +229,49 @@ TEST(Simulation, TrajectoryFramesFollowScheduleAndState) {
         EXPECT_EQ(xyz[3 * t + 2], pos[t].z);
         EXPECT_EQ(im[3 * t + 1], img[3 * t + 1]);
     }
+}
+
+// Orthorhombic periodic boxes: copies of a melt placed side by side along
+// one axis feel exactly the forces of the original in its cubic box.
+TEST(Simulation, ReplicatedOrthorhombicBoxGivesSameForces) {
+    std::string data = write_melt("sim_rep.data", 12, 20, 0.85f, 21);
+    auto ref = make_sim(data, "pair_tpa 1\n", 10);
+    std::vector<float4> f1 = ref->forces();
+    const size_t n = f1.size();
+    for (int3 c : {make_int3(2, 1, 1), make_int3(1, 1, 3)}) {
+        auto rep = make_sim(data, "pair_tpa 1\n", 10, "nvt_nh 1.0 1.0 0.5 3", c);
+        const Box& b = rep->box();
+        EXPECT_FLOAT_EQ(b.L.x, c.x * ref->box().L.x);
+        EXPECT_FLOAT_EQ(b.L.z, c.z * ref->box().L.z);
+        std::vector<float4> f2 = rep->forces();
+        ASSERT_EQ(f2.size(), n * c.x * c.y * c.z);
+        double worst = 0, fmax = 0;
+        for (size_t t = 0; t < f2.size(); t++) {
+            const float4 a = f2[t], r = f1[t % n];
+            worst = std::max({worst, (double)std::fabs(a.x - r.x), (double)std::fabs(a.y - r.y),
+                              (double)std::fabs(a.z - r.z)});
+            fmax = std::max(fmax, (double)std::fabs(r.x));
+        }
+        // float32 coordinates of the shifted copies (up to 3 L) are a few
+        // times coarser than in the original box; steep LJ contacts turn
+        // that into ~1e-5 relative force differences
+        EXPECT_LT(worst, 1e-4 * fmax) << "copies " << c.x << "x" << c.y << "x" << c.z;
+        ThermoOutput t1 = ref->thermo(), t2 = rep->thermo();
+        EXPECT_NEAR(t2.potential_energy, t1.potential_energy, 1e-4 * std::fabs(t1.potential_energy));
+        for (int k = 0; k < 6; k++)   // intensive pressure tensor is unchanged
+            EXPECT_NEAR(t2.stress[k], t1.stress[k], 2e-3 * std::fabs(t1.stress[VXX]) + 1e-4) << k;
+    }
+}
+
+// The isotropic barostat scales every edge of an orthorhombic box by the
+// same factor.
+TEST(Simulation, NPTKeepsOrthorhombicAspectRatio) {
+    std::string data = write_melt("sim_npt_rect.data", 12, 20, 0.80f, 33);
+    auto sim = make_sim(data, "", 400, "npt_nh 1.0 1.0 0.5 2.0 2.0 2.0 3", make_int3(2, 1, 1));
+    const Box b0 = sim->box();
+    sim->run(400);
+    const Box b1 = sim->box();
+    EXPECT_NE(b1.L.x, b0.L.x) << "barostat did not act";
+    EXPECT_NEAR(b1.L.x / b1.L.y, 2.0, 1e-5);
+    EXPECT_NEAR(b1.L.z / b1.L.y, 1.0, 1e-5);
 }

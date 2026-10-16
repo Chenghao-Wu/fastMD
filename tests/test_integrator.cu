@@ -60,7 +60,7 @@ TEST(Integrator, NVEEnergyConservation) {
     float2* d_lj = to_device(h_lj);
 
     VerletList verlet;
-    verlet.allocate(N, rc + skin, L);
+    verlet.allocate(N, rc + skin, cubic_box(L));
 
     int one = 1;
     int* d_step;
@@ -72,13 +72,13 @@ TEST(Integrator, NVEEnergyConservation) {
     CUDA_CHECK(cudaMemcpy(d_pos_ref, d_pos, np * sizeof(float4),
                            cudaMemcpyDeviceToDevice));
     CUDA_CHECK(cudaMemset(d_max_dr2, 0, sizeof(int)));
-    verlet.build(d_pos, N, L, inv_L, nullptr, nullptr, rc + skin);
+    verlet.build(d_pos, N, cubic_box(L), nullptr, nullptr, rc + skin);
 
     CUDA_CHECK(cudaMemset(d_force, 0, np * sizeof(float4)));
     CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(double)));
     launch_lj_kernel(d_pos, d_force, d_virial, d_lj,
                       verlet.neighbors, verlet.num_neighbors,
-                      N, ntypes, rc2, L, inv_L);
+                      N, ntypes, rc2, cubic_box(L));
 
     auto compute_total_energy = [&]() -> float {
         auto h_f = to_host(d_force, N);
@@ -96,19 +96,19 @@ TEST(Integrator, NVEEnergyConservation) {
     for (int step = 0; step < nsteps; step++) {
         launch_integrator_pre_force(d_pos, d_vel, d_force, d_pos_ref,
                                      d_max_dr2, nullptr, nullptr, d_step,
-                                     lang, N, L, inv_L, lang.half_dt);
+                                     lang, N, cubic_box(L), lang.half_dt);
 
         if (check_and_reset_trigger(d_max_dr2, skin)) {
             CUDA_CHECK(cudaMemcpy(d_pos_ref, d_pos, np * sizeof(float4),
                                    cudaMemcpyDeviceToDevice));
-            verlet.build(d_pos, N, L, inv_L, nullptr, nullptr, rc + skin);
+            verlet.build(d_pos, N, cubic_box(L), nullptr, nullptr, rc + skin);
         }
 
         CUDA_CHECK(cudaMemset(d_force, 0, np * sizeof(float4)));
         CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(double)));
         launch_lj_kernel(d_pos, d_force, d_virial, d_lj,
                           verlet.neighbors, verlet.num_neighbors,
-                          N, ntypes, rc2, L, inv_L);
+                          N, ntypes, rc2, cubic_box(L));
 
         launch_integrator_post_force(d_vel, d_force, d_pos, N, lang.half_dt, 0, d_step);
         CUDA_CHECK(cudaDeviceSynchronize());

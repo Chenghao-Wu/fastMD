@@ -49,7 +49,7 @@ TEST(DihedralOPLS, ForceMatchesCPU) {
                            cudaMemcpyHostToDevice));
 
     launch_dihedral_opls_kernel(d_pos, d_force, d_virial, d_dih, d_dt,
-                                 d_params, 1, L, inv_L);
+                                 d_params, 1, cubic_box(L));
     CUDA_CHECK(cudaDeviceSynchronize());
 
     auto h_force_out = to_host(d_force, N);
@@ -113,7 +113,7 @@ TEST(DihedralOPLS, ForceIsNegativeEnergyGradient) {
         CUDA_CHECK(cudaMalloc(&d_virial, 6 * sizeof(double)));
         CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(double)));
         launch_dihedral_opls_kernel(d_pos, d_force, d_virial, d_dih, d_dt,
-                                     d_params, 1, L, inv_L);
+                                     d_params, 1, cubic_box(L));
         CUDA_CHECK(cudaDeviceSynchronize());
         fout = to_host(d_force, N);
         pe_tot = 0;

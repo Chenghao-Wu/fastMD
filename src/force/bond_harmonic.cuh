@@ -14,5 +14,5 @@ void launch_bond_harmonic_kernel(const float4* __restrict__ pos,
                                   const int* __restrict__ bond_types,
                                   const BondHarmonicParams* __restrict__ params,
                                   int nbonds,
-                                  float L, float inv_L,
+                                  Box box,
                                   cudaStream_t stream = 0);

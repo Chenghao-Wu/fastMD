@@ -64,8 +64,9 @@ A fastMD simulation resident on the GPU.
 Construct from a config file (``Simulation(path)``) or config text
 (``Simulation.from_text(text)``); paths inside the config are relative to the
 working directory. Per-particle arrays are (natoms, 3) numpy arrays in the
-atom order of the input data file. Positions are wrapped into [0, L); the
-unwrapped coordinates are ``positions + images * box_length``.
+atom order of the input data file. Positions are wrapped into the box; for
+an orthorhombic box the unwrapped coordinates are
+``positions + images * box[:3]``.
 )doc")
         .def(py::init([](const std::string& path) { return Engine::from_file(path); }),
              py::arg("config"), "Load a config file and set up the simulation.")
@@ -75,8 +76,16 @@ unwrapped coordinates are ``positions + images * box_length``.
         .def_property_readonly("ntypes", &Engine::ntypes)
         .def_property_readonly("step", &Engine::step, "Time steps taken so far.")
         .def_property_readonly("dt", &Engine::dt)
-        .def_property_readonly("box_length", &Engine::box_length,
-                               "Current (cubic) box length; changes under NPT.")
+        .def_property_readonly("box", [](const Engine& e) {
+            auto b = e.box();
+            return as_array(std::vector<double>(b.begin(), b.end()), 1);
+        }, "Current box (Lx, Ly, Lz, xy, xz, yz); changes under NPT.")
+        .def_property_readonly("box_length", [](const Engine& e) {
+            auto b = e.box();
+            if (b[0] != b[1] || b[1] != b[2] || b[3] != 0 || b[4] != 0 || b[5] != 0)
+                throw py::value_error("box_length: the box is not cubic; use box");
+            return b[0];
+        }, "Edge length of a cubic box (use box for other boxes).")
         .def("run", &Engine::run, py::arg("nsteps"), py::call_guard<py::gil_scoped_release>(),
              "Advance nsteps time steps. Outputs configured in the config file are written "
              "when due. Temperature/pressure ramps are defined over the config's nsteps.")

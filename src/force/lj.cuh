@@ -15,12 +15,12 @@ void launch_lj_kernel(const float4* __restrict__ pos,
                        const int* __restrict__ neighbors,
                        const int* __restrict__ num_neighbors,
                        int natoms, int ntypes,
-                       float rc2, float L, float inv_L,
+                       float rc2, Box box,
                        cudaStream_t stream = 0,
                        const float2* __restrict__ lj_cap = nullptr,
                        float force_cap = 0.0f,
                        int tpa = 0,    // threads per atom: 1,2,4,8 or 0 = heuristic
-                       const float* d_box = nullptr,   // {L, 1/L} on the device overrides L
+                       const Box* d_box = nullptr,   // box on the device (NPT) overrides box
                        bool ev = true,    // false: skip per-atom energy (force.w = 0) and virial
                        bool shift = false);   // energy-shifted LJ (U(rc) = 0)
 

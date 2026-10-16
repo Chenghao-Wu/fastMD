@@ -30,9 +30,9 @@ __global__ void ewald_excl_kernel(
     const int* __restrict__ rank,
     int natoms, int nexcl,
     float coul_const, float alpha,
-    float L, float inv_L, const float* __restrict__ d_box)
+    Box box, const Box* __restrict__ d_box)
 {
-    if (d_box) { L = d_box[0]; inv_L = d_box[1]; }   // box on the device (NPT)
+    if (d_box) box = *d_box;   // box on the device (NPT)
 
     int t = blockIdx.x * blockDim.x + threadIdx.x;
     int tid = threadIdx.x;
@@ -54,9 +54,8 @@ __global__ void ewald_excl_kernel(
             int j = rank ? rank[tj] : tj;
             float4 ri = pos[i];
             float4 rj = pos[j];
-            float dx = min_image(ri.x - rj.x, L, inv_L);
-            float dy = min_image(ri.y - rj.y, L, inv_L);
-            float dz = min_image(ri.z - rj.z, L, inv_L);
+            const float3 dd_ = min_image_dr(ri, rj, box);
+            float dx = dd_.x, dy = dd_.y, dz = dd_.z;
             float r2 = fmaxf(dx*dx + dy*dy + dz*dz, 1e-12f);
             float r = sqrtf(r2);
             float rinv = __frcp_rn(r);
@@ -118,9 +117,9 @@ __global__ void pair14_kernel(
     int npairs, int ntypes,
     float coul_const, float alpha,
     float lj14, float ewald14,
-    float L, float inv_L, const float* __restrict__ d_box)
+    Box box, const Box* __restrict__ d_box)
 {
-    if (d_box) { L = d_box[0]; inv_L = d_box[1]; }   // box on the device (NPT)
+    if (d_box) box = *d_box;   // box on the device (NPT)
 
     int p = blockIdx.x * blockDim.x + threadIdx.x;
     int tid = threadIdx.x;
@@ -134,9 +133,8 @@ __global__ void pair14_kernel(
         int ti = __float_as_int(ri.w);
         int tj = __float_as_int(rj.w);
 
-        float dx = min_image(ri.x - rj.x, L, inv_L);
-        float dy = min_image(ri.y - rj.y, L, inv_L);
-        float dz = min_image(ri.z - rj.z, L, inv_L);
+        const float3 dd_ = min_image_dr(ri, rj, box);
+        float dx = dd_.x, dy = dd_.y, dz = dd_.z;
         float r2 = fmaxf(dx*dx + dy*dy + dz*dz, 1e-12f);
         float r = sqrtf(r2);
         float rinv = __frcp_rn(r);
@@ -198,14 +196,14 @@ void launch_ewald_excl_kernel(const float4* pos, const float* charges,
                                const int* rank,
                                int natoms, int nexcl,
                                float coul_const, float alpha,
-                               float L, float inv_L,
-                               cudaStream_t stream, const float* d_box) {
+                               Box box,
+                               cudaStream_t stream, const Box* d_box) {
     if (nexcl == 0) return;
     int blocks = div_ceil(nexcl, 256);
     int smem = 0;
     ewald_excl_kernel<<<blocks, 256, smem, stream>>>(
         pos, charges, force, virial, excl_offsets, excl_list, rank,
-        natoms, nexcl, coul_const, alpha, L, inv_L, d_box);
+        natoms, nexcl, coul_const, alpha, box, d_box);
 }
 
 void launch_pair14_kernel(const float4* pos, const float* charges,
@@ -214,12 +212,12 @@ void launch_pair14_kernel(const float4* pos, const float* charges,
                            int npairs, int ntypes,
                            float coul_const, float alpha,
                            float lj14, float ewald14,
-                           float L, float inv_L,
-                           cudaStream_t stream, const float* d_box) {
+                           Box box,
+                           cudaStream_t stream, const Box* d_box) {
     if (npairs == 0) return;
     int blocks = div_ceil(npairs, 256);
     int smem = 0;
     pair14_kernel<<<blocks, 256, smem, stream>>>(
         pos, charges, force, virial, pairs, lj_params,
-        npairs, ntypes, coul_const, alpha, lj14, ewald14, L, inv_L, d_box);
+        npairs, ntypes, coul_const, alpha, lj14, ewald14, box, d_box);
 }

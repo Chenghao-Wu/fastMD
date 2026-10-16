@@ -55,13 +55,13 @@ __device__ __forceinline__ void stencil(float x, float scale, int K, int& g0, fl
 template <int N>
 __global__ void pme_spread_kernel(const float4* __restrict__ pos, const float* __restrict__ q,
                                   float* __restrict__ grid, int natoms, int K,
-                                  const float* __restrict__ d_box) {
+                                  const Box* __restrict__ d_box) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= natoms) return;
     float qi = q[i];
     if (qi == 0.0f) return;
     float4 r = pos[i];
-    const float scale = K * d_box[1];
+    const float scale = K * d_box->inv_L.x;
     int gx, gy, gz;
     float tx[N], ty[N], tz[N], d[N];
     stencil<N>(r.x, scale, K, gx, tx, d);
@@ -87,7 +87,7 @@ __global__ void pme_spread_kernel(const float4* __restrict__ pos, const float* _
 // twice).
 __global__ void pme_convolve_kernel(cufftComplex* __restrict__ cgrid,
                                     const float* __restrict__ bsp_mod, int K, float alpha,
-                                    float coul_const, const float* __restrict__ d_box,
+                                    float coul_const, const Box* __restrict__ d_box,
                                     double* __restrict__ energy, double* __restrict__ virial) {
     const int Kh = K / 2 + 1;
     const int total = K * K * Kh;
@@ -102,7 +102,7 @@ __global__ void pme_convolve_kernel(cufftComplex* __restrict__ cgrid,
         if (x == 0 && y == 0 && z == 0) {
             cgrid[idx] = make_cuFloatComplex(0.0f, 0.0f);
         } else {
-            const double inv_L = d_box[1];
+            const double inv_L = d_box->inv_L.x;
             const double V = 1.0 / (inv_L * inv_L * inv_L);
             double mx = (x <= K / 2 ? x : x - K) * inv_L;
             double my = (y <= K / 2 ? y : y - K) * inv_L;
@@ -135,13 +135,13 @@ template <int N>
 __global__ void pme_gather_kernel(const float4* __restrict__ pos, const float* __restrict__ q,
                                   const float* __restrict__ psi, float4* __restrict__ force,
                                   int natoms, int K, float coul_const,
-                                  const float* __restrict__ d_box) {
+                                  const Box* __restrict__ d_box) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= natoms) return;
     float qi = q[i];
     if (qi == 0.0f) return;
     float4 r = pos[i];
-    const float scale = K * d_box[1];
+    const float scale = K * d_box->inv_L.x;
     int gx, gy, gz;
     float tx[N], ty[N], tz[N], dx[N], dy[N], dz[N];
     stencil<N>(r.x, scale, K, gx, tx, dx);
@@ -175,7 +175,7 @@ __global__ void pme_gather_kernel(const float4* __restrict__ pos, const float* _
 
 template <int N>
 void launch_order(const float4* pos, const float* q, float4* force, double* virial,
-                  const float* d_box, cudaStream_t stream, PME& p) {
+                  const Box* d_box, cudaStream_t stream, PME& p) {
     const int blocks = div_ceil(p.natoms, 256);
     CUDA_CHECK(cudaMemsetAsync(p.d_grid, 0, sizeof(float) * (size_t)p.K * p.K * p.K, stream));
     CUDA_CHECK(cudaMemsetAsync(p.d_energy, 0, sizeof(double), stream));
@@ -266,7 +266,7 @@ void PME::free() {
 }
 
 void PME::compute(const float4* pos, const float* charges, float4* force, double* virial,
-                  const float* d_box, cudaStream_t stream) {
+                  const Box* d_box, cudaStream_t stream) {
     CUFFT_CHECK(cufftSetStream(plan_r2c, stream));
     CUFFT_CHECK(cufftSetStream(plan_c2r, stream));
     switch (order) {

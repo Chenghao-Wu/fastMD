@@ -10,7 +10,7 @@ __global__ void angle_table_kernel(
     double* __restrict__ virial,
     const int4* __restrict__ angles, const int* __restrict__ angle_table_idx,
     const TableParams* __restrict__ table_params, const float4* __restrict__ table_data,
-    int nangles, float L, float inv_L)
+    int nangles, Box box)
 {
     int a = blockIdx.x * blockDim.x + threadIdx.x;
     float vir[6] = {0, 0, 0, 0, 0, 0};
@@ -20,8 +20,8 @@ __global__ void angle_table_kernel(
         if (tidx >= 0) {
             TableParams tp = table_params[tidx];
             float4 rj = pos[ang.y];
-            AngleTerm t = table_angle_term(min_image_dr(pos[ang.x], rj, L, inv_L),
-                                           min_image_dr(pos[ang.z], rj, L, inv_L),
+            AngleTerm t = table_angle_term(min_image_dr(pos[ang.x], rj, box),
+                                           min_image_dr(pos[ang.z], rj, box),
                                            tp, table_data + tp.data_offset);
             atomicAdd(&force[ang.x].x, t.fi.x);
             atomicAdd(&force[ang.x].y, t.fi.y);
@@ -45,9 +45,9 @@ __global__ void angle_table_kernel(
 void launch_angle_table_kernel(const float4* pos, float4* force, double* virial,
                                const int4* angles, const int* angle_table_idx,
                                const TableParams* table_params, const float4* table_data,
-                               int nangles, float L, float inv_L, cudaStream_t stream) {
+                               int nangles, Box box, cudaStream_t stream) {
     if (nangles == 0) return;
     angle_table_kernel<<<div_ceil(nangles, 256), 256, 0, stream>>>(
         pos, force, virial, angles, angle_table_idx, table_params, table_data,
-        nangles, L, inv_L);
+        nangles, box);
 }

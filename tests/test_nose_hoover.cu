@@ -96,13 +96,11 @@ TEST(NoseHoover, NVTLimitEnergyConservation) {
     float2* d_lj = to_device(h_lj);
 
     VerletList verlet;
-    verlet.allocate(N, rc + skin, L);
+    verlet.allocate(N, rc + skin, cubic_box(L));
 
     SimParams params = {};
     params.natoms = N;
-    params.box_L = L;
-    params.inv_L = inv_L;
-    params.half_L = L * 0.5f;
+    params.box_L3 = make_float3(L, L, L);
     params.dt = dt;
     params.nsteps = nsteps;
     params.ntypes = ntypes;
@@ -122,12 +120,12 @@ TEST(NoseHoover, NVTLimitEnergyConservation) {
     CUDA_CHECK(cudaMemcpy(d_pos_ref, d_pos, np * sizeof(float4),
                            cudaMemcpyDeviceToDevice));
     CUDA_CHECK(cudaMemset(d_max_dr2, 0, sizeof(int)));
-    verlet.build(d_pos, N, L, inv_L, nullptr, nullptr, rc + skin);
+    verlet.build(d_pos, N, cubic_box(L), nullptr, nullptr, rc + skin);
     CUDA_CHECK(cudaMemset(d_force, 0, np * sizeof(float4)));
     CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(double)));
     launch_lj_kernel(d_pos, d_force, d_virial, d_lj,
                       verlet.neighbors, verlet.num_neighbors,
-                      N, ntypes, rc2, L, inv_L);
+                      N, ntypes, rc2, cubic_box(L));
     CUDA_CHECK(cudaDeviceSynchronize());
 
     auto vel_h   = to_host(d_vel, N);
@@ -147,19 +145,19 @@ TEST(NoseHoover, NVTLimitEnergyConservation) {
         launch_nh_v_verlet_half(d_vel, d_force, d_pos, N, hdt);
         launch_nh_update_pos(d_pos, d_vel, d_pos_ref,
                               nullptr, d_max_dr2,
-                              N, L, inv_L, 1.0f, 0.0f, dt);
+                              N, cubic_box(L), 1.0f, 0.0f, dt);
 
         if (check_and_reset_trigger(d_max_dr2, skin)) {
             CUDA_CHECK(cudaMemcpy(d_pos_ref, d_pos, np * sizeof(float4),
                                    cudaMemcpyDeviceToDevice));
-            verlet.build(d_pos, N, L, inv_L, nullptr, nullptr, rc + skin);
+            verlet.build(d_pos, N, cubic_box(L), nullptr, nullptr, rc + skin);
         }
 
         CUDA_CHECK(cudaMemset(d_force, 0, np * sizeof(float4)));
         CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(double)));
         launch_lj_kernel(d_pos, d_force, d_virial, d_lj,
                           verlet.neighbors, verlet.num_neighbors,
-                          N, ntypes, rc2, L, inv_L);
+                          N, ntypes, rc2, cubic_box(L));
 
         launch_nh_v_verlet_half(d_vel, d_force, d_pos, N, hdt);
 
@@ -246,13 +244,11 @@ TEST(NoseHoover, NVTReachesTargetTemperature) {
     float2* d_lj = to_device(h_lj);
 
     VerletList verlet;
-    verlet.allocate(N, rc + skin, L);
+    verlet.allocate(N, rc + skin, cubic_box(L));
 
     SimParams params = {};
     params.natoms = N;
-    params.box_L = L;
-    params.inv_L = inv_L;
-    params.half_L = L * 0.5f;
+    params.box_L3 = make_float3(L, L, L);
     params.dt = dt;
     params.nsteps = nsteps;
     params.ntypes = ntypes;
@@ -272,12 +268,12 @@ TEST(NoseHoover, NVTReachesTargetTemperature) {
     CUDA_CHECK(cudaMemcpy(d_pos_ref, d_pos, np * sizeof(float4),
                            cudaMemcpyDeviceToDevice));
     CUDA_CHECK(cudaMemset(d_max_dr2, 0, sizeof(int)));
-    verlet.build(d_pos, N, L, inv_L, nullptr, nullptr, rc + skin);
+    verlet.build(d_pos, N, cubic_box(L), nullptr, nullptr, rc + skin);
     CUDA_CHECK(cudaMemset(d_force, 0, np * sizeof(float4)));
     CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(double)));
     launch_lj_kernel(d_pos, d_force, d_virial, d_lj,
                       verlet.neighbors, verlet.num_neighbors,
-                      N, ntypes, rc2, L, inv_L);
+                      N, ntypes, rc2, cubic_box(L));
     CUDA_CHECK(cudaDeviceSynchronize());
 
     float hdt = 0.5f * dt;
@@ -296,19 +292,19 @@ TEST(NoseHoover, NVTReachesTargetTemperature) {
         launch_nh_v_verlet_half(d_vel, d_force, d_pos, N, hdt);
         launch_nh_update_pos(d_pos, d_vel, d_pos_ref,
                               nullptr, d_max_dr2,
-                              N, L, inv_L, 1.0f, 0.0f, dt);
+                              N, cubic_box(L), 1.0f, 0.0f, dt);
 
         if (check_and_reset_trigger(d_max_dr2, skin)) {
             CUDA_CHECK(cudaMemcpy(d_pos_ref, d_pos, np * sizeof(float4),
                                    cudaMemcpyDeviceToDevice));
-            verlet.build(d_pos, N, L, inv_L, nullptr, nullptr, rc + skin);
+            verlet.build(d_pos, N, cubic_box(L), nullptr, nullptr, rc + skin);
         }
 
         CUDA_CHECK(cudaMemset(d_force, 0, np * sizeof(float4)));
         CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(double)));
         launch_lj_kernel(d_pos, d_force, d_virial, d_lj,
                           verlet.neighbors, verlet.num_neighbors,
-                          N, ntypes, rc2, L, inv_L);
+                          N, ntypes, rc2, cubic_box(L));
 
         launch_nh_v_verlet_half(d_vel, d_force, d_pos, N, hdt);
 
@@ -353,8 +349,7 @@ TEST(NoseHoover, GPUChainMatchesHost) {
 
     SimParams params = {};
     params.natoms = N;
-    params.box_L = 10.0f;
-    params.inv_L = 0.1f;
+    params.box_L3 = make_float3(10.0f, 10.0f, 10.0f);
     params.dt = dt;
     params.nsteps = 1;
     params.ntypes = 1;

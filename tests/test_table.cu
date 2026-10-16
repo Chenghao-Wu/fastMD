@@ -63,15 +63,15 @@ TEST(Table, MatchesLJWithinInterpolationTolerance) {
     float4* d_table_data = to_device(h_table_data);
 
     VerletList verlet;
-    verlet.allocate(N, rc + skin, L);
-    verlet.build(d_pos, N, L, inv_L, nullptr, nullptr, rc + skin);
+    verlet.allocate(N, rc + skin, cubic_box(L));
+    verlet.build(d_pos, N, cubic_box(L), nullptr, nullptr, rc + skin);
 
     // Run LJ
     CUDA_CHECK(cudaMemset(d_force, 0, np * sizeof(float4)));
     CUDA_CHECK(cudaMemset(d_virial, 0, 6 * sizeof(double)));
     launch_lj_kernel(d_pos, d_force, d_virial, d_lj,
                      verlet.neighbors, verlet.num_neighbors,
-                     N, ntypes, rc2, L, inv_L);
+                     N, ntypes, rc2, cubic_box(L));
     CUDA_CHECK(cudaDeviceSynchronize());
     auto h_force_lj = to_host(d_force, N);
     double h_virial_lj[6];
@@ -83,7 +83,7 @@ TEST(Table, MatchesLJWithinInterpolationTolerance) {
     launch_table_kernel(d_pos, d_force, d_virial,
                         d_table_idx, d_table_params, d_table_data,
                         verlet.neighbors, verlet.num_neighbors,
-                        N, ntypes, rc2, L, inv_L);
+                        N, ntypes, rc2, cubic_box(L));
     CUDA_CHECK(cudaDeviceSynchronize());
     auto h_force_table = to_host(d_force, N);
     double h_virial_table[6];

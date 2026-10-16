@@ -71,7 +71,7 @@ public:
 
     int  current_step() const { return step_; }
     const SimParams& params() const { return params_; }
-    float box_length() const { return box_L_; }
+    const Box& box() const { return box_; }
     const ParticleData& particles() const { return p_; }
     int rollbacks() const { return n_rollbacks_; }
     int neighbor_capacity() const { return verlet_.max_neighbors; }
@@ -110,8 +110,8 @@ private:
     DeviceTopology t_;
     bool opls_mode_ = false;
 
-    // box (cubic). box_L_ is the host mirror of the current box length.
-    float box_L_ = 0.0f, inv_L_ = 0.0f;
+    // host mirror of the current box (the NPT barostat changes it on the device)
+    Box box_ = cubic_box(1.0f);
 
     // force field (device)
     float2*             d_lj_params_ = nullptr;
@@ -145,8 +145,9 @@ private:
     // with atomicMax) and the current box. The NPT barostat writes the box
     // here; integrators read it on the device.
     struct DeviceStatus {
-        int   max_dr2_bits;
-        float L, inv_L, V;
+        int   max_dr2_bits = 0;
+        float V = 0.0f;
+        Box   box = cubic_box(1.0f);
     };
     DeviceStatus* d_status_ = nullptr;
     DeviceStatus* h_status_ = nullptr;   // pinned

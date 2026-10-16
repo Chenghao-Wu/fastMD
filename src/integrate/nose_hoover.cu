@@ -51,11 +51,9 @@ void set_nh_scale_device(NoseHooverDeviceState* d_state, float scale) {
                           cudaMemcpyHostToDevice));
 }
 
-void allocate_npt_scratch(NoseHooverNPTScratch& s, float* d_box_V, float* d_box_L,
-                          float* d_box_inv_L) {
+void allocate_npt_scratch(NoseHooverNPTScratch& s, float* d_box_V, Box* d_box) {
     s.d_V = d_box_V;
-    s.d_L = d_box_L;
-    s.d_inv_L = d_box_inv_L;
+    s.d_box = d_box;
     CUDA_CHECK(cudaMalloc(&s.d_baro_scale, sizeof(float)));
     CUDA_CHECK(cudaMalloc(&s.d_exp_vW, sizeof(float)));
     CUDA_CHECK(cudaMalloc(&s.d_v_eps_W, sizeof(float)));
@@ -289,8 +287,8 @@ __global__ void nh_npt_chain_baro_kernel(
     bool use_carry,
     int M, float Q1, float Q_rest, float W,
     float half_dt, float dt,
-    float V0, int natoms,
-    float* d_V, float* d_L, float* d_inv_L,
+    float V0, Box box0, int natoms,
+    float* d_V, Box* d_box,
     float* d_baro_scale, float* d_exp_vW, float* d_v_eps_W, float* d_v_eps_W_dt)
 {
     if (use_carry) nh_update_targets(d_state);
@@ -326,11 +324,8 @@ __global__ void nh_npt_chain_baro_kernel(
 
         V = V0 * expf(3.0f * d_state->eps);
     }
-    float L = cbrtf(V);
-    float inv_L = 1.0f / L;
     *d_V = V;
-    *d_L = L;
-    *d_inv_L = inv_L;
+    *d_box = scaled_box(box0, cbrtf(V / V0));   // isotropic: every edge scales by exp(eps)
 
     // Barostat velocity scale (applied in pre-force fused kernel)
     float v_eps_W = d_state->v_eps / W;
@@ -424,10 +419,9 @@ void NoseHooverState::init(const SimParams& params) {
     P_stop  = params.P_stop;
     P_target = P_start;
 
-    V0 = params.box_L * params.box_L * params.box_L;
+    box0 = make_box(params.box_L3);
+    V0 = box0.volume();
     V = V0;
-    L = params.box_L;
-    inv_L = params.inv_L;
 
     eps = 0.0f;
     v_eps = 0.0f;
@@ -650,7 +644,7 @@ __global__ void nh_update_pos_kernel(
     float4* __restrict__ pos_ref,
     int* __restrict__ d_image,
     int* __restrict__ d_max_dr2_int,
-    int natoms, float L, float inv_L,
+    int natoms, Box box,
     float exp_vW_dt, float v_eps_W_dt, float dt)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -672,20 +666,9 @@ __global__ void nh_update_pos_kernel(
     r_ref.z *= exp_vW_dt;
 
     // PBC wrapping
-    int ix = (int)floorf(r.x * inv_L);
-    int iy = (int)floorf(r.y * inv_L);
-    int iz = (int)floorf(r.z * inv_L);
-    r.x -= ix * L;
-    r.y -= iy * L;
-    r.z -= iz * L;
-    if (d_image != nullptr) {
-        int i3 = i * 3;
-        d_image[i3 + 0] += ix;
-        d_image[i3 + 1] += iy;
-        d_image[i3 + 2] += iz;
-    }
+    wrap_into_box(r, d_image ? d_image + 3 * i : nullptr, box);
 
-    update_max_displacement(r, r_ref, d_max_dr2_int, L, inv_L);
+    update_max_displacement(r, r_ref, d_max_dr2_int, box);
 
     pos[i]     = r;
     pos_ref[i] = r_ref;
@@ -693,13 +676,13 @@ __global__ void nh_update_pos_kernel(
 
 void launch_nh_update_pos(float4* pos, float4* vel, float4* pos_ref,
                            int* d_image, int* d_max_dr2_int,
-                           int natoms, float L, float inv_L,
+                           int natoms, const Box& box,
                            float exp_vW_dt, float v_eps_W_dt, float dt,
                            cudaStream_t stream) {
     int blocks = div_ceil(natoms, 256);
     nh_update_pos_kernel<<<blocks, 256, 0, stream>>>(
         pos, vel, pos_ref, d_image, d_max_dr2_int,
-        natoms, L, inv_L, exp_vW_dt, v_eps_W_dt, dt);
+        natoms, box, exp_vW_dt, v_eps_W_dt, dt);
 }
 
 // --- Fused NVT pre-force kernel ---
@@ -714,7 +697,7 @@ __global__ void nh_nvt_pre_force_fused_kernel(
     int* __restrict__ d_image,
     const NoseHooverDeviceState* __restrict__ d_state,
     float half_dt, float dt,
-    float L, float inv_L, int natoms)
+    Box box, int natoms)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= natoms) return;
@@ -745,21 +728,10 @@ __global__ void nh_nvt_pre_force_fused_kernel(
     r.z += dt * v.z;
 
     // PBC wrapping
-    int ix = (int)floorf(r.x * inv_L);
-    int iy = (int)floorf(r.y * inv_L);
-    int iz = (int)floorf(r.z * inv_L);
-    r.x -= ix * L;
-    r.y -= iy * L;
-    r.z -= iz * L;
-    if (d_image != nullptr) {
-        int i3 = i * 3;
-        d_image[i3 + 0] += ix;
-        d_image[i3 + 1] += iy;
-        d_image[i3 + 2] += iz;
-    }
+    wrap_into_box(r, d_image ? d_image + 3 * i : nullptr, box);
 
     // Displacement tracking (pos_ref unchanged for NVT)
-    update_max_displacement(r, pos_ref[i], d_max_dr2_int, L, inv_L);
+    update_max_displacement(r, pos_ref[i], d_max_dr2_int, box);
 
     pos[i] = r;
     vel[i] = v;
@@ -770,12 +742,12 @@ void launch_nh_nvt_pre_force_fused(float4* pos, float4* vel, const float4* force
                                     int* d_max_dr2_int, int* d_image,
                                     const NoseHooverDeviceState* d_state,
                                     float half_dt, float dt,
-                                    int natoms, float L, float inv_L,
+                                    int natoms, const Box& box,
                                     cudaStream_t stream) {
     int blocks = div_ceil(natoms, 256);
     nh_nvt_pre_force_fused_kernel<<<blocks, 256, 0, stream>>>(
         pos, vel, force, pos_ref, d_max_dr2_int, d_image,
-        d_state, half_dt, dt, L, inv_L, natoms);
+        d_state, half_dt, dt, box, natoms);
 }
 
 // --- Fused NPT pre-force kernel ---
@@ -794,12 +766,12 @@ __global__ void nh_npt_pre_force_fused_kernel(
     const float* __restrict__ d_exp_vW,
     const float* __restrict__ d_v_eps_W_dt,
     float half_dt, float dt,
-    const float* __restrict__ d_L, const float* __restrict__ d_inv_L, int natoms)
+    const Box* __restrict__ d_box, int natoms)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= natoms) return;
 
-    const float L = *d_L, inv_L = *d_inv_L;
+    const Box box = *d_box;
     float nh_scale = d_state->nh_scale;
     float baro_scale = *d_baro_scale;
     float exp_vW = *d_exp_vW;
@@ -838,21 +810,10 @@ __global__ void nh_npt_pre_force_fused_kernel(
     r_ref.z *= exp_vW;
 
     // PBC wrapping
-    int ix = (int)floorf(r.x * inv_L);
-    int iy = (int)floorf(r.y * inv_L);
-    int iz = (int)floorf(r.z * inv_L);
-    r.x -= ix * L;
-    r.y -= iy * L;
-    r.z -= iz * L;
-    if (d_image != nullptr) {
-        int i3 = i * 3;
-        d_image[i3 + 0] += ix;
-        d_image[i3 + 1] += iy;
-        d_image[i3 + 2] += iz;
-    }
+    wrap_into_box(r, d_image ? d_image + 3 * i : nullptr, box);
 
     // Displacement tracking
-    update_max_displacement(r, r_ref, d_max_dr2_int, L, inv_L);
+    update_max_displacement(r, r_ref, d_max_dr2_int, box);
 
     pos[i] = r;
     vel[i] = v;
@@ -867,13 +828,13 @@ void launch_nh_npt_pre_force_fused(float4* pos, float4* vel, const float4* force
                                     const float* d_exp_vW,
                                     const float* d_v_eps_W_dt,
                                     float half_dt, float dt,
-                                    int natoms, const float* d_L, const float* d_inv_L,
+                                    int natoms, const Box* d_box,
                                     cudaStream_t stream) {
     int blocks = div_ceil(natoms, 256);
     nh_npt_pre_force_fused_kernel<<<blocks, 256, 0, stream>>>(
         pos, vel, force, pos_ref, d_max_dr2_int, d_image,
         d_state, d_baro_scale, d_exp_vW, d_v_eps_W_dt,
-        half_dt, dt, d_L, d_inv_L, natoms);
+        half_dt, dt, d_box, natoms);
 }
 
 // --- Lightweight KE + virial-trace kernel for NPT ---

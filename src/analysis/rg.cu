@@ -26,7 +26,7 @@ __global__ void rg_kernel(const float4* __restrict__ pos,
                           const int* __restrict__ rank,
                           const int* __restrict__ mol_offsets,
                           const int* __restrict__ mol_members,
-                          float box_L,
+                          Box box,
                           float* __restrict__ d_ensemble_sum)
 {
     __shared__ float scratch[kRgBlock / 32];
@@ -40,9 +40,9 @@ __global__ void rg_kernel(const float4* __restrict__ pos,
         int t = mol_members[start + k];
         int i = rank ? rank[t] : t;
         float4 r = pos[i];
-        cx += r.x + image[3 * i + 0] * box_L;
-        cy += r.y + image[3 * i + 1] * box_L;
-        cz += r.z + image[3 * i + 2] * box_L;
+        cx += r.x + image[3 * i + 0] * box.L.x;
+        cy += r.y + image[3 * i + 1] * box.L.y;
+        cz += r.z + image[3 * i + 2] * box.L.z;
     }
     float inv_len = 1.0f / len;
     cx = block_sum(cx, scratch) * inv_len;
@@ -55,9 +55,9 @@ __global__ void rg_kernel(const float4* __restrict__ pos,
         int t = mol_members[start + k];
         int i = rank ? rank[t] : t;
         float4 r = pos[i];
-        float dx = r.x + image[3 * i + 0] * box_L - cx;
-        float dy = r.y + image[3 * i + 1] * box_L - cy;
-        float dz = r.z + image[3 * i + 2] * box_L - cz;
+        float dx = r.x + image[3 * i + 0] * box.L.x - cx;
+        float dy = r.y + image[3 * i + 1] * box.L.y - cy;
+        float dz = r.z + image[3 * i + 2] * box.L.z - cz;
         rg2 += dx * dx + dy * dy + dz * dz;
     }
     rg2 = block_sum(rg2, scratch);
@@ -104,11 +104,11 @@ void RgBuffers::free() {
 }
 
 void compute_rg(const float4* pos, const int* image, const int* rank,
-                const RgBuffers& bufs, float box_L,
+                const RgBuffers& bufs, const Box& box,
                 int step, float* h_rg, cudaStream_t stream) {
     CUDA_CHECK(cudaMemsetAsync(bufs.d_ensemble_sum, 0, sizeof(float), stream));
     rg_kernel<<<bufs.nmols, kRgBlock, 0, stream>>>(
-        pos, image, rank, bufs.d_mol_offsets, bufs.d_mol_members, box_L, bufs.d_ensemble_sum);
+        pos, image, rank, bufs.d_mol_offsets, bufs.d_mol_members, box, bufs.d_ensemble_sum);
     CUDA_CHECK(cudaGetLastError());
 
     float ensemble_sum;

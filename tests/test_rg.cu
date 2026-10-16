@@ -17,7 +17,7 @@ float run_rg(const std::vector<float4>& pos, const std::vector<int>& image,
     RgBuffers bufs;
     bufs.allocate(mol_ids, nullptr);
     float rg = 0.0f;
-    compute_rg(d_pos, d_image, d_rank, bufs, L, 1, &rg);
+    compute_rg(d_pos, d_image, d_rank, bufs, cubic_box(L), 1, &rg);
     bufs.free();
     free_device(d_pos);
     free_device(d_image);

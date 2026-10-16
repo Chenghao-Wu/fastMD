@@ -45,12 +45,12 @@ TEST(LJ, SmallSystemMatchesCPU) {
     float2* d_lj = to_device(h_lj);
 
     VerletList verlet;
-    verlet.allocate(N, rc + skin, L);
-    verlet.build(d_pos, N, L, inv_L, nullptr, nullptr, rc + skin);
+    verlet.allocate(N, rc + skin, cubic_box(L));
+    verlet.build(d_pos, N, cubic_box(L), nullptr, nullptr, rc + skin);
 
     launch_lj_kernel(d_pos, d_force, d_virial, d_lj,
                       verlet.neighbors, verlet.num_neighbors,
-                      N, ntypes, rc2, L, inv_L);
+                      N, ntypes, rc2, cubic_box(L));
     CUDA_CHECK(cudaDeviceSynchronize());
 
     auto h_force = to_host(d_force, N);
@@ -98,10 +98,10 @@ TEST(LJ, ForceCapIsEnergyConsistent) {
         CUDA_CHECK(cudaMalloc(&d_v, 6 * sizeof(double)));
         CUDA_CHECK(cudaMemset(d_v, 0, 6 * sizeof(double)));
         VerletList v;
-        v.allocate(2, rc + 0.3f, L);
-        v.build(d_pos, 2, L, 1.0f / L, nullptr, nullptr, rc + 0.3f);
+        v.allocate(2, rc + 0.3f, cubic_box(L));
+        v.build(d_pos, 2, cubic_box(L), nullptr, nullptr, rc + 0.3f);
         launch_lj_kernel(d_pos, d_f, d_v, d_lj, v.neighbors, v.num_neighbors, 2, 1, rc * rc,
-                         L, 1.0f / L, 0, d_cap, Fcap);
+                         cubic_box(L), 0, d_cap, Fcap);
         auto f = to_host(d_f, 2);
         *energy = f[0].w + f[1].w;
         v.free();
@@ -139,10 +139,10 @@ TEST(LJ, EnergyShiftAndForcesOnlyVariant) {
         CUDA_CHECK(cudaMalloc(&d_v, 6 * sizeof(double)));
         CUDA_CHECK(cudaMemset(d_v, 0, 6 * sizeof(double)));
         VerletList v;
-        v.allocate(2, rc + 0.3f, L);
-        v.build(d_pos, 2, L, 1.0f / L, nullptr, nullptr, rc + 0.3f);
+        v.allocate(2, rc + 0.3f, cubic_box(L));
+        v.build(d_pos, 2, cubic_box(L), nullptr, nullptr, rc + 0.3f);
         launch_lj_kernel(d_pos, d_f, d_v, d_lj, v.neighbors, v.num_neighbors, 2, 1, rc * rc,
-                         L, 1.0f / L, 0, nullptr, 0.0f, 1, nullptr, ev, shift);
+                         cubic_box(L), 0, nullptr, 0.0f, 1, nullptr, ev, shift);
         auto f = to_host(d_f, 2);
         *energy = f[0].w + f[1].w;
         v.free();
@@ -182,10 +182,10 @@ TEST(Soft, ForceEnergyRampAndOverlap) {
         CUDA_CHECK(cudaMalloc(&d_v, 6 * sizeof(double)));
         CUDA_CHECK(cudaMemset(d_v, 0, 6 * sizeof(double)));
         VerletList v;
-        v.allocate(2, rc + 0.3f, L);
-        v.build(d_pos, 2, L, 1.0f / L, nullptr, nullptr, rc + 0.3f);
+        v.allocate(2, rc + 0.3f, cubic_box(L));
+        v.build(d_pos, 2, cubic_box(L), nullptr, nullptr, rc + 0.3f);
         launch_soft_kernel(d_pos, d_f, d_v, v.neighbors, v.num_neighbors, 2, rc, 10.0f, 50.0f, 100,
-                           d_step, L, 1.0f / L, 0, 1, nullptr, true);
+                           d_step, cubic_box(L), 0, 1, nullptr, true);
         auto f = to_host(d_f, 2);
         *energy = f[0].w + f[1].w;
         v.free();

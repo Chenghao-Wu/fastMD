@@ -9,16 +9,16 @@ __global__ void dihedral_opls_kernel(const float4* __restrict__ pos, float4* __r
                                      const int4* __restrict__ dihedrals,
                                      const int* __restrict__ dihedral_types,
                                      const OPLSDihedralParams* __restrict__ params,
-                                     int ndihedrals, float L, float inv_L)
+                                     int ndihedrals, Box box)
 {
     int d = blockIdx.x * blockDim.x + threadIdx.x;
     float vir[6] = {0, 0, 0, 0, 0, 0};
     if (d < ndihedrals) {
         int4 dih = dihedrals[d];
         float4 r2 = pos[dih.y], r3 = pos[dih.z];
-        DihedralTerm t = opls_dihedral_term(min_image_dr(pos[dih.x], r2, L, inv_L),
-                                            min_image_dr(r3, r2, L, inv_L),
-                                            min_image_dr(pos[dih.w], r3, L, inv_L),
+        DihedralTerm t = opls_dihedral_term(min_image_dr(pos[dih.x], r2, box),
+                                            min_image_dr(r3, r2, box),
+                                            min_image_dr(pos[dih.w], r3, box),
                                             params[dihedral_types[d]]);
         const int idx[4] = {dih.x, dih.y, dih.z, dih.w};
         const float3 f[4] = {t.f1, t.f2, t.f3, t.f4};
@@ -36,9 +36,9 @@ __global__ void dihedral_opls_kernel(const float4* __restrict__ pos, float4* __r
 void launch_dihedral_opls_kernel(const float4* pos, float4* force, double* virial,
                                  const int4* dihedrals, const int* dihedral_types,
                                  const OPLSDihedralParams* params,
-                                 int ndihedrals, float L, float inv_L,
+                                 int ndihedrals, Box box,
                                  cudaStream_t stream) {
     if (ndihedrals == 0) return;
     dihedral_opls_kernel<<<div_ceil(ndihedrals, 256), 256, 0, stream>>>(
-        pos, force, virial, dihedrals, dihedral_types, params, ndihedrals, L, inv_L);
+        pos, force, virial, dihedrals, dihedral_types, params, ndihedrals, box);
 }

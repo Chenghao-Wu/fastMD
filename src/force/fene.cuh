@@ -15,5 +15,5 @@ void launch_fene_kernel(const float4* __restrict__ pos,
                          const int* __restrict__ bond_types,
                          const FENEParams* __restrict__ params,
                          int nbonds, int nparamtypes,
-                         float L, float inv_L,
+                         Box box,
                          cudaStream_t stream = 0);

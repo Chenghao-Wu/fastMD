@@ -23,9 +23,9 @@ __global__ void lj_verlet_kernel(
     const int* __restrict__ neighbors,
     const int* __restrict__ num_neighbors,
     int natoms, int ntypes,
-    float rc2, float L, float inv_L, const float* __restrict__ d_box)
+    float rc2, Box box, const Box* __restrict__ d_box)
 {
-    if (d_box) { L = d_box[0]; inv_L = d_box[1]; }   // box on the device (NPT)
+    if (d_box) box = *d_box;   // box on the device (NPT)
     const int t = blockIdx.x * blockDim.x + threadIdx.x;
     const int i = t / TPA;
     const int sub = t & (TPA - 1);
@@ -45,9 +45,8 @@ __global__ void lj_verlet_kernel(
             float4 pos_j = __ldg(&pos[j]);
             int type_j = __float_as_int(pos_j.w);
 
-            float dx = min_image(pos_i.x - pos_j.x, L, inv_L);
-            float dy = min_image(pos_i.y - pos_j.y, L, inv_L);
-            float dz = min_image(pos_i.z - pos_j.z, L, inv_L);
+            const float3 dd_ = min_image_dr(pos_i, pos_j, box);
+            float dx = dd_.x, dy = dd_.y, dz = dd_.z;
             float r2 = dx*dx + dy*dy + dz*dz;
 
             if (r2 < rc2 && r2 > 1e-10f) {
@@ -112,9 +111,9 @@ void launch_lj_kernel(const float4* pos, float4* force, double* virial,
                        const float2* lj_params,
                        const int* neighbors, const int* num_neighbors,
                        int natoms, int ntypes,
-                       float rc2, float L, float inv_L,
+                       float rc2, Box box,
                        cudaStream_t stream,
-                       const float2* lj_cap, float force_cap, int tpa, const float* d_box,
+                       const float2* lj_cap, float force_cap, int tpa, const Box* d_box,
                        bool ev, bool shift)
 {
     if (tpa <= 0) tpa = pair_threads_per_atom(natoms);
@@ -123,7 +122,7 @@ void launch_lj_kernel(const float4* pos, float4* force, double* virial,
 #define FASTMD_LJ_K(C, T, E, S)                                                    \
     lj_verlet_kernel<C, T, E, S><<<blocks, 256, 0, stream>>>(                     \
         pos, force, virial, lj_params, lj_cap, force_cap,                         \
-        neighbors, num_neighbors, natoms, ntypes, rc2, L, inv_L, d_box)
+        neighbors, num_neighbors, natoms, ntypes, rc2, box, d_box)
 #define FASTMD_LJ_LAUNCH(C, T)                                                     \
     do {                                                                           \
         if (!ev) FASTMD_LJ_K(C, T, false, false);                                  \

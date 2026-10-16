@@ -45,8 +45,7 @@ Recip run(const System& s, float alpha, float C, bool pme, int kmax_or_K, int or
     float4* d_f = to_device(zero);
     std::vector<double> vz(6, 0.0);
     double* d_vir = to_device(vz);
-    std::vector<float> box = {s.L, 1.0f / s.L};
-    float* d_box = to_device(box);
+    Box* d_box = to_device(std::vector<Box>{cubic_box(s.L)});
     Recip r;
     if (pme) {
         PME p;

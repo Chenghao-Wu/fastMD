@@ -41,7 +41,7 @@ TEST(FENE, TwoBondChainMatchesCPU) {
                            cudaMemcpyHostToDevice));
 
     launch_fene_kernel(d_pos, d_force, d_virial, d_bonds, d_btypes, d_params,
-                        2, 1, L, inv_L);
+                        2, 1, cubic_box(L));
     CUDA_CHECK(cudaDeviceSynchronize());
 
     auto h_force = to_host(d_force, N);

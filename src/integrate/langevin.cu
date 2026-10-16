@@ -25,7 +25,7 @@ __global__ void integrator_pre_force_kernel(
     int* __restrict__ image,
     const int* __restrict__ tag,
     uint64_t seed, const int* __restrict__ d_step,
-    int natoms, float L, float inv_L,
+    int natoms, Box box,
     float half_dt, float c1, float c2,
     float T_start, float T_stop, int nsteps)
 {
@@ -67,20 +67,9 @@ __global__ void integrator_pre_force_kernel(
     r.y += half_dt * v.y;
     r.z += half_dt * v.z;
 
-    int ix = (int)floorf(r.x * inv_L);
-    int iy = (int)floorf(r.y * inv_L);
-    int iz = (int)floorf(r.z * inv_L);
-    r.x -= ix * L;
-    r.y -= iy * L;
-    r.z -= iz * L;
-    if (image != nullptr) {
-        int i3 = i * 3;
-        image[i3 + 0] += ix;
-        image[i3 + 1] += iy;
-        image[i3 + 2] += iz;
-    }
+    wrap_into_box(r, image ? image + 3 * i : nullptr, box);
 
-    update_max_displacement(r, pos_ref[i], d_max_dr2_int, L, inv_L);
+    update_max_displacement(r, pos_ref[i], d_max_dr2_int, box);
 
     pos[i] = r;
     vel[i] = v;
@@ -90,12 +79,12 @@ void launch_integrator_pre_force(float4* pos, float4* vel, const float4* force,
                                   float4* pos_ref, int* d_max_dr2_int,
                                   int* image, const int* tag, const int* d_step,
                                   const LangevinState& lang,
-                                  int natoms, float L, float inv_L,
+                                  int natoms, const Box& box,
                                   float half_dt, cudaStream_t stream) {
     int blocks = div_ceil(natoms, 256);
     integrator_pre_force_kernel<<<blocks, 256, 0, stream>>>(
         pos, vel, force, pos_ref, d_max_dr2_int, image, tag,
-        lang.seed, d_step, natoms, L, inv_L,
+        lang.seed, d_step, natoms, box,
         half_dt, lang.c1, lang.c2, lang.T_start, lang.T_stop, lang.nsteps);
 }
 

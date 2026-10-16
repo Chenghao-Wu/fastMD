@@ -22,7 +22,7 @@ struct RestartFrame {
 void write_lammps_data(const std::string& path, const RestartFrame& frame,
                        const TopologyData& topo,
                        int ntypes, int nbond_types, int nangle_types, int ndihedral_types,
-                       float box_L, int64_t step);
+                       const Box& box, int64_t step);
 
 std::string build_restart_filename(const std::string& base, int64_t step);
 std::string build_restart_final_filename(const std::string& base);

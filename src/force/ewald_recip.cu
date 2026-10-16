@@ -71,9 +71,9 @@ __global__ void ewald_sf_kernel(
     const float* __restrict__ charges,
     const int3* __restrict__ kvecs,
     float* __restrict__ sfac,
-    int natoms, float L, const float* __restrict__ d_box)
+    int natoms, float L, const Box* __restrict__ d_box)
 {
-    if (d_box) L = d_box[0];
+    if (d_box) L = d_box->L.x;   // cubic box (enforced by the config)
     int k = blockIdx.x;
     int3 n = kvecs[k];
     float unitk = 2.0f * 3.14159265358979323846f / L;
@@ -124,9 +124,9 @@ __global__ void ewald_recip_kernel(
     float4* __restrict__ force,
     double* __restrict__ virial,
     int natoms, int kcount,
-    float coul_const, float alpha, float L, const float* __restrict__ d_box)
+    float coul_const, float alpha, float L, const Box* __restrict__ d_box)
 {
-    if (d_box) L = d_box[0];
+    if (d_box) L = d_box->L.x;   // cubic box (enforced by the config)
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     float unitk = 2.0f * 3.14159265358979323846f / L;
     float V = L * L * L;
@@ -212,7 +212,7 @@ __global__ void ewald_recip_kernel(
 void launch_ewald_sf_kernel(const float4* pos, const float* charges,
                              const int3* kvecs, float* sfac,
                              int natoms, int kcount, float L,
-                             cudaStream_t stream, const float* d_box) {
+                             cudaStream_t stream, const Box* d_box) {
     if (kcount == 0) return;
     ewald_sf_kernel<<<kcount, 256, 0, stream>>>(
         pos, charges, kvecs, sfac, natoms, L, d_box);
@@ -223,7 +223,7 @@ void launch_ewald_recip_kernel(const float4* pos, const float* charges,
                                 float4* force, double* virial,
                                 int natoms, int kcount,
                                 float coul_const, float alpha, float L,
-                                cudaStream_t stream, const float* d_box) {
+                                cudaStream_t stream, const Box* d_box) {
     if (kcount == 0) return;
     int blocks = div_ceil(natoms, 256);
     ewald_recip_kernel<<<blocks, 256, 0, stream>>>(

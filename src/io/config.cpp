@@ -2,6 +2,7 @@
 #include "table_parser.hpp"
 #include "lammps_data.hpp"
 #include "../core/system.cuh"
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -602,10 +603,18 @@ void validate_system(const SimParams& params, const TopologyData& topo) {
     if (topo.n_atom_types > params.ntypes)
         throw std::runtime_error("data file declares " + std::to_string(topo.n_atom_types) +
                                  " atom types but ntypes is " + std::to_string(params.ntypes));
-    if (!(topo.box_L > 0.0f)) throw std::runtime_error("box length must be > 0");
-    if (params.rc > 0.5f * topo.box_L)
-        throw std::runtime_error("rc " + std::to_string(params.rc) + " exceeds half the box length " +
-                                 std::to_string(0.5f * topo.box_L) + " (minimum image)");
+    const float Lmin = std::min({topo.box.x, topo.box.y, topo.box.z});
+    if (!(Lmin > 0.0f)) throw std::runtime_error("box lengths must be > 0");
+    if (params.rc > 0.5f * Lmin)
+        throw std::runtime_error("rc " + std::to_string(params.rc) + " exceeds half the shortest box edge " +
+                                 std::to_string(0.5f * Lmin) + " (minimum image)");
+    const bool cubic = topo.box.x == topo.box.y && topo.box.y == topo.box.z;
+    if (params.ewald_on && !cubic)
+        throw std::runtime_error("coulomb ewald/pme requires a cubic box (box is " +
+                                 std::to_string(topo.box.x) + " x " + std::to_string(topo.box.y) +
+                                 " x " + std::to_string(topo.box.z) + ")");
+    if (params.dump_freq > 0 && !cubic)
+        throw std::runtime_error("dump_freq (legacy trajectory format) requires a cubic box; use traj");
 
     auto covered = [](const std::vector<char>& set, int t) { return t < (int)set.size() && set[t]; };
     if (!topo.bonds.empty()) {
@@ -647,8 +656,6 @@ void validate_system(const SimParams& params, const TopologyData& topo) {
 }
 
 void finalize_params(SimParams& params) {
-    params.inv_L = 1.0f / params.box_L;
-    params.half_L = params.box_L / 2.0f;
     params.rc2 = params.rc * params.rc;
     params.ntiles = div_ceil(params.natoms, TILE_SIZE);
 }
@@ -658,7 +665,7 @@ void load_config(std::istream& in, const std::string& source, SimParams& params,
     params = parse_config(in, source, topo);
     if (!topo.data_file.empty()) parse_lammps_data(topo.data_file, topo);
     if (params.natoms == 0) params.natoms = (int)topo.positions.size();
-    params.box_L = topo.box_L;
+    params.box_L3 = topo.box;
     validate_system(params, topo);
     finalize_params(params);
 }

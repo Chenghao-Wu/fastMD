@@ -83,9 +83,9 @@ TEST(VerletList, GrowsOnOverflowAndStaysComplete) {
     std::iota(tag.begin(), tag.end(), 0);
     float4* d_pos = to_device(pos);
     VerletList v;
-    v.allocate(n, rcut, L);
+    v.allocate(n, rcut, cubic_box(L));
     int cap0 = v.max_neighbors;
-    v.build(d_pos, n, L, 1.0f / L, nullptr, nullptr, rcut);
+    v.build(d_pos, n, cubic_box(L), nullptr, nullptr, rcut);
     EXPECT_GT(v.max_count, cap0) << "test does not exercise overflow";
     EXPECT_GE(v.n_resizes, 1);
     EXPECT_GE(v.max_neighbors, v.max_count);
@@ -102,14 +102,14 @@ TEST(VerletList, CompleteAfterBoxExpansionAndCompression) {
     std::vector<int> tag(n);
     std::iota(tag.begin(), tag.end(), 0);
     VerletList v;
-    v.allocate(n, rcut, L0);
+    v.allocate(n, rcut, cubic_box(L0));
     // 0.5: fewer than 2R+1 cells per side (stencil cells repeat under PBC)
     for (float s : {1.0f, 1.3f, 0.75f, 1.05f, 0.5f}) {
         float L = L0 * s;
         std::vector<float4> pos(pos0);
         for (auto& p : pos) { p.x *= s; p.y *= s; p.z *= s; }
         float4* d_pos = to_device(pos);
-        v.build(d_pos, n, L, 1.0f / L, nullptr, nullptr, rcut);
+        v.build(d_pos, n, cubic_box(L), nullptr, nullptr, rcut);
         EXPECT_EQ(v.nx, int(L * v.cell_div / rcut)) << "grid not derived from the current box";
         expect_list_matches(v, pos, L, rcut, tag, {});
         free_device(d_pos);
@@ -154,9 +154,56 @@ TEST(VerletList, TagSpaceExclusionsAfterPermutation) {
     int* d_off = to_device(off);
     int* d_list = to_device(list);
     VerletList v;
-    v.allocate(n, rcut, L);
-    v.build(d_pos, n, L, 1.0f / L, d_tag, d_off, d_list, rcut);
+    v.allocate(n, rcut, cubic_box(L));
+    v.build(d_pos, n, cubic_box(L), d_tag, d_off, d_list, rcut);
     expect_list_matches(v, pos, L, rcut, tag, excl);
     v.free();
     free_device(d_pos); free_device(d_tag); free_device(d_off); free_device(d_list);
+}
+
+// Orthorhombic boxes: independent cell counts per axis, including an axis
+// with fewer than 2R+1 cells (duplicate stencil cells).
+TEST(VerletList, CompleteInOrthorhombicBoxes) {
+    const float rcut = 2.8f;
+    for (float3 L : {make_float3(12.0f, 9.0f, 15.0f), make_float3(6.0f, 13.0f, 20.0f),
+                     make_float3(25.0f, 6.5f, 8.0f)}) {
+        const int n = (int)(0.6f * L.x * L.y * L.z);
+        std::mt19937 rng(17);
+        std::uniform_real_distribution<float> u(0.0f, 1.0f);
+        std::vector<float4> pos(n);
+        for (auto& p : pos) p = make_float4(u(rng) * L.x, u(rng) * L.y, u(rng) * L.z, pack_type_id(0));
+        std::vector<int> tag(n);
+        std::iota(tag.begin(), tag.end(), 0);
+        float4* d_pos = to_device(pos);
+        VerletList v;
+        const Box box = make_box(L);
+        v.allocate(n, rcut, box);
+        v.build(d_pos, n, box, nullptr, nullptr, rcut);
+        EXPECT_EQ(v.nx, v.cells_along(L.x));
+        EXPECT_EQ(v.nz, v.cells_along(L.z));
+        // brute force with per-axis minimum image
+        auto num = to_host(v.num_neighbors, n);
+        auto flat = to_host(v.neighbors, (size_t)v.max_neighbors * n);
+        int missing = 0, extra = 0;
+        for (int i = 0; i < n; i++) {
+            std::set<int> got;
+            for (int k = 0; k < num[i]; k++) got.insert(flat[(size_t)k * n + i]);
+            for (int j = 0; j < n; j++) {
+                if (j == i) continue;
+                double dx = pos[i].x - pos[j].x, dy = pos[i].y - pos[j].y, dz = pos[i].z - pos[j].z;
+                dx -= L.x * std::nearbyint(dx / L.x);
+                dy -= L.y * std::nearbyint(dy / L.y);
+                dz -= L.z * std::nearbyint(dz / L.z);
+                double r = std::sqrt(dx * dx + dy * dy + dz * dz);
+                if (std::fabs(r - rcut) < 1e-4) continue;
+                bool in = r < rcut;
+                if (in && !got.count(j)) missing++;
+                if (!in && got.count(j)) extra++;
+            }
+        }
+        EXPECT_EQ(missing, 0) << L.x << "x" << L.y << "x" << L.z;
+        EXPECT_EQ(extra, 0) << L.x << "x" << L.y << "x" << L.z;
+        v.free();
+        free_device(d_pos);
+    }
 }

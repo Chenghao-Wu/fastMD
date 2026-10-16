@@ -101,13 +101,13 @@ TEST(EwaldOPLS, SmallClusterMatchesBruteForce) {
     int* d_ex_off = to_device(ex_off);
     int* d_ex_list = to_device(ex_list);
     VerletList verlet;
-    verlet.allocate(N, rc + 0.2f, L);
-    verlet.build(d_pos, N, L, inv_L, d_ex_off, d_ex_list, rc + 0.2f);
+    verlet.allocate(N, rc + 0.2f, cubic_box(L));
+    verlet.build(d_pos, N, cubic_box(L), d_ex_off, d_ex_list, rc + 0.2f);
 
     // 1. fused LJ + real-space erfc (overwrites force)
     launch_lj_coul_long_kernel(d_pos, d_q, d_force, d_virial, d_lj,
                                 verlet.neighbors, verlet.num_neighbors,
-                                N, ntypes, coul_const, alpha, rc * rc, L, inv_L);
+                                N, ntypes, coul_const, alpha, rc * rc, cubic_box(L));
 
     // 2. reciprocal space
     std::vector<int3> kvecs = ewald_build_kvectors(kmax, L, alpha);
@@ -125,13 +125,13 @@ TEST(EwaldOPLS, SmallClusterMatchesBruteForce) {
     launch_ewald_excl_kernel(d_pos, d_q, d_force, d_virial,
                               d_ex13_off, d_ex13_list, nullptr,
                               N, (int)ex13_list.size(),
-                              coul_const, alpha, L, inv_L);
+                              coul_const, alpha, cubic_box(L));
 
     // 4. scaled 1-4 pairs
     int2* d_p14 = to_device(h_p14);
     launch_pair14_kernel(d_pos, d_q, d_force, d_virial, d_p14, d_lj,
                           (int)h_p14.size(), ntypes,
-                          coul_const, alpha, lj14, coul14, L, inv_L);
+                          coul_const, alpha, lj14, coul14, cubic_box(L));
     CUDA_CHECK(cudaDeviceSynchronize());
 
     // --- compare forces ---

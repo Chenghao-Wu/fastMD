@@ -44,8 +44,7 @@ Simulation::Simulation(const SimParams& params, TopologyData topo)
         throw std::runtime_error("natoms (" + std::to_string(params_.natoms) +
                                  ") does not match the number of atoms read (" +
                                  std::to_string(topo_.positions.size()) + ")");
-    box_L_ = params_.box_L;
-    inv_L_ = 1.0f / box_L_;
+    box_ = make_box(params_.box_L3);
 
     set_type_masses(topo_.masses, params_.ntypes);
 
@@ -67,12 +66,14 @@ Simulation::Simulation(const SimParams& params, TopologyData topo)
 
     // NPT: size cells for 5% box compression before the grid must change
     verlet_.build_tpa = 4;
-    verlet_.allocate(params_.natoms, params_.rc, params_.skin, box_L_,
+    verlet_.allocate(params_.natoms, params_.rc, params_.skin, box_,
                      params_.ensemble == Ensemble::NPT_NH ? 1.05f : 1.0f, params_.neigh_max_age);
     check_every_ = params_.check_every;
     CUDA_CHECK(cudaMalloc(&d_status_, sizeof(DeviceStatus)));
     CUDA_CHECK(cudaHostAlloc(&h_status_, sizeof(DeviceStatus), cudaHostAllocDefault));
-    *h_status_ = DeviceStatus{0, box_L_, inv_L_, box_L_ * box_L_ * box_L_};
+    *h_status_ = DeviceStatus{};
+    h_status_->box = box_;
+    h_status_->V = box_.volume();
     CUDA_CHECK(cudaMemcpy(d_status_, h_status_, sizeof(DeviceStatus), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMalloc(&d_step_, sizeof(int)));
     const int first_step = 1;
@@ -174,9 +175,9 @@ void Simulation::upload_force_field() {
             // relative RMS force error target -> alpha and kmax / grid
             params_.ewald_alpha = ewald_alpha_for_tolerance(params_.ewald_tol, params_.rc);
             if (params_.kspace == 1)
-                params_.pme_grid = pme_grid_for_tolerance(params_.ewald_tol, params_.ewald_alpha, box_L_);
+                params_.pme_grid = pme_grid_for_tolerance(params_.ewald_tol, params_.ewald_alpha, box_.L.x);
             else
-                params_.ewald_kmax = ewald_kmax_for_tolerance(params_.ewald_tol, params_.ewald_alpha, box_L_);
+                params_.ewald_kmax = ewald_kmax_for_tolerance(params_.ewald_tol, params_.ewald_alpha, box_.L.x);
         }
         if (params_.kspace == 1) {
             pme_.allocate(params_.natoms, params_.pme_grid, params_.pme_order,
@@ -185,14 +186,14 @@ void Simulation::upload_force_field() {
             if (params_.ewald_kmax > 64)
                 throw std::runtime_error("direct Ewald needs kmax " + std::to_string(params_.ewald_kmax) +
                                          " > 64 for this tolerance and box; use 'coulomb pme'");
-            std::vector<int3> kvecs = ewald_build_kvectors(params_.ewald_kmax, box_L_,
+            std::vector<int3> kvecs = ewald_build_kvectors(params_.ewald_kmax, box_.L.x,
                                                            params_.ewald_alpha);
             params_.ewald_kcount = (int)kvecs.size();
             d_ewald_kvecs_ = upload_vec(kvecs);
             CUDA_CHECK(cudaMalloc(&d_ewald_sfac_, 2 * kvecs.size() * sizeof(float)));
         }
         params_.ewald_self_offset = ewald_self_offset(topo_.charges, params_.coul_const,
-                                                      params_.ewald_alpha, box_L_);
+                                                      params_.ewald_alpha, box_.L.x);
     }
 
 }
@@ -211,7 +212,7 @@ void Simulation::setup_integrator() {
         CUDA_CHECK(cudaMalloc(&d_ke_buf_, sizeof(float)));
     }
     if (params_.ensemble == Ensemble::NPT_NH)
-        allocate_npt_scratch(npt_scratch_, &d_status_->V, &d_status_->L, &d_status_->inv_L);
+        allocate_npt_scratch(npt_scratch_, &d_status_->V, &d_status_->box);
 }
 
 void Simulation::setup_analysis() {
@@ -242,8 +243,8 @@ void Simulation::setup_analysis() {
 }
 
 void Simulation::print_setup() const {
-    printf("[setup]  atoms=%d  box=%.2f  rc=%.2f  dt=%.4f  nsteps=%d",
-           params_.natoms, box_L_, params_.rc, params_.dt, params_.nsteps);
+    printf("[setup]  atoms=%d  box=%.2f x %.2f x %.2f  rc=%.2f  dt=%.4f  nsteps=%d",
+           params_.natoms, box_.L.x, box_.L.y, box_.L.z, params_.rc, params_.dt, params_.nsteps);
     if (!topo_.bonds.empty()) printf("  bonds=%zu", topo_.bonds.size());
     if (!topo_.angles.empty()) printf("  angles=%zu", topo_.angles.size());
     if (!topo_.dihedrals.empty()) printf("  dihedrals=%zu", topo_.dihedrals.size());
@@ -290,14 +291,14 @@ void Simulation::print_setup() const {
 // the bonded lists). Grows the capacity / regrids until the build is valid.
 void Simulation::rebuild_neighbors(bool sort) {
     invalidate_graphs();   // capacity / grid (kernel parameters) may change
-    if (box_L_ < 2.0f * params_.rc)
-        throw std::runtime_error("box length " + std::to_string(box_L_) +
+    if (box_.min_length() < 2.0f * params_.rc)
+        throw std::runtime_error("shortest box edge " + std::to_string(box_.min_length()) +
                                  " is smaller than 2*rc: minimum image is invalid");
-    if (!verlet_.grid_ok_for(box_L_)) verlet_.set_grid(box_L_);
-    float* d_L = &d_status_->L;
+    if (!verlet_.grid_ok_for(box_)) verlet_.set_grid(box_);
+    const Box* d_box = &d_status_->box;
     int* d_dr2 = &d_status_->max_dr2_bits;
     if (sort) {
-        verlet_.bin(p_.pos, p_.pos_ref, d_L, d_dr2, stream_);
+        verlet_.bin(p_.pos, p_.pos_ref, d_box, d_dr2, stream_);
         p_.apply_permutation(verlet_.order_padded(), stream_);
         t_.remap(p_.rank, stream_);
         n_sorts_++;
@@ -305,11 +306,11 @@ void Simulation::rebuild_neighbors(bool sort) {
     }
     for (int attempt = 0; attempt < 8; attempt++) {
         verlet_.request_rebuild(stream_);
-        verlet_.step(p_.pos, p_.pos_ref, d_L, d_dr2, p_.tag, t_.excl_offsets, t_.excl_list,
+        verlet_.step(p_.pos, p_.pos_ref, d_box, d_dr2, p_.tag, t_.excl_offsets, t_.excl_list,
                      stream_);
         verlet_.read_state(stream_);
         if (verlet_.h_state->grid_error) {
-            verlet_.set_grid(box_L_);
+            verlet_.set_grid(box_);
             verlet_.clear_errors(stream_);
         } else if (verlet_.h_state->overflow) {
             verlet_.grow(verlet_.h_state->overflow);
@@ -326,8 +327,7 @@ void Simulation::read_status() {
                                cudaMemcpyDeviceToHost, stream_));
     CUDA_CHECK(cudaStreamSynchronize(stream_));
     if (params_.ensemble == Ensemble::NPT_NH) {
-        box_L_ = h_status_->L;
-        inv_L_ = h_status_->inv_L;
+        box_ = h_status_->box;
     }
 }
 
@@ -341,7 +341,7 @@ bool Simulation::validate() {
     const DeviceNeighborState& st = *verlet_.h_state;
     if (!st.grid_error && !st.overflow) return true;
     read_status();
-    if (st.grid_error) verlet_.set_grid(box_L_);
+    if (st.grid_error) verlet_.set_grid(box_);
     if (st.overflow) verlet_.grow(st.overflow);
     verlet_.clear_errors(stream_);
     invalidate_graphs();
@@ -383,11 +383,11 @@ void Simulation::restore_checkpoint() {
 // ---------------------------------------------------------------------------
 
 void Simulation::launch_forces(bool ev) {
-    const float L = box_L_, inv_L = inv_L_;
+    const Box box = box_;
     const int n = params_.natoms;
 
     cudaStream_t st = stream_;
-    const float* d_box = &d_status_->L;   // {L, 1/L}: kernels read the current box
+    const Box* d_box = &d_status_->box;   // kernels read the current box (NPT changes it)
     CUDA_CHECK(cudaMemsetAsync(d_virial_, 0, 6 * sizeof(double), st));
 
     // Nonbonded kernels overwrite force[i] (=), everything after accumulates.
@@ -399,26 +399,26 @@ void Simulation::launch_forces(bool ev) {
             pme_.compute(p_.pos, p_.charge, p_.force, d_virial_, d_box, st);
         } else {
             launch_ewald_sf_kernel(p_.pos, p_.charge, d_ewald_kvecs_, d_ewald_sfac_,
-                                   n, params_.ewald_kcount, L, st, d_box);
+                                   n, params_.ewald_kcount, box.L.x, st, d_box);
             launch_ewald_recip_kernel(p_.pos, p_.charge, d_ewald_kvecs_, d_ewald_sfac_,
                                       p_.force, d_virial_, n, params_.ewald_kcount,
-                                      params_.coul_const, params_.ewald_alpha, L, st, d_box);
+                                      params_.coul_const, params_.ewald_alpha, box.L.x, st, d_box);
         }
         launch_ewald_excl_kernel(p_.pos, p_.charge, p_.force, d_virial_,
                                  t_.excl13_offsets, t_.excl13_list, p_.rank,
                                  n, t_.nexcl13, params_.coul_const, params_.ewald_alpha,
-                                 L, inv_L, st, d_box);
+                                 box, st, d_box);
     }
     if (t_.npairs14 > 0) {
         launch_pair14_kernel(p_.pos, p_.charge, p_.force, d_virial_, t_.pairs14, d_lj_params_,
                              t_.npairs14, params_.ntypes, params_.coul_const,
                              params_.ewald_alpha, params_.lj14, params_.ewald14_coul,
-                             L, inv_L, st, d_box);
+                             box, st, d_box);
     }
     if (d_table_params_) {
         launch_table_kernel(p_.pos, p_.force, d_virial_, d_table_idx_, d_table_params_,
                             d_table_data_, verlet_.neighbors, verlet_.num_neighbors,
-                            n, params_.ntypes, params_.rc2, L, inv_L, st, pair_tpa_, d_box);
+                            n, params_.ntypes, params_.rc2, box, st, pair_tpa_, d_box);
     }
 
     // Bonded terms accumulate into the same force buffer, so they follow the
@@ -431,26 +431,26 @@ void Simulation::launch_forces(bool ev) {
     if (t_.nbonds > 0 && d_bond_table_data_) {
         launch_bond_table_kernel(p_.pos, p_.force, d_virial_, t_.bonds, t_.bond_type,
                                  d_bond_table_idx_, d_bond_table_params_, d_bond_table_data_,
-                                 t_.nbonds, L, inv_L, st);
+                                 t_.nbonds, box, st);
     } else if (t_.nbonds > 0 && d_hbond_params_) {
         launch_bond_harmonic_kernel(p_.pos, p_.force, d_virial_, t_.bonds, t_.bond_type,
-                                    d_hbond_params_, t_.nbonds, L, inv_L, st);
+                                    d_hbond_params_, t_.nbonds, box, st);
     } else if (t_.nbonds > 0 && d_fene_params_) {
         launch_fene_kernel(p_.pos, p_.force, d_virial_, t_.bonds, t_.bond_type,
-                           d_fene_params_, t_.nbonds, 1, L, inv_L, st);
+                           d_fene_params_, t_.nbonds, 1, box, st);
     }
     if (t_.nangles > 0 && d_angle_table_data_) {
         launch_angle_table_kernel(p_.pos, p_.force, d_virial_, t_.angles, d_angle_table_idx_,
                                   d_angle_table_params_, d_angle_table_data_,
-                                  t_.nangles, L, inv_L, st);
+                                  t_.nangles, box, st);
     } else if (t_.nangles > 0 && d_angle_params_) {
         launch_angle_kernel(p_.pos, p_.force, d_virial_, t_.angles, d_angle_params_,
-                            t_.nangles, L, inv_L, st, topo_.angle_cosine);
+                            t_.nangles, box, st, topo_.angle_cosine);
     }
     if (t_.ndihedrals > 0 && d_dihedral_params_) {
         launch_dihedral_opls_kernel(p_.pos, p_.force, d_virial_, t_.dihedrals,
                                     t_.dihedral_type, d_dihedral_params_,
-                                    t_.ndihedrals, L, inv_L, st);
+                                    t_.ndihedrals, box, st);
     }
     CUDA_CHECK(cudaGetLastError());
 }
@@ -462,19 +462,19 @@ void Simulation::launch_pair_kernel(int tpa, bool ev) {
         const int* d_cur_step = is_nose_hoover(params_.ensemble) ? &d_nh_state_->step : d_step_;
         launch_soft_kernel(p_.pos, p_.force, d_virial_, verlet_.neighbors, verlet_.num_neighbors,
                            n, params_.rc, params_.soft_A_start, params_.soft_A_stop,
-                           params_.nsteps, d_cur_step, box_L_, inv_L_, stream_, tpa,
-                           &d_status_->L, ev);
+                           params_.nsteps, d_cur_step, box_, stream_, tpa,
+                           &d_status_->box, ev);
     } else if (params_.ewald_on)
         launch_lj_coul_long_kernel(p_.pos, p_.charge, p_.force, d_virial_, d_lj_params_,
                                    verlet_.neighbors, verlet_.num_neighbors,
                                    n, params_.ntypes, params_.coul_const, params_.ewald_alpha,
-                                   params_.rc2, box_L_, inv_L_, stream_, tpa, &d_status_->L, ev,
+                                   params_.rc2, box_, stream_, tpa, &d_status_->box, ev,
                                    params_.pair_shift != 0);
     else
         launch_lj_kernel(p_.pos, p_.force, d_virial_, d_lj_params_,
                          verlet_.neighbors, verlet_.num_neighbors,
-                         n, params_.ntypes, params_.rc2, box_L_, inv_L_, stream_,
-                         d_lj_cap_, params_.lj_force_cap, tpa, &d_status_->L, ev,
+                         n, params_.ntypes, params_.rc2, box_, stream_,
+                         d_lj_cap_, params_.lj_force_cap, tpa, &d_status_->box, ev,
                          params_.pair_shift != 0);
 }
 
@@ -508,7 +508,7 @@ void Simulation::tune_pair_tpa() {
 void Simulation::launch_bonded_kernel(int tpa, bool ev) {
     launch_bonded_gather_kernel(p_.pos, p_.force, d_virial_, p_.tag, t_.term_offsets,
                                 t_.terms, t_.bonds, t_.angles, t_.dihedrals, bonded_params_,
-                                params_.natoms, box_L_, inv_L_, stream_, tpa, &d_status_->L, ev);
+                                params_.natoms, box_, stream_, tpa, &d_status_->box, ev);
 }
 
 // Same timing-based choice as tune_pair_tpa for the bonded gather kernel
@@ -536,7 +536,7 @@ void Simulation::tune_bonded_tpa() {
 }
 
 void Simulation::compute_forces() {
-    verlet_.step(p_.pos, p_.pos_ref, &d_status_->L, &d_status_->max_dr2_bits, p_.tag,
+    verlet_.step(p_.pos, p_.pos_ref, &d_status_->box, &d_status_->max_dr2_bits, p_.tag,
                  t_.excl_offsets, t_.excl_list, stream_);
     if (!validate()) rebuild_neighbors(false);
     launch_forces(true);
@@ -566,28 +566,27 @@ void Simulation::integrate_pre_force() {
     if (!is_nose_hoover(params_.ensemble)) {   // Langevin or NVE
         launch_integrator_pre_force(p_.pos, p_.vel, p_.force, p_.pos_ref, d_max_dr2,
                                     p_.image, p_.tag, d_step_, langevin_,
-                                    n, box_L_, inv_L_, hdt, stream_);
+                                    n, box_, hdt, stream_);
     } else if (nose_hoover_.is_npt) {
         launch_nh_npt_ke_and_virial_trace(p_.vel, d_virial_, p_.pos, d_ke_buf_,
                                           npt_scratch_.d_virial_trace, n, stream_);
         nh_npt_chain_baro_kernel<<<1, 32, 0, stream_>>>(
             d_nh_state_, d_ke_buf_, npt_scratch_.d_virial_trace, true,
             nose_hoover_.M, nose_hoover_.Q1, nose_hoover_.Q_rest, nose_hoover_.W,
-            hdt, params_.dt, nose_hoover_.V0, n,
-            npt_scratch_.d_V, npt_scratch_.d_L, npt_scratch_.d_inv_L,
+            hdt, params_.dt, nose_hoover_.V0, nose_hoover_.box0, n,
+            npt_scratch_.d_V, npt_scratch_.d_box,
             npt_scratch_.d_baro_scale, npt_scratch_.d_exp_vW,
             npt_scratch_.d_v_eps_W, npt_scratch_.d_v_eps_W_dt);
         launch_nh_npt_pre_force_fused(p_.pos, p_.vel, p_.force, p_.pos_ref, d_max_dr2,
                                       p_.image, d_nh_state_, npt_scratch_.d_baro_scale,
                                       npt_scratch_.d_exp_vW, npt_scratch_.d_v_eps_W_dt,
-                                      hdt, params_.dt, n, npt_scratch_.d_L,
-                                      npt_scratch_.d_inv_L, stream_);
+                                      hdt, params_.dt, n, npt_scratch_.d_box, stream_);
     } else {
         // nh_scale holds s_post(n-1) * s_pre(n) from the fused post-force kernel
         velocities_pending_ = false;
         launch_nh_nvt_pre_force_fused(p_.pos, p_.vel, p_.force, p_.pos_ref, d_max_dr2,
                                       p_.image, d_nh_state_, hdt, params_.dt,
-                                      n, box_L_, inv_L_, stream_);
+                                      n, box_, stream_);
     }
 }
 
@@ -603,8 +602,8 @@ void Simulation::integrate_post_force() {
         nh_npt_chain_baro_kernel<<<1, 32, 0, stream_>>>(
             d_nh_state_, d_ke_buf_, npt_scratch_.d_virial_trace, false,
             nose_hoover_.M, nose_hoover_.Q1, nose_hoover_.Q_rest, nose_hoover_.W,
-            hdt, params_.dt, nose_hoover_.V0, n,
-            npt_scratch_.d_V, npt_scratch_.d_L, npt_scratch_.d_inv_L,
+            hdt, params_.dt, nose_hoover_.V0, nose_hoover_.box0, n,
+            npt_scratch_.d_V, npt_scratch_.d_box,
             npt_scratch_.d_baro_scale, npt_scratch_.d_exp_vW,
             npt_scratch_.d_v_eps_W, npt_scratch_.d_v_eps_W_dt);
         launch_nh_barostat_vel_half(p_.vel, npt_scratch_.d_v_eps_W, 1.0f / (3.0f * n), n, hdt,
@@ -624,13 +623,13 @@ void Simulation::integrate_post_force() {
 // identical from step to step and can be captured as a CUDA graph.
 void Simulation::launch_step(bool with_stress, bool ev) {
     integrate_pre_force();
-    verlet_.step(p_.pos, p_.pos_ref, &d_status_->L, &d_status_->max_dr2_bits, p_.tag,
+    verlet_.step(p_.pos, p_.pos_ref, &d_status_->box, &d_status_->max_dr2_bits, p_.tag,
                  t_.excl_offsets, t_.excl_list, stream_);
     launch_forces(ev);
     integrate_post_force();
     if (with_stress) {
         // device-only sample; a pending fused-NVT velocity scale is applied in the kernel
-        stress_sampler_.sample(p_.vel, p_.pos, d_virial_, params_.natoms, &d_status_->L,
+        stress_sampler_.sample(p_.vel, p_.pos, d_virial_, params_.natoms, &d_status_->box,
                                velocities_pending_ ? &d_nh_state_->s_post : nullptr, stream_);
         correlator_.push(stress_sampler_.d_stress, stream_);
     }
@@ -711,7 +710,7 @@ void Simulation::write_restart(const std::string& fname, int64_t step) {
     int ndih_types = (int)topo_.dihedral_params.size();
     for (int d : topo_.dihedral_types) ndih_types = std::max(ndih_types, d + 1);
     write_lammps_data(fname, f, topo_, params_.ntypes, nbond_types, nangle_types, ndih_types,
-                      box_L_, step);
+                      box_, step);
     printf("Restart written to %s (step %lld)\n", fname.c_str(), (long long)step);
 }
 
@@ -730,7 +729,7 @@ void Simulation::write_outputs() {
     if (need_thermo) {
         flush_velocities();
         ThermoOutput thermo;
-        compute_thermo(p_.vel, p_.pos, p_.force, d_virial_, params_.natoms, box_L_, &thermo,
+        compute_thermo(p_.vel, p_.pos, p_.force, d_virial_, params_.natoms, box_, &thermo,
                        thermo_bufs_, s, thermo_bufs_.fp, stream_,
                        params_.ewald_on ? params_.ewald_self_offset / params_.natoms : 0.0f);
         float etot = thermo.kinetic_energy + thermo.potential_energy;
@@ -741,12 +740,12 @@ void Simulation::write_outputs() {
 
     if (need_rg) {
         float rg;
-        compute_rg(p_.pos, p_.image, p_.rank, rg_bufs_, box_L_, s, &rg, stream_);
+        compute_rg(p_.pos, p_.image, p_.rank, rg_bufs_, box_, s, &rg, stream_);
     }
 
     if (need_dump) {
         p_.gather_float4_by_tag(d_out4_, p_.pos, stream_);
-        dumper_.dump_frame(d_out4_, s, box_L_, stream_);
+        dumper_.dump_frame(d_out4_, s, box_.L.x, stream_);   // cubic (config check)
     }
 
     if (need_restart) write_restart(build_restart_filename(params_.restart_file, s), s);
@@ -758,7 +757,7 @@ void Simulation::write_traj_frame_if_due() {
     if (!traj_.is_open() || !traj_sched_.due(step_) || last_traj_step_ == step_) return;
     CUDA_CHECK(cudaStreamSynchronize(stream_));
     read_status();
-    const double box[6] = {box_L_, box_L_, box_L_, 0.0, 0.0, 0.0};
+    const double box[6] = {box_.L.x, box_.L.y, box_.L.z, box_.xy, box_.xz, box_.yz};
     traj_.write_frame(step_, box, p_.download_positions(), p_.download_images());
     last_traj_step_ = step_;
 }
@@ -881,7 +880,7 @@ void Simulation::set_positions(const std::vector<float3>& xyz, const std::vector
     read_status();
     std::vector<float4> pos = p_.download_positions();   // keeps the packed types
     std::vector<int> img = images ? *images : std::vector<int>(3 * n, 0);
-    const float L = box_L_;
+    const float Ls[3] = {box_.L.x, box_.L.y, box_.L.z};
     for (int t = 0; t < n; t++) {
         const float in[3] = {xyz[t].x, xyz[t].y, xyz[t].z};
         float out[3];
@@ -889,6 +888,7 @@ void Simulation::set_positions(const std::vector<float3>& xyz, const std::vector
             if (!std::isfinite(in[d]))
                 throw std::invalid_argument("set_positions: non-finite coordinate for particle " +
                                             std::to_string(t));
+            const float L = Ls[d];
             int shift = (int)std::floor(in[d] / L);
             float x = in[d] - shift * L;
             if (x >= L) { x -= L; shift++; }
@@ -923,7 +923,7 @@ ThermoOutput Simulation::thermo() {
     flush_velocities();
     read_status();
     ThermoOutput out;
-    compute_thermo(p_.vel, p_.pos, p_.force, d_virial_, params_.natoms, box_L_, &out,
+    compute_thermo(p_.vel, p_.pos, p_.force, d_virial_, params_.natoms, box_, &out,
                    thermo_bufs_, step_, nullptr, stream_,
                    params_.ewald_on ? params_.ewald_self_offset / params_.natoms : 0.0f);
     return out;
@@ -933,7 +933,7 @@ void Simulation::finish() {
     if (!params_.stress_on) return;
     char vol[160];
     snprintf(vol, sizeof(vol), "# stress = (kinetic + virial) / V with V = %.10g (box volume); "
-             "G(t) = V C(t) / (k_B T)\n", (double)box_L_ * box_L_ * box_L_);
+             "G(t) = V C(t) / (k_B T)\n", (double)box_.volume());
     correlator_.write(params_.stress_file, params_.stress_freq,
                       {"C_xx", "C_xy", "C_xz", "C_yy", "C_yz", "C_zz"}, vol);
     printf("Stress autocorrelation written to %s\n", params_.stress_file);

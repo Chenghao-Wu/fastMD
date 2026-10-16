@@ -4,8 +4,9 @@
 //
 // Arrays are flat, in tag order (the atom order of the input data file):
 // per-particle vectors have 3 * natoms entries (x0 y0 z0 x1 ...). Positions
-// are wrapped into [0, L) (the data-file box shifted to the origin);
-// unwrapped positions are pos + image * L.
+// are wrapped into the box (the data-file box shifted to the origin);
+// unwrapped positions are pos + image * (Lx, Ly, Lz) for orthorhombic boxes.
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>
@@ -34,7 +35,7 @@ public:
     int ntypes() const;
     int step() const;              // steps taken so far
     double dt() const;
-    double box_length() const;
+    std::array<double, 6> box() const;   // Lx Ly Lz xy xz yz
 
     // Advance nsteps time steps; periodic outputs configured in the config
     // (thermo, Rg, dump, restart, stress samples) are written when due.

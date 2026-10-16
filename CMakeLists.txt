@@ -78,8 +78,6 @@ add_library(core STATIC
     src/core/system.cu
     src/core/particles.cu
     src/core/topology.cu
-    src/core/morton.cu
-    src/neighbor/tile_list.cu
     src/neighbor/verlet_list.cu
     src/force/lj.cu
     src/force/soft.cu

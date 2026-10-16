@@ -7,15 +7,15 @@ template <bool COSINE>
 __global__ void angle_kernel(const float4* __restrict__ pos, float4* __restrict__ force,
                              double* __restrict__ virial, const int4* __restrict__ angles,
                              const AngleParams* __restrict__ params,
-                             int nangles, float L, float inv_L)
+                             int nangles, Box box)
 {
     int a = blockIdx.x * blockDim.x + threadIdx.x;
     float vir[6] = {0, 0, 0, 0, 0, 0};
     if (a < nangles) {
         int4 ang = angles[a];
         float4 rj = pos[ang.y];
-        float3 dij = min_image_dr(pos[ang.x], rj, L, inv_L);
-        float3 dkj = min_image_dr(pos[ang.z], rj, L, inv_L);
+        float3 dij = min_image_dr(pos[ang.x], rj, box);
+        float3 dkj = min_image_dr(pos[ang.z], rj, box);
         AngleTerm t = COSINE ? cosine_angle_term(dij, dkj, params[ang.w])
                              : harmonic_angle_term(dij, dkj, params[ang.w]);
         atomicAdd(&force[ang.x].x, t.fi.x);
@@ -38,13 +38,13 @@ __global__ void angle_kernel(const float4* __restrict__ pos, float4* __restrict_
 
 void launch_angle_kernel(const float4* pos, float4* force, double* virial,
                          const int4* angles, const AngleParams* params,
-                         int nangles, float L, float inv_L,
+                         int nangles, Box box,
                          cudaStream_t stream, bool cosine) {
     if (nangles == 0) return;
     if (cosine)
         angle_kernel<true><<<div_ceil(nangles, 256), 256, 0, stream>>>(
-            pos, force, virial, angles, params, nangles, L, inv_L);
+            pos, force, virial, angles, params, nangles, box);
     else
         angle_kernel<false><<<div_ceil(nangles, 256), 256, 0, stream>>>(
-            pos, force, virial, angles, params, nangles, L, inv_L);
+            pos, force, virial, angles, params, nangles, box);
 }

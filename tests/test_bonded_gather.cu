@@ -127,23 +127,23 @@ Result run(const Chains& c, int bond_style, int angle_style, bool gather,
         bp.dihedral_type = topo.dihedral_type;
         bp.opls = d_opls;
         launch_bonded_gather_kernel(d_pos, d_force, d_vir, d_tag, topo.term_offsets, topo.terms,
-                                    topo.bonds, topo.angles, topo.dihedrals, bp, n, L, iL, 0, tpa);
+                                    topo.bonds, topo.angles, topo.dihedrals, bp, n, cubic_box(L), 0, tpa);
     } else {
         if (bond_style == 1)
-            launch_fene_kernel(d_pos, d_force, d_vir, topo.bonds, topo.bond_type, d_fene, topo.nbonds, 2, L, iL);
+            launch_fene_kernel(d_pos, d_force, d_vir, topo.bonds, topo.bond_type, d_fene, topo.nbonds, 2, cubic_box(L));
         else if (bond_style == 2)
-            launch_bond_harmonic_kernel(d_pos, d_force, d_vir, topo.bonds, topo.bond_type, d_harm, topo.nbonds, L, iL);
+            launch_bond_harmonic_kernel(d_pos, d_force, d_vir, topo.bonds, topo.bond_type, d_harm, topo.nbonds, cubic_box(L));
         else
             launch_bond_table_kernel(d_pos, d_force, d_vir, topo.bonds, topo.bond_type, d_tidx, d_tpb, d_btab,
-                                     topo.nbonds, L, iL);
+                                     topo.nbonds, cubic_box(L));
         if (angle_style == 1 || angle_style == 3)
-            launch_angle_kernel(d_pos, d_force, d_vir, topo.angles, d_ang, topo.nangles, L, iL, 0,
+            launch_angle_kernel(d_pos, d_force, d_vir, topo.angles, d_ang, topo.nangles, cubic_box(L), 0,
                                 angle_style == 3);
         else
             launch_angle_table_kernel(d_pos, d_force, d_vir, topo.angles, d_tidx, d_tpa, d_atab,
-                                      topo.nangles, L, iL);
+                                      topo.nangles, cubic_box(L));
         launch_dihedral_opls_kernel(d_pos, d_force, d_vir, topo.dihedrals, topo.dihedral_type,
-                                    d_opls, topo.ndihedrals, L, iL);
+                                    d_opls, topo.ndihedrals, cubic_box(L));
     }
     CUDA_CHECK(cudaDeviceSynchronize());
     auto f = to_host(d_force, n);

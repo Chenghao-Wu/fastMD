@@ -22,6 +22,6 @@ struct RgBuffers {
 };
 
 void compute_rg(const float4* pos, const int* image, const int* rank,
-                const RgBuffers& bufs, float box_L,
+                const RgBuffers& bufs, const Box& box,
                 int step, float* h_rg,
                 cudaStream_t stream = 0);

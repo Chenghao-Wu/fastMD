@@ -26,9 +26,9 @@ struct PME {
     void free();
 
     // Accumulate reciprocal forces/energies into force[] and virial[]; the box
-    // is read from d_box = {L, 1/L} on the device.
+    // is read from the device box d_box (cubic: Ewald/PME require a cubic box).
     void compute(const float4* pos, const float* charges, float4* force, double* virial,
-                 const float* d_box, cudaStream_t stream);
+                 const Box* d_box, cudaStream_t stream);
     double last_energy(cudaStream_t stream) const;   // synchronous read of d_energy
 };
 

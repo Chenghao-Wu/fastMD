@@ -17,7 +17,7 @@ void launch_ewald_sf_kernel(const float4* __restrict__ pos,
                              float* __restrict__ sfac,
                              int natoms, int kcount,
                              float L,
-                             cudaStream_t stream = 0, const float* d_box = nullptr);
+                             cudaStream_t stream = 0, const Box* d_box = nullptr);
 
 // Per-atom reciprocal force + PE + reciprocal virial.
 // Adds into force[] and virial[] (no overwrite).
@@ -29,7 +29,7 @@ void launch_ewald_recip_kernel(const float4* __restrict__ pos,
                                 double* __restrict__ virial,
                                 int natoms, int kcount,
                                 float coul_const, float alpha, float L,
-                                cudaStream_t stream = 0, const float* d_box = nullptr);
+                                cudaStream_t stream = 0, const Box* d_box = nullptr);
 
 // Self + charged-system energy offset (host): returns the constant that must
 // be ADDED to the PE sum to match LAMMPS (offset is negative or zero):

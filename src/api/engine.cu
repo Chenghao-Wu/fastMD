@@ -52,7 +52,10 @@ int Engine::natoms() const { return sim_->params().natoms; }
 int Engine::ntypes() const { return sim_->params().ntypes; }
 int Engine::step() const { return sim_->current_step(); }
 double Engine::dt() const { return sim_->params().dt; }
-double Engine::box_length() const { return sim_->box_length(); }
+std::array<double, 6> Engine::box() const {
+    const Box& b = sim_->box();
+    return {b.L.x, b.L.y, b.L.z, b.xy, b.xz, b.yz};
+}
 
 void Engine::run(int nsteps) { sim_->run(nsteps); }
 void Engine::run_config() { sim_->run(); }

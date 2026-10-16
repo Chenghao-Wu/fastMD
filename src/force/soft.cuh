@@ -11,5 +11,5 @@
 void launch_soft_kernel(const float4* pos, float4* force, double* virial,
                         const int* neighbors, const int* num_neighbors,
                         int natoms, float rc, float A_start, float A_stop, int nsteps,
-                        const int* d_step, float L, float inv_L, cudaStream_t stream,
-                        int tpa, const float* d_box, bool ev);
+                        const int* d_step, Box box, cudaStream_t stream,
+                        int tpa, const Box* d_box, bool ev);

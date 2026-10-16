@@ -15,8 +15,11 @@ __device__ inline float erfc_poly(float x, float exp_mx2) {   // exp_mx2 = exp(-
 }
 
 // EV = false: no per-atom energy (force.w = 0) and no virial.
+// 5 blocks of 256 threads per SM (<= 48 registers): the kernel is latency
+// bound, and the orthorhombic box would otherwise push it to 56 registers
+// and 4 blocks.
 template <int TPA, bool EV, bool SHIFT>
-__global__ void lj_coul_long_kernel(
+__global__ void __launch_bounds__(256, 5) lj_coul_long_kernel(
     const float4* __restrict__ pos,
     const float* __restrict__ charges,
     float4* __restrict__ force,
@@ -26,9 +29,9 @@ __global__ void lj_coul_long_kernel(
     const int* __restrict__ num_neighbors,
     int natoms, int ntypes,
     float coul_const, float alpha,
-    float rc2, float L, float inv_L, const float* __restrict__ d_box)
+    float rc2, Box box, const Box* __restrict__ d_box)
 {
-    if (d_box) { L = d_box[0]; inv_L = d_box[1]; }   // box on the device (NPT)
+    if (d_box) box = *d_box;   // box on the device (NPT)
     const int t = blockIdx.x * blockDim.x + threadIdx.x;
     const int i = t / TPA;
     const int sub = t & (TPA - 1);
@@ -49,9 +52,8 @@ __global__ void lj_coul_long_kernel(
             float4 pos_j = __ldg(&pos[j]);
             int type_j = __float_as_int(pos_j.w);
 
-            float dx = min_image(pos_i.x - pos_j.x, L, inv_L);
-            float dy = min_image(pos_i.y - pos_j.y, L, inv_L);
-            float dz = min_image(pos_i.z - pos_j.z, L, inv_L);
+            const float3 dd_ = min_image_dr(pos_i, pos_j, box);
+            float dx = dd_.x, dy = dd_.y, dz = dd_.z;
             float r2 = dx*dx + dy*dy + dz*dz;
 
             if (r2 < rc2 && r2 > 1e-10f) {
@@ -126,15 +128,15 @@ void launch_lj_coul_long_kernel(const float4* pos, const float* charges,
                                  const int* neighbors, const int* num_neighbors,
                                  int natoms, int ntypes,
                                  float coul_const, float alpha,
-                                 float rc2, float L, float inv_L,
-                                 cudaStream_t stream, int tpa, const float* d_box, bool ev,
+                                 float rc2, Box box,
+                                 cudaStream_t stream, int tpa, const Box* d_box, bool ev,
                                  bool shift)
 {
     if (tpa <= 0) tpa = pair_threads_per_atom(natoms);
     const int blocks = div_ceil(natoms * tpa, 256);
 #define FASTMD_LAUNCH_EV(T, E, S) lj_coul_long_kernel<T, E, S><<<blocks, 256, 0, stream>>>( \
         pos, charges, force, virial, lj_params, neighbors, num_neighbors,          \
-        natoms, ntypes, coul_const, alpha, rc2, L, inv_L, d_box)
+        natoms, ntypes, coul_const, alpha, rc2, box, d_box)
 #define FASTMD_LAUNCH(T) do {                                                      \
         if (!ev) FASTMD_LAUNCH_EV(T, false, false);                                \
         else if (shift) FASTMD_LAUNCH_EV(T, true, true);                           \

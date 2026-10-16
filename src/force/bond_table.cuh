@@ -7,5 +7,5 @@ void launch_bond_table_kernel(const float4* pos, float4* force, double* virial,
                               const int* bond_table_idx,
                               const TableParams* table_params,
                               const float4* table_data,
-                              int nbonds, float L, float inv_L,
+                              int nbonds, Box box,
                               cudaStream_t stream = 0);

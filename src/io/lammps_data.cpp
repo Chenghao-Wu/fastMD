@@ -302,9 +302,7 @@ void parse_lammps_data(const std::string& path, TopologyData& topo) {
         L[d] = hi[d] - lo[d];
         if (!(L[d] > 0.0f)) throw std::runtime_error(path + ": box length must be positive");
     }
-    if (std::fabs(L[0] - L[1]) > 1e-5f * L[0] || std::fabs(L[0] - L[2]) > 1e-5f * L[0])
-        throw std::runtime_error(path + ": non-cubic boxes are not supported");
-    topo.box_L = L[0];
+    topo.box = make_float3(L[0], L[1], L[2]);
     topo.box_lo = make_float3(lo[0], lo[1], lo[2]);
 
     // Shift to a box spanning [0, L) and wrap, keeping unwrapped coordinates
@@ -454,7 +452,7 @@ std::string build_restart_final_filename(const std::string& base) {
 void write_lammps_data(const std::string& path, const RestartFrame& f,
                        const TopologyData& topo,
                        int ntypes, int nbond_types, int nangle_types, int ndihedral_types,
-                       float box_L, int64_t step) {
+                       const Box& box, int64_t step) {
     const int natoms = (int)f.pos.size();
     const int nbonds = (int)topo.bonds.size();
     const int nangles = (int)topo.angles.size();
@@ -477,8 +475,10 @@ void write_lammps_data(const std::string& path, const RestartFrame& f,
     if (ndihedrals > 0) fprintf(fp, "%d dihedrals\n%d dihedral types\n", ndihedrals, ndihedral_types);
     const float lo[3] = {topo.box_lo.x, topo.box_lo.y, topo.box_lo.z};
     fprintf(fp, "\n%.9g %.9g xlo xhi\n%.9g %.9g ylo yhi\n%.9g %.9g zlo zhi\n",
-            (double)lo[0], (double)(lo[0] + box_L), (double)lo[1], (double)(lo[1] + box_L),
-            (double)lo[2], (double)(lo[2] + box_L));
+            (double)lo[0], (double)(lo[0] + box.L.x), (double)lo[1], (double)(lo[1] + box.L.y),
+            (double)lo[2], (double)(lo[2] + box.L.z));
+    if (box.tilted())
+        fprintf(fp, "%.9g %.9g %.9g xy xz yz\n", (double)box.xy, (double)box.xz, (double)box.yz);
 
     fprintf(fp, "\nMasses\n\n");
     for (int t = 0; t < ntypes; t++) {

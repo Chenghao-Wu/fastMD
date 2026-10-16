@@ -141,7 +141,7 @@ __global__ void sum_pe_kernel(const float4* __restrict__ force,
 __global__ void stress_sample_kernel(const float4* __restrict__ vel,
                                      const float4* __restrict__ pos,
                                      const double* __restrict__ virial, int natoms,
-                                     const float* __restrict__ d_L,
+                                     const Box* __restrict__ d_box,
                                      const float* __restrict__ d_vscale,
                                      double* __restrict__ acc, unsigned int* __restrict__ done,
                                      double* __restrict__ out) {
@@ -161,11 +161,11 @@ __global__ void stress_sample_kernel(const float4* __restrict__ vel,
     __syncthreads();
     if (last && threadIdx.x == 0) {
         __threadfence();
-        double L = *d_L;
+        const double V = d_box->volume();
         double s = d_vscale ? (double)*d_vscale : 1.0;
         for (int c = 0; c < 6; c++) {
             double kin = atomicAdd(&acc[c], 0.0);
-            out[c] = (kin * s * s + virial[c]) / (L * L * L);
+            out[c] = (kin * s * s + virial[c]) / V;
             acc[c] = 0.0;
         }
         *done = 0u;
@@ -187,14 +187,14 @@ void StressSampler::free() {
 }
 
 void StressSampler::sample(const float4* vel, const float4* pos, const double* virial, int natoms,
-                           const float* d_L, const float* d_vscale, cudaStream_t stream) {
+                           const Box* d_box, const float* d_vscale, cudaStream_t stream) {
     stress_sample_kernel<<<div_ceil(natoms, 256), 256, 0, stream>>>(
-        vel, pos, virial, natoms, d_L, d_vscale, d_acc, d_done, d_stress);
+        vel, pos, virial, natoms, d_box, d_vscale, d_acc, d_done, d_stress);
     CUDA_CHECK(cudaGetLastError());
 }
 
 void compute_thermo(const float4* vel, const float4* pos, const float4* force,
-                     const double* virial, int natoms, float box_L,
+                     const double* virial, int natoms, const Box& box,
                      ThermoOutput* h_output, ThermoBuffers& bufs,
                      int step, FILE* fp,
                      cudaStream_t stream,
@@ -239,7 +239,7 @@ void compute_thermo(const float4* vel, const float4* pos, const float4* force,
     h_output->max_force = sqrtf(h_max_force[0]);
     std::memcpy(&h_output->max_force_idx, &h_max_force[1], sizeof(int));
 
-    float vol = box_L * box_L * box_L;
+    float vol = box.volume();
     float inv_vol = 1.0f / vol;
     for (int c = 0; c < 6; c++) {
         h_output->stress[c] = (float)((h_kin_stress[c] + h_virial[c]) * inv_vol);

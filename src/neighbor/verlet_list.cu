@@ -31,23 +31,23 @@ __device__ __forceinline__ int wrap_near(int c, int n) {   // c in [-n, 2n)
     return c < 0 ? c + n : (c >= n ? c - n : c);
 }
 
-// Cell coordinates of a wrapped position for box L with n cells per side.
-__device__ __forceinline__ int3 cell_of(float4 r, float n_over_L, int nx, int ny, int nz) {
-    return make_int3(wrap_cell(__float2int_rd(r.x * n_over_L), nx),
-                     wrap_cell(__float2int_rd(r.y * n_over_L), ny),
-                     wrap_cell(__float2int_rd(r.z * n_over_L), nz));
+// Cell coordinates of a wrapped position (nx, ny, nz cells along the box edges).
+__device__ __forceinline__ int3 cell_of(float4 r, const Box& b, int nx, int ny, int nz) {
+    return make_int3(wrap_cell(__float2int_rd(r.x * b.inv_L.x * nx), nx),
+                     wrap_cell(__float2int_rd(r.y * b.inv_L.y * ny), ny),
+                     wrap_cell(__float2int_rd(r.z * b.inv_L.z * nz), nz));
 }
 
 // Rebuild criterion, evaluated identically by every thread from device state:
 // a pair outside the list (distance > rc + skin at the last build) can come
-// within rc once particles move; with box scaling s = L / L_build and maximum
-// displacement d (relative to the affinely scaled reference) the list is
-// valid while s (rc + skin) - 2 d > rc.
-__device__ __forceinline__ bool rebuild_needed(const DeviceNeighborState* st, float L,
+// within rc once particles move; with the smallest box scaling factor
+// s = min_i L_i / L_build,i and maximum displacement d (relative to the
+// affinely scaled reference) the list is valid while s (rc + skin) - 2 d > rc.
+__device__ __forceinline__ bool rebuild_needed(const DeviceNeighborState* st, const Box& box,
                                                int max_dr2_bits, float rc, float skin,
                                                int max_age) {
-    if (st->force_rebuild || !(st->L_build > 0.0f)) return true;
-    float s = L / st->L_build;
+    if (st->force_rebuild || !(st->L_build.x > 0.0f)) return true;
+    float s = fminf(box.L.x / st->L_build.x, fminf(box.L.y / st->L_build.y, box.L.z / st->L_build.z));
     float half_margin = 0.5f * (s * (rc + skin) - rc);
     float max_dr2 = __int_as_float(max_dr2_bits);
     if (half_margin <= 0.0f || max_dr2 > half_margin * half_margin) return true;
@@ -57,7 +57,7 @@ __device__ __forceinline__ bool rebuild_needed(const DeviceNeighborState* st, fl
 struct BinArgs {
     const float4* pos;
     float4* pos_ref;
-    const float* box_L;
+    const Box* box;
     int* max_dr2_bits;
     DeviceNeighborState* st;
     int* cell_key;
@@ -122,20 +122,22 @@ __device__ int block_scan_cells(const int* __restrict__ count, int* __restrict__
 }
 
 __global__ void nl_bin_kernel(BinArgs a) {
-    const float L = *a.box_L;
-    if (!rebuild_needed(a.st, L, *a.max_dr2_bits, a.rc, a.skin, a.max_age)) return;
+    const Box box = *a.box;
+    if (!rebuild_needed(a.st, box, *a.max_dr2_bits, a.rc, a.skin, a.max_age)) return;
 
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    const float n_over_L = a.nx / L;
     if (i < a.natoms) {
         float4 r = a.pos[i];
-        int3 c = cell_of(r, n_over_L, a.nx, a.ny, a.nz);
+        int3 c = cell_of(r, box, a.nx, a.ny, a.nz);
         int key = a.cell_rank[(c.z * a.ny + c.y) * a.nx + c.x];
         a.cell_key[i] = key;
         a.cell_slot[i] = atomicAdd(&a.cell_count[key], 1);
         a.pos_ref[i] = r;
     }
-    if (i == 0 && (L * a.cell_div / a.nx < a.rc + a.skin || L < 2.0f * a.rc_min_image))
+    if (i == 0 && (box.L.x * a.cell_div / a.nx < a.rc + a.skin ||
+                   box.L.y * a.cell_div / a.ny < a.rc + a.skin ||
+                   box.L.z * a.cell_div / a.nz < a.rc + a.skin ||
+                   box.min_length() < 2.0f * a.rc_min_image))
         a.st->grid_error = 1;
 
     // The last block to finish scans the counts, scatters and gathers.
@@ -160,7 +162,7 @@ __global__ void nl_bin_kernel(BinArgs a) {
     if (threadIdx.x == 0) {
         a.st->rebuild = 1;
         a.st->force_rebuild = 0;
-        a.st->L_build = L;
+        a.st->L_build = box.L;
         a.st->n_builds++;
         a.st->max_count = 0;
         a.st->max_cell = occ;
@@ -181,7 +183,7 @@ __device__ __forceinline__ bool is_excluded(int tag_i, int tag_j,
 }
 
 struct BuildArgs {
-    const float* box_L;
+    const Box* box;
     DeviceNeighborState* st;
     const int* tag;
     const int* excl_offsets;
@@ -216,13 +218,13 @@ __global__ void nl_build_kernel(BuildArgs a) {
     const int sub = threadIdx.x & (TPA - 1);
     const unsigned group_mask = (TPA == 32 ? 0xffffffffu : ((1u << TPA) - 1u))
                                 << ((threadIdx.x & 31) & ~(TPA - 1));
-    const float L = *a.box_L, inv_L = 1.0f / L;
+    const Box box = *a.box;
     int count = 0;
     if (k < a.natoms) {
         const int i = a.order[k];
         const float4 pos_i = a.pos_sorted[k];
         const int tag_i = a.tag ? a.tag[i] : i;
-        const int3 c = cell_of(pos_i, a.nx * inv_L, a.nx, a.ny, a.nz);
+        const int3 c = cell_of(pos_i, box, a.nx, a.ny, a.nz);
         const bool dedup = a.nx < 2 * R + 1 || a.ny < 2 * R + 1 || a.nz < 2 * R + 1;
         constexpr int kStencil = (2 * R + 1) * (2 * R + 1) * (2 * R + 1);
         int visited[kStencil];
@@ -249,11 +251,8 @@ __global__ void nl_build_kernel(BuildArgs a) {
                         const int b = base + sub;
                         int j = -1;
                         if (b < end && b != k) {
-                            float4 pos_j = a.pos_sorted[b];
-                            float ddx = min_image(pos_i.x - pos_j.x, L, inv_L);
-                            float ddy = min_image(pos_i.y - pos_j.y, L, inv_L);
-                            float ddz = min_image(pos_i.z - pos_j.z, L, inv_L);
-                            if (ddx * ddx + ddy * ddy + ddz * ddz < a.rc_skin2) {
+                            float3 d = min_image_dr(pos_i, a.pos_sorted[b], box);
+                            if (d.x * d.x + d.y * d.y + d.z * d.z < a.rc_skin2) {
                                 j = __ldg(&a.order[b]);
                                 int tag_j = a.tag ? __ldg(&a.tag[j]) : j;
                                 if (is_excluded(tag_i, tag_j, a.excl_offsets, a.excl_list)) j = -1;
@@ -296,7 +295,7 @@ __global__ void nl_build_kernel(BuildArgs a) {
 
 }  // namespace
 
-void VerletList::allocate(int n, float rc_in, float skin_in, float box_L, float margin, int age) {
+void VerletList::allocate(int n, float rc_in, float skin_in, const Box& box, float margin, int age) {
     natoms = n;
     natoms_padded = div_ceil(n, TILE_SIZE) * TILE_SIZE;
     rc = rc_in;
@@ -305,7 +304,7 @@ void VerletList::allocate(int n, float rc_in, float skin_in, float box_L, float 
     grid_margin = std::max(1.0f, margin);
     max_age = age;
     const float rcs = rc + skin;
-    float density = natoms / (box_L * box_L * box_L);
+    float density = natoms / box.volume();
     int estimated = int(density * (4.0f / 3.0f) * 3.14159265f * rcs * rcs * rcs * 1.5f) + 32;
     max_neighbors = std::max(64, estimated);
     // Half-size cells once a full cell holds enough particles to keep the
@@ -328,10 +327,10 @@ void VerletList::allocate(int n, float rc_in, float skin_in, float box_L, float 
     CUDA_CHECK(cudaHostAlloc(&h_state, sizeof(DeviceNeighborState), cudaHostAllocDefault));
     CUDA_CHECK(cudaMemset(d_state, 0, sizeof(DeviceNeighborState)));
     *h_state = DeviceNeighborState{};
-    CUDA_CHECK(cudaMalloc(&d_box_scratch_, sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_box_scratch_, sizeof(Box)));
     CUDA_CHECK(cudaMalloc(&d_dr2_scratch_, sizeof(int)));
     CUDA_CHECK(cudaMalloc(&d_ref_scratch_, natoms_padded * sizeof(float4)));
-    set_grid(box_L);
+    set_grid(box);
 }
 
 void VerletList::free() {
@@ -344,21 +343,31 @@ void VerletList::free() {
     *this = VerletList{};
 }
 
-bool VerletList::grid_ok_for(float box_L) const {
-    return nx > 0 && box_L * cell_div / nx >= rc + skin && box_L >= 2.0f * rc_min_image;
+bool VerletList::grid_ok_for(const Box& box) const {
+    const float need = rc + skin;
+    return nx > 0 && box.L.x * cell_div / nx >= need && box.L.y * cell_div / ny >= need &&
+           box.L.z * cell_div / nz >= need && box.min_length() >= 2.0f * rc_min_image;
 }
 
-int VerletList::cells_per_side(float box_L) const {
-    return std::max(1, int(box_L * cell_div / ((rc + skin) * grid_margin)));
+int VerletList::cells_along(float length) const {
+    return std::max(1, int(length * cell_div / ((rc + skin) * grid_margin)));
 }
 
-void VerletList::set_grid(float box_L) {
-    if (!(box_L > 0.0f) || !std::isfinite(box_L))
-        throw std::runtime_error("VerletList: invalid box length");
-    nx = ny = nz = cells_per_side(box_L);
-    if (nx > 1024) throw std::runtime_error("VerletList: more than 1024 cells per dimension");
+bool VerletList::grid_matches(const Box& box) const {
+    return nx == cells_along(box.L.x) && ny == cells_along(box.L.y) && nz == cells_along(box.L.z);
+}
+
+void VerletList::set_grid(const Box& box) {
+    for (float l : {box.L.x, box.L.y, box.L.z})
+        if (!(l > 0.0f) || !std::isfinite(l)) throw std::runtime_error("VerletList: invalid box length");
+    nx = cells_along(box.L.x);
+    ny = cells_along(box.L.y);
+    nz = cells_along(box.L.z);
+    if (std::max({nx, ny, nz}) > 1024)
+        throw std::runtime_error("VerletList: more than 1024 cells per dimension");
+    if ((long long)nx * ny * nz > (1ll << 28)) throw std::runtime_error("VerletList: too many cells");
     ncells = nx * ny * nz;
-    cell_size = box_L / nx;
+    cell_size = std::min({box.L.x / nx, box.L.y / ny, box.L.z / nz});
     if (ncells > ncells_alloc) {
         for (int** p : {&cell_count, &cell_starts, &cell_ends, &cell_rank})
             if (*p) CUDA_CHECK(cudaFree(*p));
@@ -426,9 +435,9 @@ void VerletList::set_capacity(int cap) {
     CUDA_CHECK(cudaMalloc(&neighbors, (size_t)max_neighbors * natoms * sizeof(int)));
 }
 
-void VerletList::launch_bin(const float4* pos, float4* pos_ref, const float* d_box_L,
+void VerletList::launch_bin(const float4* pos, float4* pos_ref, const Box* d_box,
                             int* d_max_dr2_bits, cudaStream_t stream) {
-    BinArgs a{pos, pos_ref, d_box_L, d_max_dr2_bits, d_state, cell_key, cell_slot, cell_count,
+    BinArgs a{pos, pos_ref, d_box, d_max_dr2_bits, d_state, cell_key, cell_slot, cell_count,
               cell_starts, cell_ends, cell_rank, order, pos_sorted,
               natoms, natoms_padded, nx, ny, nz, ncells, rc, skin, rc_min_image, max_age,
               cell_div};
@@ -436,10 +445,10 @@ void VerletList::launch_bin(const float4* pos, float4* pos_ref, const float* d_b
     CUDA_CHECK(cudaGetLastError());
 }
 
-void VerletList::launch_build(const float4* /*pos*/, const float* d_box_L, const int* tag,
+void VerletList::launch_build(const float4* /*pos*/, const Box* d_box, const int* tag,
                               const int* exclusion_offsets, const int* exclusion_list,
                               cudaStream_t stream) {
-    BuildArgs a{d_box_L, d_state, tag, exclusion_offsets, exclusion_list, order, pos_sorted,
+    BuildArgs a{d_box, d_state, tag, exclusion_offsets, exclusion_list, order, pos_sorted,
                 cell_starts, cell_ends, cell_rank, neighbors, num_neighbors,
                 natoms, nx, ny, nz, max_neighbors, (rc + skin) * (rc + skin)};
     const int tpa = build_tpa;
@@ -458,20 +467,20 @@ void VerletList::launch_build(const float4* /*pos*/, const float* d_box_L, const
     CUDA_CHECK(cudaGetLastError());
 }
 
-void VerletList::step(const float4* pos, float4* pos_ref, const float* d_box_L,
+void VerletList::step(const float4* pos, float4* pos_ref, const Box* d_box,
                       int* d_max_dr2_bits, const int* tag, const int* exclusion_offsets,
                       const int* exclusion_list, cudaStream_t stream) {
-    launch_bin(pos, pos_ref, d_box_L, d_max_dr2_bits, stream);
-    launch_build(pos, d_box_L, tag, exclusion_offsets, exclusion_list, stream);
+    launch_bin(pos, pos_ref, d_box, d_max_dr2_bits, stream);
+    launch_build(pos, d_box, tag, exclusion_offsets, exclusion_list, stream);
 }
 
-void VerletList::bin(const float4* pos, float4* pos_ref, const float* d_box_L,
+void VerletList::bin(const float4* pos, float4* pos_ref, const Box* d_box,
                      int* d_max_dr2_bits, cudaStream_t stream) {
     request_rebuild(stream);
-    launch_bin(pos, pos_ref, d_box_L, d_max_dr2_bits, stream);
+    launch_bin(pos, pos_ref, d_box, d_max_dr2_bits, stream);
 }
 
-void VerletList::build(const float4* pos, int n, float box_L, float /*inv_L*/,
+void VerletList::build(const float4* pos, int n, const Box& box,
                        const int* tag,
                        const int* exclusion_offsets, const int* exclusion_list,
                        float rc_skin, cudaStream_t stream)
@@ -483,8 +492,8 @@ void VerletList::build(const float4* pos, int n, float box_L, float /*inv_L*/,
         skin = 0.0f;
         rc_min_image = 0.0f;
     }
-    if (!grid_ok_for(box_L) || cells_per_side(box_L) != nx) set_grid(box_L);
-    CUDA_CHECK(cudaMemcpyAsync(d_box_scratch_, &box_L, sizeof(float), cudaMemcpyHostToDevice, stream));
+    if (!grid_ok_for(box) || !grid_matches(box)) set_grid(box);
+    CUDA_CHECK(cudaMemcpyAsync(d_box_scratch_, &box, sizeof(Box), cudaMemcpyHostToDevice, stream));
     for (int attempt = 0; attempt < 4; attempt++) {
         request_rebuild(stream);
         launch_bin(pos, d_ref_scratch_, d_box_scratch_, d_dr2_scratch_, stream);

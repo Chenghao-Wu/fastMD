@@ -45,7 +45,7 @@ TEST(LammpsDataParser, MiniFile) {
 // atom ids, masses and all topology.
 TEST(LammpsData, RestartRoundTrip) {
     TopologyData topo;
-    topo.box_L = 7.5f;
+    topo.box = make_float3(7.5f, 8.0f, 9.25f);   // orthorhombic
     topo.box_lo = make_float3(-3.25f, -3.25f, -3.25f);
     topo.masses = {12.011f, 1.008f};
     topo.atom_ids = {10, 11, 15, 20, 21};
@@ -68,12 +68,14 @@ TEST(LammpsData, RestartRoundTrip) {
         f.mol_id.push_back(1 + i / 3);
         f.image.insert(f.image.end(), {i - 2, 3 * i, -i});
     }
-    write_lammps_data("restart_roundtrip.data", f, topo, 2, 2, 2, 2, topo.box_L, 1234);
+    write_lammps_data("restart_roundtrip.data", f, topo, 2, 2, 2, 2, make_box(topo.box), 1234);
 
     TopologyData back;
     parse_lammps_data("restart_roundtrip.data", back);
     ASSERT_EQ((int)back.positions.size(), n);
-    EXPECT_FLOAT_EQ(back.box_L, topo.box_L);
+    EXPECT_FLOAT_EQ(back.box.x, topo.box.x);
+    EXPECT_FLOAT_EQ(back.box.y, topo.box.y);
+    EXPECT_FLOAT_EQ(back.box.z, topo.box.z);
     EXPECT_FLOAT_EQ(back.box_lo.x, topo.box_lo.x);
     EXPECT_EQ(back.atom_ids, topo.atom_ids);
     EXPECT_EQ(back.mol_ids, f.mol_id);

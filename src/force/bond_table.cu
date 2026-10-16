@@ -11,7 +11,7 @@ __global__ void bond_table_kernel(
     const int* __restrict__ bond_table_idx,
     const TableParams* __restrict__ table_params,
     const float4* __restrict__ table_data,
-    int nbonds, float L, float inv_L)
+    int nbonds, Box box)
 {
     int b = blockIdx.x * blockDim.x + threadIdx.x;
     float vir[6] = {0, 0, 0, 0, 0, 0};
@@ -20,7 +20,7 @@ __global__ void bond_table_kernel(
         if (tidx >= 0) {
             TableParams tp = table_params[tidx];
             int2 bond = bonds[b];
-            float3 d = min_image_dr(pos[bond.x], pos[bond.y], L, inv_L);
+            float3 d = min_image_dr(pos[bond.x], pos[bond.y], box);
             BondTerm t = table_bond_term(d, tp, table_data + tp.data_offset);
             atomicAdd(&force[bond.x].x, t.fi.x);
             atomicAdd(&force[bond.x].y, t.fi.y);
@@ -40,9 +40,9 @@ void launch_bond_table_kernel(const float4* pos, float4* force, double* virial,
                               const int2* bonds, const int* bond_types,
                               const int* bond_table_idx,
                               const TableParams* table_params, const float4* table_data,
-                              int nbonds, float L, float inv_L, cudaStream_t stream) {
+                              int nbonds, Box box, cudaStream_t stream) {
     if (nbonds == 0) return;
     bond_table_kernel<<<div_ceil(nbonds, 256), 256, 0, stream>>>(
         pos, force, virial, bonds, bond_types, bond_table_idx,
-        table_params, table_data, nbonds, L, inv_L);
+        table_params, table_data, nbonds, box);
 }

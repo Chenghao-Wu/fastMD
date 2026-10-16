@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include "box.cuh"
 
 #define CUDA_CHECK(call)                                                       \
     do {                                                                        \
@@ -49,9 +50,7 @@ inline bool is_nose_hoover(Ensemble e) { return e == Ensemble::NVT_NH || e == En
 enum VirialIndex { VXX = 0, VXY = 1, VXZ = 2, VYY = 3, VYZ = 4, VZZ = 5 };
 
 struct SimParams {
-    float box_L;
-    float inv_L;
-    float half_L;
+    float3 box_L3;     // box edge lengths (Lx, Ly, Lz) from the data file
     float rc;
     float rc2;
     float skin;

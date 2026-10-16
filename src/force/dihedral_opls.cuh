@@ -18,5 +18,5 @@ void launch_dihedral_opls_kernel(const float4* __restrict__ pos,
                                   const int* __restrict__ dihedral_types,
                                   const OPLSDihedralParams* __restrict__ params,
                                   int ndihedrals,
-                                  float L, float inv_L,
+                                  Box box,
                                   cudaStream_t stream = 0);

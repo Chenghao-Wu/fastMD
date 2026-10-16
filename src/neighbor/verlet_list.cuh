@@ -27,7 +27,7 @@ struct DeviceNeighborState {
     int   overflow;        // > 0: a build exceeded capacity (largest count seen)
     int   grid_error;      // 1: cell size < rc + skin or L < 2 rc at some build
     int   max_cell;        // largest cell occupancy of the last build
-    float L_build;         // box length at the last build
+    float3 L_build;        // box edge lengths at the last build
     unsigned int bin_done, build_done;   // grid-wide "last block" tickets
 };
 
@@ -47,7 +47,7 @@ struct VerletList {
     int   max_neighbors = 0;        // current capacity per particle
     int   natoms = 0, natoms_padded = 0;
     int   nx = 0, ny = 0, nz = 0, ncells = 0, ncells_alloc = 0;
-    float cell_size = 0.0f;         // box_L / nx at the time the grid was set
+    float cell_size = 0.0f;         // smallest cell edge at the time the grid was set
     int   cell_div = 1;             // cells per rc + skin (stencil reach): 1 or 2
     float rc = 0.0f, skin = 0.0f;
     float rc_min_image = 0.0f;      // interaction cutoff that must stay <= L/2 (0 = unchecked)
@@ -57,23 +57,24 @@ struct VerletList {
     int   build_tpa = 4;                // threads per particle in the list build (1,2,4,8)
     int   max_count = 0, max_cell_atoms = 0;   // host copies after a synchronous build
 
-    void allocate(int natoms, float rc, float skin, float box_L, float grid_margin = 1.0f,
+    void allocate(int natoms, float rc, float skin, const Box& box, float grid_margin = 1.0f,
                   int max_age = 0);
     void free();
 
-    // Choose the cell grid for box length L (host); requests a rebuild.
-    void set_grid(float box_L);
-    bool grid_ok_for(float box_L) const;
-    int  cells_per_side(float box_L) const;
+    // Choose the cell grid for the box (host); requests a rebuild.
+    void set_grid(const Box& box);
+    bool grid_ok_for(const Box& box) const;   // cells still >= (rc + skin) / cell_div
+    bool grid_matches(const Box& box) const;  // grid set_grid(box) would choose
+    int  cells_along(float length) const;
 
-    // Device-side maintenance (enqueue only). d_box_L: current box length on
-    // the device; d_max_dr2_bits: max squared displacement since the last
-    // build (float bits), reset by a rebuild. Positions must be wrapped.
-    void step(const float4* pos, float4* pos_ref, const float* d_box_L, int* d_max_dr2_bits,
+    // Device-side maintenance (enqueue only). d_box: current box on the
+    // device; d_max_dr2_bits: max squared displacement since the last build
+    // (float bits), reset by a rebuild. Positions must be wrapped.
+    void step(const float4* pos, float4* pos_ref, const Box* d_box, int* d_max_dr2_bits,
               const int* tag, const int* exclusion_offsets, const int* exclusion_list,
               cudaStream_t stream);
     // Bin only (forced). Afterwards order_padded() gives the cell order.
-    void bin(const float4* pos, float4* pos_ref, const float* d_box_L, int* d_max_dr2_bits,
+    void bin(const float4* pos, float4* pos_ref, const Box* d_box, int* d_max_dr2_bits,
              cudaStream_t stream);
     const int* order_padded() const { return order; }
 
@@ -85,30 +86,29 @@ struct VerletList {
 
     // Synchronous host build (tests and setup): bins, builds and grows the
     // capacity until nothing overflows.
-    void build(const float4* pos, int natoms, float box_L, float inv_L,
+    void build(const float4* pos, int natoms, const Box& box,
                const int* tag,
                const int* exclusion_offsets, const int* exclusion_list,
                float rc_skin, cudaStream_t stream = 0);
-    void build(const float4* pos, int natoms, float box_L, float inv_L,
+    void build(const float4* pos, int natoms, const Box& box,
                const int* exclusion_offsets, const int* exclusion_list,
                float rc_skin, cudaStream_t stream = 0) {
-        build(pos, natoms, box_L, inv_L, nullptr, exclusion_offsets,
-              exclusion_list, rc_skin, stream);
+        build(pos, natoms, box, nullptr, exclusion_offsets, exclusion_list, rc_skin, stream);
     }
 
     // Legacy allocate (tests): list radius rc_skin, no minimum-image check.
-    void allocate(int natoms, float rc_skin, float box_L) {
-        allocate(natoms, rc_skin, 0.0f, box_L);
+    void allocate(int natoms, float rc_skin, const Box& box) {
+        allocate(natoms, rc_skin, 0.0f, box);
         rc_min_image = 0.0f;
     }
 
 private:
-    float* d_box_scratch_ = nullptr;   // box length for synchronous builds
+    Box*  d_box_scratch_ = nullptr;    // box for synchronous builds
     int*   d_dr2_scratch_ = nullptr;
     float4* d_ref_scratch_ = nullptr;
-    void launch_bin(const float4* pos, float4* pos_ref, const float* d_box_L,
+    void launch_bin(const float4* pos, float4* pos_ref, const Box* d_box,
                     int* d_max_dr2_bits, cudaStream_t stream);
-    void launch_build(const float4* pos, const float* d_box_L, const int* tag,
+    void launch_build(const float4* pos, const Box* d_box, const int* tag,
                       const int* exclusion_offsets, const int* exclusion_list,
                       cudaStream_t stream);
 };

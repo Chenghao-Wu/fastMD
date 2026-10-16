@@ -11,6 +11,6 @@ void launch_angle_kernel(const float4* __restrict__ pos,
                           double* __restrict__ virial,
                           const int4* __restrict__ angles,
                           const AngleParams* __restrict__ params,
-                          int nangles, float L, float inv_L,
+                          int nangles, Box box,
                           cudaStream_t stream = 0,
                           bool cosine = false);   // E = K (1 + cos theta) instead of harmonic

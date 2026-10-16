@@ -35,7 +35,7 @@ TEST(Thermo, KineticEnergyAndTemperature) {
     ThermoBuffers bufs;
     bufs.allocate();
     ThermoOutput output;
-    compute_thermo(d_vel, d_pos, d_force, d_virial, N, L, &output, bufs, 0, nullptr);
+    compute_thermo(d_vel, d_pos, d_force, d_virial, N, cubic_box(L), &output, bufs, 0, nullptr);
 
     EXPECT_NEAR(output.kinetic_energy, 0.5f, 0.01f);
     EXPECT_NEAR(output.temperature, 1.0f/3.0f, 0.001f);
@@ -71,7 +71,7 @@ TEST(Thermo, StressColumnsMatchHeader) {
     bufs.allocate();
     bufs.open_file(path);
     ThermoOutput out;
-    compute_thermo(d_vel, d_pos, d_force, d_virial, N, L, &out, bufs, 7, bufs.fp);
+    compute_thermo(d_vel, d_pos, d_force, d_virial, N, cubic_box(L), &out, bufs, 7, bufs.fp);
     bufs.close_file();
     bufs.free();
 
