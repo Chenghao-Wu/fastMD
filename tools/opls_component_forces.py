@@ -9,9 +9,9 @@ import os
 import subprocess
 
 KCALA2KJNM = 41.84
-LMP = '/home/zhenghaowu/lammps/build/lmp'
-FMD = '/home/zhenghaowu/fastMD/build/fastmd'
-WD = '/home/zhenghaowu/fastMD/data/OPLS_butane'
+LMP = os.environ.get('LAMMPS_BINARY', 'lmp')
+FMD = os.environ.get('FASTMD_BINARY', 'fastmd')
+WD = os.environ.get('OPLS_WORKDIR', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', 'OPLS_butane'))
 
 LMP_BASE = """units real
 atom_style full

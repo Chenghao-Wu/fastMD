@@ -9,7 +9,8 @@ echo ""
 
 # Ensure data symlink exists
 if [ ! -e data ]; then
-    ln -sf /home/zhenghaowu/fastMD/data/bonded_ring_n40m30M25.data data
+    : "${BONDED_RING_DATA:?set BONDED_RING_DATA to bonded_ring_n40m30M25.data}"
+    ln -sf "$BONDED_RING_DATA" data
     echo "Created data symlink"
 fi
 

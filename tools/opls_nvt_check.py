@@ -17,8 +17,8 @@ import time
 KCAL2KJ = 4.184
 A2NM = 0.1
 KB = 0.00831446
-LMP = '/home/zhenghaowu/lammps/build/lmp'
-FMD = '/home/zhenghaowu/fastMD/build/fastmd'
+LMP = os.environ.get('LAMMPS_BINARY', 'lmp')
+FMD = os.environ.get('FASTMD_BINARY', 'fastmd')
 
 
 def style_lines(pj):

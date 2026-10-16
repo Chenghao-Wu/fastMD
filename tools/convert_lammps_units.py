@@ -22,6 +22,9 @@ import sys
 # time:       fs -> ps           x 0.001
 # temperature: K -> kJ/mol       x 0.00831446  (kB)
 # pressure:   atm -> kJ/(mol*nm^3) x 0.061027
+#
+# Pair tables keep the LAMMPS convention (column 4 = radial force F); the
+# generated configs request it explicitly with the 'force' keyword.
 
 LENGTH = 0.1
 ENERGY = 4.184
@@ -115,8 +118,17 @@ def convert_table_file(src_path, dst_path):
         if not stripped:
             out.append('\n')
             continue
-        if stripped.startswith('#') or stripped.startswith('PAIR_') or stripped.startswith('N '):
+        if stripped.startswith('#') or stripped.startswith('PAIR_'):
             out.append(line)
+            continue
+        if stripped.startswith('N '):
+            # "N n [R rlo rhi]": the R grid is a length and must be scaled too
+            tok = stripped.split()
+            if 'R' in tok:
+                k = tok.index('R')
+                tok[k + 1] = f"{float(tok[k + 1]) * LENGTH:.10e}"
+                tok[k + 2] = f"{float(tok[k + 2]) * LENGTH:.10e}"
+            out.append(' '.join(tok) + '\n')
             continue
 
         parts = stripped.split()
@@ -158,9 +170,17 @@ def parse_lammps_input(path):
     return params
 
 
-def generate_fastmd_configs(out_dir, params, table_filename, data_filename):
+def count_atoms(data_path):
+    with open(data_path) as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) == 2 and parts[1] == 'atoms':
+                return int(parts[0])
+    raise SystemExit(f"no 'N atoms' line in {data_path}")
+
+
+def generate_fastmd_configs(out_dir, params, table_filename, data_filename, natoms):
     """Generate fastmd_static.conf and fastmd_nvt.conf."""
-    natoms = 1000
     ntypes = 1
     rc = 15.0 * LENGTH  # 1.5 nm
     skin = 0.5 * LENGTH  # 0.05 nm
@@ -182,7 +202,7 @@ nsteps 1
 dump_freq 0
 thermo 1 1 thermo_fastmd_static.dat
 nvt_langevin {kT:.6f} {kT:.6f} {Tdamp:.6f} {seed}
-table 0 0 {table_filename} PAIR_0
+table 0 0 {table_filename} PAIR_0 force
 lammps_data_file {data_filename}
 forces_dump_file forces_fastmd.dat
 """
@@ -196,7 +216,7 @@ nsteps {nsteps}
 dump_freq 0
 thermo 1 {thermo_freq} thermo_fastmd.dat
 nvt_langevin {kT:.6f} {kT:.6f} {Tdamp:.6f} {seed}
-table 0 0 {table_filename} PAIR_0
+table 0 0 {table_filename} PAIR_0 force
 lammps_data_file {data_filename}
 """
 
@@ -234,7 +254,8 @@ def main():
     convert_data_file(args.data, out_data)
     convert_table_file(args.table, out_table)
 
-    generate_fastmd_configs(args.out, params, table_basename, data_basename)
+    generate_fastmd_configs(args.out, params, table_basename, data_basename,
+                            count_atoms(args.data))
 
     print(f"\nDone. Converted dataset in {args.out}/")
 

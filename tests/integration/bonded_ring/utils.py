@@ -5,8 +5,8 @@ import sys
 import numpy as np
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-FASTMD_BIN = "/home/zhenghaowu/fastMD/build/fastMD"
-LAMMPS_BIN = "/home/zhenghaowu/lammps/build/lmp"
+FASTMD_BIN = os.environ.get("FASTMD_BINARY", os.path.join(SCRIPT_DIR, "../../../build/fastmd"))
+LAMMPS_BIN = os.environ.get("LAMMPS_BINARY", "lmp")
 
 
 def run_fastmd(config_path: str) -> subprocess.CompletedProcess:

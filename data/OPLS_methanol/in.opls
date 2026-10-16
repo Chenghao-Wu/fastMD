@@ -1,7 +1,7 @@
 units real
 atom_style full
 boundary p p p
-read_data /home/zhenghaowu/fastMD/data/OPLS_methanol/methanol.data
+read_data methanol.data
 pair_style lj/cut/coul/long 10.0
 pair_modify mix geometric
 kspace_style ewald 0.0001

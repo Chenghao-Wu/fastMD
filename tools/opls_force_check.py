@@ -123,8 +123,8 @@ def convert_data_nm(src, dst):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--data', required=True)
-    ap.add_argument('--lmp', default='/home/zhenghaowu/lammps/build/lmp')
-    ap.add_argument('--fastmd', default='/home/zhenghaowu/fastMD/build/fastmd')
+    ap.add_argument('--lmp', default=os.environ.get('LAMMPS_BINARY', 'lmp'))
+    ap.add_argument('--fastmd', default=os.environ.get('FASTMD_BINARY', 'fastmd'))
     ap.add_argument('--workdir', default='.')
     ap.add_argument('--rc', type=float, default=10.0)
     ap.add_argument('--ewald_acc', type=float, default=1e-4)

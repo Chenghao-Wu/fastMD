@@ -1,6 +1,6 @@
 import numpy as np, subprocess, os, math
 D="/tmp/anchor"; os.makedirs(D, exist_ok=True)
-FASTMD=os.path.expanduser("~/fastMD/build/fastmd")
+FASTMD=os.environ.get("FASTMD_BINARY", "fastmd")
 
 def write(name, text): open(os.path.join(D,name),"w").write(text)
 def run(conf):
@@ -12,8 +12,9 @@ def forces(fn):
 
 # ---------- ANGLE anchor: table vs analytic ----------
 k, th0_deg = 5.0, 110.0; th0=math.radians(th0_deg)
-th=np.linspace(0,math.pi,3601); U=k*(th-th0)**2; f=-2*k*(th-th0)   # f=-dU/dtheta
-lines=["# angle tab","","angle",f"N {len(th)}",""]+[f"{i+1} {th[i]:.10g} {U[i]:.10g} {f[i]:.10g}" for i in range(len(th))]
+# LAMMPS angle_style table format: theta in degrees, force = -dU/dtheta per degree
+th=np.linspace(0,math.pi,3601); U=k*(th-th0)**2; f=-2*k*(th-th0)*math.pi/180.0
+lines=["# angle tab","","angle",f"N {len(th)}",""]+[f"{i+1} {math.degrees(th[i]):.10g} {U[i]:.10g} {f[i]:.10g}" for i in range(len(th))]
 write("angle.tab","\n".join(lines)+"\n")
 write("angle.data","""LAMMPS
 
@@ -40,7 +41,7 @@ Angles
 
 1 1 1 2 3
 """)
-base="natoms 3\nntypes 1\nrc 2.0\nskin 0.3\ndt 0.001\nnsteps 0\ndump_freq 1\nnvt_langevin 1.0 1.0 1.0 42\nlammps_data_file angle.data\n"
+base="natoms 3\nntypes 1\nrc 2.0\nskin 0.3\ndt 0.001\nnsteps 0\ndump_freq 1\nnvt_langevin 1.0 1.0 1.0 42\nlj 0 0 0.0 0.0\nlammps_data_file angle.data\n"
 write("ang_h.conf", base+"angle_type 0 %g %g\nforces_dump_file fa_h.txt\n"%(k,th0_deg))
 write("ang_t.conf", base+"angle_table 0 angle.tab angle\nforces_dump_file fa_t.txt\n")
 run("ang_h.conf"); run("ang_t.conf")
@@ -53,8 +54,7 @@ print(f"ANGLE max|table-analytic| = {ang_err:.3e}")
 # ---------- BOND anchor: table vs hand-computed ----------
 kb, req = 10.0, 1.0
 rb=np.linspace(0.5,2.5,401); Ub=0.5*kb*(rb-req)**2
-with np.errstate(divide="ignore",invalid="ignore"):
-    fb=np.where(rb>0, (-kb*(rb-req))/rb, 0.0)   # packed F/r
+fb=-kb*(rb-req)   # LAMMPS bond_style table format: radial force F = -dU/dr
 lines=["# bond tab","","bond",f"N {len(rb)}",""]+[f"{i+1} {rb[i]:.10g} {Ub[i]:.10g} {fb[i]:.10g}" for i in range(len(rb))]
 write("bond.tab","\n".join(lines)+"\n")
 write("bond.data","""LAMMPS
@@ -81,7 +81,7 @@ Bonds
 
 1 1 1 2
 """)
-write("bond_t.conf","natoms 2\nntypes 1\nrc 2.0\nskin 0.3\ndt 0.001\nnsteps 0\ndump_freq 1\nnvt_langevin 1.0 1.0 1.0 42\nlammps_data_file bond.data\nbond_table 0 bond.tab bond\nforces_dump_file fb_t.txt\n")
+write("bond_t.conf","natoms 2\nntypes 1\nrc 2.0\nskin 0.3\ndt 0.001\nnsteps 0\ndump_freq 1\nnvt_langevin 1.0 1.0 1.0 42\nlj 0 0 0.0 0.0\nlammps_data_file bond.data\nbond_table 0 bond.tab bond\nforces_dump_file fb_t.txt\n")
 run("bond_t.conf")
 fb_out=forces("fb_t.txt")
 # expected: |F|=k(r-req)=10*0.5=5; atom1 +x, atom2 -x
