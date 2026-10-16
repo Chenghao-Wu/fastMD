@@ -19,5 +19,8 @@ classifiers = [
 Homepage = "https://github.com/Chenghao-Wu/fastMD"
 
 [tool.scikit-build]
-cmake.args = ["-DCMAKE_BUILD_TYPE=Release"]
+cmake.build-type = "Release"
+# Tests are not built for wheels (FASTMD_BUILD_TESTS defaults OFF under
+# scikit-build). Select GPU architectures with e.g.
+#   pip install . -Ccmake.define.CMAKE_CUDA_ARCHITECTURES=86
 wheel.packages = ["python/fastmd"]
