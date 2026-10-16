@@ -60,6 +60,11 @@ struct NoseHooverDeviceState {
     float T_start, T_stop, P_start, P_stop;
     int   nsteps;
     int   step;
+    // Fused NVT path (nh_nvt_post_force_chain): pending factors and the
+    // grid-wide kinetic-energy reduction state.
+    float s_post, s_pre;
+    double ke_accum;
+    unsigned int blocks_done;
 };
 
 void allocate_nh_device_state(NoseHooverDeviceState*& d_state);
@@ -80,6 +85,16 @@ __global__ void nh_propagate_chain_kernel(
     bool use_carry,
     int M, float Q1, float Q_rest,
     float half_dt, int natoms);
+
+// Fused NVT post-force step (kick + KE reduction + both chain half-steps in
+// the last block); see nose_hoover.cu. Leaves s_post * s_pre in nh_scale.
+void launch_nh_nvt_post_force_chain(float4* vel, const float4* force, const float4* pos,
+                                    NoseHooverDeviceState* d_state, int natoms, float half_dt,
+                                    int M, float Q1, float Q_rest, cudaStream_t stream = 0);
+
+// Apply the pending post-force scale to the velocities (before output).
+void launch_nh_flush_post_scale(float4* vel, NoseHooverDeviceState* d_state, int natoms,
+                                cudaStream_t stream = 0);
 
 // --- Kernel launches ---
 

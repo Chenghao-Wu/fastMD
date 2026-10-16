@@ -61,6 +61,7 @@ private:
     void integrate_pre_force();
     void integrate_post_force();
     void write_outputs();
+    void flush_velocities();     // apply a pending thermostat scale (fused NVT)
     void write_restart(const std::string& fname, int64_t step);
     void print_progress();
     void finish();
@@ -121,6 +122,7 @@ private:
     NoseHooverDeviceState* d_nh_state_ = nullptr;
     NoseHooverNPTScratch npt_scratch_ = {};
     float* d_ke_buf_ = nullptr;
+    bool velocities_pending_ = false;    // fused NVT: s_post not yet applied
 
     // analysis / output
     MultipleTauCorrelator correlator_;

@@ -2,6 +2,7 @@
 #include "../neighbor/skin_trigger.cuh"
 #include "../core/pbc.cuh"
 #include "../core/system.cuh"
+#include "../core/reduce.cuh"
 
 void allocate_nh_device_state(NoseHooverDeviceState*& d_state) {
     CUDA_CHECK(cudaMalloc(&d_state, sizeof(NoseHooverDeviceState)));
@@ -26,6 +27,10 @@ void init_nh_device_state(const NoseHooverState& host,
     h.P_stop = host.P_stop;
     h.nsteps = host.nsteps;
     h.step = 1;
+    h.s_post = 1.0f;
+    h.s_pre = 1.0f;
+    h.ke_accum = 0.0;
+    h.blocks_done = 0u;
     CUDA_CHECK(cudaMemcpy(d_state, &h, sizeof(NoseHooverDeviceState),
                           cudaMemcpyHostToDevice));
 }
@@ -84,15 +89,18 @@ __host__ __device__ inline float nh_expf(float x) {
          + x6 * (1.0f / 720.0f);
 }
 
-__global__ void nh_propagate_chain_kernel(
-    NoseHooverDeviceState* __restrict__ d_state,
-    const float* __restrict__ d_ke_buf,
-    bool use_carry,
-    int M, float Q1, float Q_rest,
-    float half_dt, int natoms)
+// One half-step of the system-wide NH chain (LAMMPS fix_nh ordering).
+// use_carry: pre-force call, KE taken from chain_KE_carry and the ramp
+// targets refreshed for the current step; otherwise post-force call with the
+// given kinetic energy, which also carries KE*scale^2 forward and ends the
+// step. Returns the velocity scale factor (also stored in nh_scale).
+__device__ float nh_chain_update(NoseHooverDeviceState* __restrict__ d_state,
+                                 float ke_now, bool use_carry,
+                                 int M, float Q1, float Q_rest,
+                                 float half_dt, int natoms)
 {
     if (use_carry) nh_update_targets(d_state);
-    float total_KE = use_carry ? d_state->chain_KE_carry : (*d_ke_buf * 0.5f);
+    float total_KE = use_carry ? d_state->chain_KE_carry : ke_now;
     float kT_target = d_state->T_target;
     float N_f = 3.0f * static_cast<float>(natoms);
 
@@ -179,7 +187,95 @@ __global__ void nh_propagate_chain_kernel(
         d_state->chain_KE_carry = total_KE * scale * scale;
         d_state->step++;
     }
+    return scale;
 }
+
+__global__ void nh_propagate_chain_kernel(
+    NoseHooverDeviceState* __restrict__ d_state,
+    const float* __restrict__ d_ke_buf,
+    bool use_carry,
+    int M, float Q1, float Q_rest,
+    float half_dt, int natoms)
+{
+    if (blockIdx.x == 0 && threadIdx.x == 0)
+        nh_chain_update(d_state, use_carry ? 0.0f : (*d_ke_buf * 0.5f), use_carry,
+                        M, Q1, Q_rest, half_dt, natoms);
+}
+
+// Fused NVT post-force: velocity half-kick + kinetic-energy reduction; the
+// last block to finish runs the post-force chain half-step of this step and
+// the pre-force half-step of the next one. The combined scale
+// s_post * s_pre is left in nh_scale for the next pre-force kernel, which
+// applies it; s_post alone is applied by nh_flush_post_scale when velocities
+// are needed at the end of the step (output).
+__global__ void nh_nvt_post_force_chain_kernel(
+    float4* __restrict__ vel, const float4* __restrict__ force,
+    const float4* __restrict__ pos,
+    NoseHooverDeviceState* __restrict__ d_state,
+    int natoms, float half_dt, int M, float Q1, float Q_rest)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    double v2[1] = {0.0};
+    if (i < natoms) {
+        float4 v = vel[i];
+        float4 f = force[i];
+        float m_i = c_masses[unpack_type_id(pos[i].w)];
+        float h = half_dt / m_i;
+        v.x += h * f.x; v.y += h * f.y; v.z += h * f.z;
+        vel[i] = v;
+        v2[0] = (double)m_i * (v.x * v.x + v.y * v.y + v.z * v.z);
+    }
+    block_reduce_atomic_add<1, double>(v2, &d_state->ke_accum);
+
+    __shared__ bool is_last;
+    if (threadIdx.x == 0) {
+        __threadfence();   // make this block's contribution visible first
+        unsigned int done = atomicAdd(&d_state->blocks_done, 1u);
+        is_last = (done == gridDim.x - 1);
+    }
+    __syncthreads();
+    if (is_last && threadIdx.x == 0) {
+        __threadfence();
+        double sum = atomicAdd(&d_state->ke_accum, 0.0);   // coherent read
+        float s_post = nh_chain_update(d_state, (float)(0.5 * sum), false,
+                                       M, Q1, Q_rest, half_dt, natoms);
+        float s_pre = nh_chain_update(d_state, 0.0f, true, M, Q1, Q_rest, half_dt, natoms);
+        d_state->s_post = s_post;
+        d_state->s_pre = s_pre;
+        d_state->nh_scale = s_post * s_pre;
+        d_state->ke_accum = 0.0;
+        d_state->blocks_done = 0u;
+    }
+}
+
+// Apply the pending post-force thermostat scale (end-of-step velocities) and
+// leave only the next step's pre-force factor in nh_scale.
+__global__ void nh_flush_post_scale_kernel(float4* __restrict__ vel,
+                                           NoseHooverDeviceState* __restrict__ d_state,
+                                           int natoms)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    float s = d_state->s_post;
+    if (i < natoms) {
+        float4 v = vel[i];
+        v.x *= s; v.y *= s; v.z *= s;
+        vel[i] = v;
+    }
+    if (i == 0) d_state->nh_scale = d_state->s_pre;   // nobody else reads nh_scale here
+}
+
+void launch_nh_nvt_post_force_chain(float4* vel, const float4* force, const float4* pos,
+                                    NoseHooverDeviceState* d_state, int natoms, float half_dt,
+                                    int M, float Q1, float Q_rest, cudaStream_t stream) {
+    nh_nvt_post_force_chain_kernel<<<div_ceil(natoms, 256), 256, 0, stream>>>(
+        vel, force, pos, d_state, natoms, half_dt, M, Q1, Q_rest);
+}
+
+void launch_nh_flush_post_scale(float4* vel, NoseHooverDeviceState* d_state, int natoms,
+                                cudaStream_t stream) {
+    nh_flush_post_scale_kernel<<<div_ceil(natoms, 256), 256, 0, stream>>>(vel, d_state, natoms);
+}
+
 
 // --- NPT chain + barostat GPU kernel ---
 // Combined barostat Suzuki-Yoshida half-step + NH chain propagation.

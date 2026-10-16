@@ -94,6 +94,14 @@ Simulation::Simulation(const SimParams& params, TopologyData topo)
         float init_ke = compute_ke_only(p_.vel, p_.pos, params_.natoms, d_ke_buf_, stream_);
         CUDA_CHECK(cudaMemcpy(&d_nh_state_->chain_KE_carry, &init_ke, sizeof(float),
                               cudaMemcpyHostToDevice));
+        if (params_.ensemble == Ensemble::NVT_NH) {
+            // pre-force chain half-step of step 1; later ones run fused in
+            // the previous step's post-force kernel
+            nh_propagate_chain_kernel<<<1, 32, 0, stream_>>>(
+                d_nh_state_, d_ke_buf_, true, nose_hoover_.M, nose_hoover_.Q1,
+                nose_hoover_.Q_rest, 0.5f * params_.dt, params_.natoms);
+            CUDA_CHECK(cudaStreamSynchronize(stream_));
+        }
     }
 }
 
@@ -460,9 +468,8 @@ void Simulation::integrate_pre_force() {
                                       hdt, params_.dt, n, npt_scratch_.d_L,
                                       npt_scratch_.d_inv_L, stream_);
     } else {
-        nh_propagate_chain_kernel<<<1, 32, 0, stream_>>>(
-            d_nh_state_, d_ke_buf_, true, nose_hoover_.M, nose_hoover_.Q1,
-            nose_hoover_.Q_rest, hdt, n);
+        // nh_scale holds s_post(n-1) * s_pre(n) from the fused post-force kernel
+        velocities_pending_ = false;
         launch_nh_nvt_pre_force_fused(p_.pos, p_.vel, p_.force, p_.pos_ref, d_max_dr2,
                                       p_.image, d_nh_state_, hdt, params_.dt,
                                       n, box_L_, inv_L_, stream_);
@@ -489,12 +496,10 @@ void Simulation::integrate_post_force() {
                                     stream_);
         launch_nh_global_scale_vel(p_.vel, d_nh_state_, n, stream_);
     } else {
-        CUDA_CHECK(cudaMemsetAsync(d_ke_buf_, 0, sizeof(float), stream_));
-        launch_nh_nvt_v_half_ke_reduce(p_.vel, p_.force, p_.pos, d_ke_buf_, n, hdt, stream_);
-        nh_propagate_chain_kernel<<<1, 32, 0, stream_>>>(
-            d_nh_state_, d_ke_buf_, false, nose_hoover_.M, nose_hoover_.Q1,
-            nose_hoover_.Q_rest, hdt, n);
-        launch_nh_global_scale_vel(p_.vel, d_nh_state_, n, stream_);
+        launch_nh_nvt_post_force_chain(p_.vel, p_.force, p_.pos, d_nh_state_, n, hdt,
+                                       nose_hoover_.M, nose_hoover_.Q1, nose_hoover_.Q_rest,
+                                       stream_);
+        velocities_pending_ = true;
     }
     CUDA_CHECK(cudaGetLastError());
 }
@@ -511,7 +516,14 @@ void Simulation::step() {
 // Output
 // ---------------------------------------------------------------------------
 
+void Simulation::flush_velocities() {
+    if (!velocities_pending_) return;
+    launch_nh_flush_post_scale(p_.vel, d_nh_state_, params_.natoms, stream_);
+    velocities_pending_ = false;
+}
+
 void Simulation::write_restart(const std::string& fname, int64_t step) {
+    flush_velocities();
     CUDA_CHECK(cudaStreamSynchronize(stream_));
     RestartFrame f;
     f.pos = p_.download_positions();
@@ -544,6 +556,7 @@ void Simulation::write_outputs() {
     read_status();
 
     if (need_thermo || need_stress) {
+        flush_velocities();
         ThermoOutput thermo;
         compute_thermo(p_.vel, p_.pos, p_.force, d_virial_, params_.natoms, box_L_, &thermo,
                        thermo_bufs_, s, need_thermo ? thermo_bufs_.fp : nullptr, stream_,
@@ -630,6 +643,7 @@ void Simulation::run() {
         write_outputs();
         print_progress();
     }
+    flush_velocities();
     CUDA_CHECK(cudaStreamSynchronize(stream_));
     read_status();
     auto t_end = std::chrono::steady_clock::now();
