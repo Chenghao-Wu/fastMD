@@ -514,12 +514,12 @@ TEST(Simulation, UnitFrictionProfileMatchesUniform) {
 // collision-rate profile that is zero in half of the film.
 TEST(Simulation, AndersenThermostat) {
     std::string data = write_melt("sim_and.data", 16, 25, 0.85f, 67);
-    auto sim = make_sim(data, "", 3000, "nvt_andersen 1.2 1.2 5.0 3");
+    auto sim = make_sim(data, "pair_tpa 1\n", 3000, "nvt_andersen 1.2 1.2 5.0 3");
     sim->set_velocities(std::vector<float3>(sim->positions().size(), make_float3(0, 0, 0)));
     sim->run(2000);
-    double T = 0;
-    for (int k = 0; k < 10; k++) { sim->run(50); T += sim->thermo().temperature; }
-    EXPECT_NEAR(T / 10, 1.2, 0.04);
+    double T = 0;   // 400 atoms: per-sample scatter ~4%; 40 samples
+    for (int k = 0; k < 40; k++) { sim->run(50); T += sim->thermo().temperature; }
+    EXPECT_NEAR(T / 40, 1.2, 0.04);
 
     auto film = make_sim(data, "film z\npair_tpa 1\n", 10000, "nvt_andersen 1.0 1.0 5.0 4",
                          make_int3(1, 1, 1), slab_lift());
@@ -535,5 +535,62 @@ TEST(Simulation, AndersenThermostat) {
     for (size_t k = 0; k < tp.ke.size(); k++) {
         if (tp.n[k] < 6000) continue;
         EXPECT_NEAR(tp.ke[k] / tp.n[k], 1.0, 0.07) << "bin " << k;
+    }
+}
+
+// Layer stresses partition the total stress exactly, and the summed layer
+// cross-correlations equal V^2 times the global shear-stress correlation.
+TEST(Simulation, LayerStressSumRules) {
+    std::string data = write_melt("sim_layers.data", 16, 25, 0.85f, 71);
+    auto sim = make_sim(data, "film z\nlayer_stress 6 2.5 5 sim_layers_corr.dat\n"
+                              "stress 1 5 sim_layers_global.dat\n", 3000,
+                        "nvt_langevin 1.0 1.0 1.0 5", make_int3(1, 1, 1), slab_lift());
+    sim->run(1000);
+    std::vector<double> ls = sim->layer_stress();
+    ASSERT_EQ(ls.size(), 6u * 6u);
+    ThermoOutput t = sim->thermo();
+    const double V = sim->box().volume();
+    for (int c = 0; c < 6; c++) {
+        double sum = 0;
+        for (int k = 0; k < 6; k++) sum += ls[6 * k + c];
+        EXPECT_NEAR(sum, t.stress[c] * V, 1e-4 * std::fabs(t.stress[VXX] * V) + 1e-3) << "component " << c;
+    }
+    sim->run(2000);
+    sim.reset();   // writes nothing (run(n)); use the command-line finish instead
+}
+
+TEST(Simulation, LayerCorrelationsSumToGlobal) {
+    std::string data = write_melt("sim_layers2.data", 12, 20, 0.85f, 73);
+    std::string conf = "sim_layers2.conf";
+    {
+        TopologyData probe;
+        parse_lammps_data(data, probe);
+    }
+    auto sim = make_sim(data, "film z\nlayer_stress 4 3.0 2 sim_l2_corr.dat\nstress 1 2 sim_l2_global.dat\n",
+                        2000, "nvt_langevin 1.0 1.0 1.0 5", make_int3(1, 1, 1), slab_lift());
+    sim->run();   // full command-line run: writes both correlation files
+    const double V = sim->box().volume();
+    sim.reset();
+    auto read_rows = [](const std::string& path) {
+        std::vector<std::vector<double>> rows;
+        std::ifstream in(path);
+        for (std::string line; std::getline(in, line);) {
+            if (line.empty() || line[0] == '#') continue;
+            std::istringstream ls(line);
+            std::vector<double> r;
+            for (double x; ls >> x;) r.push_back(x);
+            rows.push_back(r);
+        }
+        return rows;
+    };
+    auto L = read_rows("sim_l2_corr.dat"), G = read_rows("sim_l2_global.dat");
+    ASSERT_EQ(L.size(), G.size());
+    ASSERT_GT(L.size(), 10u);
+    for (size_t r = 0; r < L.size(); r++) {
+        ASSERT_EQ(L[r][0], G[r][0]);   // same lags
+        double sum = 0;
+        for (int q = 1; q <= 16; q++) sum += L[r][q];
+        const double ref = V * V * G[r][2];   // C_xy column
+        EXPECT_NEAR(sum, ref, 2e-3 * std::fabs(V * V * G[0][2])) << "lag " << L[r][0];
     }
 }

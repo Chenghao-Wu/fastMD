@@ -111,6 +111,11 @@ struct SimParams {
     float andersen_nu = 0.0f;   // nvt_andersen collision frequency
     int   friction_mode = 0;    // friction_profile: 0 none, 1 analytic, 2 table
     float friction_a = 0.0f, friction_ell = 1.0f, friction_h = 0.0f;
+    int   layer_n = 0;          // layer_stress: number of layers (0 = off)
+    float layer_width = 0.0f;
+    int   layer_freq = 0;
+    char  layer_file[256] = {0};
+    int   layer_p = 16, layer_m = 2;
 
     // Nosé-Hoover
     Ensemble ensemble = Ensemble::Langevin;

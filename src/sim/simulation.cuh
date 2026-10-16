@@ -14,6 +14,7 @@
 #include "../analysis/thermo.cuh"
 #include "../analysis/correlator.cuh"
 #include "../analysis/rg.cuh"
+#include "../analysis/layer_stress.cuh"
 #include "../io/dump.cuh"
 #include "../io/config.hpp"
 #include "../io/trajectory.hpp"
@@ -75,6 +76,11 @@ public:
     // table: f on the uniform grid zmin + k dz (mode 2).
     void set_friction_profile(const FrictionProfile& spec, const std::vector<float>& table = {},
                               float zmin = 0.0f, float dz = 0.0f);
+    // Extensive per-layer stresses [n][6] (xx xy xz yy yz zz) of the current
+    // state (needs layer_stress); layer k spans
+    // [(k - n/2) w, (k + 1 - n/2) w) about the film reference plane.
+    std::vector<double> layer_stress();
+    const LayerSpec& layer_spec() const { return layer_spec_; }
     // Replace the walls (e.g. remove them after confined preparation).
     void set_walls(const WallSet& walls);
     const WallSet& walls() const { return params_.walls; }
@@ -104,14 +110,14 @@ private:
     bool validate();                     // neighbor/grid flags since the checkpoint
     // ev: also per-atom energies (force.w) and the virial; without it only
     // forces are valid (the pair and bonded kernels skip the rest)
-    void launch_forces(bool ev);
-    void launch_pair_kernel(int tpa, bool ev);   // the overwriting nonbonded kernel
+    void launch_forces(bool ev, bool atom_virial = false);
+    void launch_pair_kernel(int tpa, bool ev, float* atom_vir = nullptr);   // overwrites force[]
     void tune_pair_tpa();
-    void launch_bonded_kernel(int tpa, bool ev);
+    void launch_bonded_kernel(int tpa, bool ev, float* atom_vir = nullptr);
     void tune_bonded_tpa();
     void integrate_pre_force();
     void integrate_post_force();
-    void launch_step(bool with_stress, bool ev);   // all device work of one step
+    void launch_step(bool with_stress, bool ev, bool with_layers);   // all device work of one step
     void advance_one(bool want_ev);
     void invalidate_graphs();
     void write_outputs();
@@ -208,6 +214,15 @@ private:
     void write_traj_frame_if_due();
     double inv_total_mass_ = 0.0;
     float* d_friction_table_ = nullptr;
+    // layer stresses
+    LayerSpec layer_spec_;
+    float*  d_atom_vir_ = nullptr;      // [6][natoms] per-atom virial on layer-sample steps
+    double* d_layer_accum_ = nullptr;   // [n][6] scratch
+    unsigned int* d_layer_ticket_ = nullptr;
+    double* d_layer_out_ = nullptr;     // [n][6] last layer stresses
+    double* d_layer_shear_ = nullptr;   // [n] in-plane shear (correlator input)
+    MultipleTauCorrelator layer_corr_;
+    void sample_layers();
     void launch_film_center();
     void check_tilt_allowed(float xy) const;
     float4* d_out4_ = nullptr;           // tag-ordered scratch for output
@@ -215,9 +230,8 @@ private:
     // All device work is ordered on one stream; host waits only for the
     // per-step status read-back and for output.
     cudaStream_t stream_ = nullptr;
-    // captured single steps: [0] forces only, [1] with energies/virial,
-    // [2] with energies/virial and a stress sample
-    cudaGraphExec_t graph_exec_[3] = {nullptr, nullptr, nullptr};
+    // captured single steps, indexed by ev | stress sample << 1 | layer sample << 2
+    cudaGraphExec_t graph_exec_[8] = {};
     int n_graph_captures_ = 0;
     void read_status();
 

@@ -5,6 +5,7 @@
 #include "../force/soft.cuh"
 #include "../force/wall.cuh"
 #include "../analysis/film.cuh"
+#include "../analysis/layer_stress.cuh"
 #include "../force/lj_coul_long.cuh"
 #include "../force/ewald_recip.cuh"
 #include "../force/ewald_excl.cuh"
@@ -250,6 +251,26 @@ void Simulation::setup_analysis() {
     }
     thermo_bufs_.allocate();
     if (params_.thermo_on) thermo_bufs_.open_file(params_.thermo_file);
+    if (params_.layer_n > 0) {
+        layer_spec_.n = params_.layer_n;
+        layer_spec_.width = params_.layer_width;
+        layer_spec_.axis = params_.film_axis;
+        layer_spec_.shear = params_.film_axis == 2 ? VXY : params_.film_axis == 1 ? VXZ : VYZ;
+        const int n = layer_spec_.n;
+        CUDA_CHECK(cudaMalloc(&d_atom_vir_, 6 * (size_t)params_.natoms * sizeof(float)));
+        CUDA_CHECK(cudaMemset(d_atom_vir_, 0, 6 * (size_t)params_.natoms * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_layer_accum_, 6 * n * sizeof(double)));
+        CUDA_CHECK(cudaMemset(d_layer_accum_, 0, 6 * n * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&d_layer_ticket_, sizeof(unsigned int)));
+        CUDA_CHECK(cudaMemset(d_layer_ticket_, 0, sizeof(unsigned int)));
+        CUDA_CHECK(cudaMalloc(&d_layer_out_, 6 * n * sizeof(double)));
+        CUDA_CHECK(cudaMemset(d_layer_out_, 0, 6 * n * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&d_layer_shear_, n * sizeof(double)));
+        std::vector<int2> pairs;
+        for (int a = 0; a < n; a++)
+            for (int b = 0; b < n; b++) pairs.push_back(make_int2(a, b));
+        layer_corr_.allocate(n, pairs, params_.layer_p, params_.layer_m);
+    }
     if (params_.rg_on) {
         if (topo_.mol_ids.empty()) {
             fprintf(stderr, "Warning: rg_on but no mol_ids in data file, disabling Rg\n");
@@ -396,6 +417,7 @@ void Simulation::save_checkpoint() {
         CUDA_CHECK(cudaMemcpyAsync(d_ckpt_nh_, d_nh_state_, sizeof(NoseHooverDeviceState),
                                    cudaMemcpyDeviceToDevice, stream_));
     if (params_.stress_on) correlator_.save_snapshot(stream_);
+    if (params_.layer_n > 0) layer_corr_.save_snapshot(stream_);
     ckpt_step_ = step_;
     ckpt_vel_pending_ = velocities_pending_;
 }
@@ -409,6 +431,7 @@ void Simulation::restore_checkpoint() {
         CUDA_CHECK(cudaMemcpyAsync(d_nh_state_, d_ckpt_nh_, sizeof(NoseHooverDeviceState),
                                    cudaMemcpyDeviceToDevice, stream_));
     if (params_.stress_on) correlator_.restore_snapshot(stream_);
+    if (params_.layer_n > 0) layer_corr_.restore_snapshot(stream_);
     t_.remap(p_.rank, stream_);
     step_ = ckpt_step_;
     velocities_pending_ = ckpt_vel_pending_;
@@ -421,7 +444,8 @@ void Simulation::restore_checkpoint() {
 // Forces
 // ---------------------------------------------------------------------------
 
-void Simulation::launch_forces(bool ev) {
+void Simulation::launch_forces(bool ev, bool atom_virial) {
+    float* atom_vir = ev && atom_virial ? d_atom_vir_ : nullptr;
     const Box box = box_;
     const int n = params_.natoms;
 
@@ -432,7 +456,7 @@ void Simulation::launch_forces(bool ev) {
     // Nonbonded kernels overwrite force[i] (=), everything after accumulates.
     // The smaller kernels below always add energies/virial (harmless when
     // ev is false: neither is read then).
-    launch_pair_kernel(pair_tpa_, ev);
+    launch_pair_kernel(pair_tpa_, ev, atom_vir);
     if (params_.walls.n > 0)
         launch_wall_kernel(p_.pos, p_.force, n, params_.walls, current_step_ptr(), params_.nsteps,
                            &d_status_->wall_error, st, ev);
@@ -466,7 +490,7 @@ void Simulation::launch_forces(bool ev) {
     // Bonded terms accumulate into the same force buffer, so they follow the
     // overwriting nonbonded kernel on the same stream.
     if (params_.bonded_gather) {
-        launch_bonded_kernel(bonded_tpa_, ev);
+        launch_bonded_kernel(bonded_tpa_, ev, atom_vir);
         CUDA_CHECK(cudaGetLastError());
         return;
     }
@@ -497,7 +521,7 @@ void Simulation::launch_forces(bool ev) {
     CUDA_CHECK(cudaGetLastError());
 }
 
-void Simulation::launch_pair_kernel(int tpa, bool ev) {
+void Simulation::launch_pair_kernel(int tpa, bool ev, float* atom_vir) {
     const int n = params_.natoms;
     if (params_.pair_soft) {
         launch_soft_kernel(p_.pos, p_.force, d_virial_, verlet_.neighbors, verlet_.num_neighbors,
@@ -515,7 +539,7 @@ void Simulation::launch_pair_kernel(int tpa, bool ev) {
                          verlet_.neighbors, verlet_.num_neighbors,
                          n, params_.ntypes, params_.rc2, box_, stream_,
                          d_lj_cap_, params_.lj_force_cap, tpa, &d_status_->box, ev,
-                         params_.pair_shift != 0);
+                         params_.pair_shift != 0, atom_vir);
 }
 
 // Time the overwriting pair kernel with 1, 2, 4 and 8 threads per particle on
@@ -545,10 +569,10 @@ void Simulation::tune_pair_tpa() {
     CUDA_CHECK(cudaEventDestroy(e1));
 }
 
-void Simulation::launch_bonded_kernel(int tpa, bool ev) {
+void Simulation::launch_bonded_kernel(int tpa, bool ev, float* atom_vir) {
     launch_bonded_gather_kernel(p_.pos, p_.force, d_virial_, p_.tag, t_.term_offsets,
                                 t_.terms, t_.bonds, t_.angles, t_.dihedrals, bonded_params_,
-                                params_.natoms, box_, stream_, tpa, &d_status_->box, ev);
+                                params_.natoms, box_, stream_, tpa, &d_status_->box, ev, atom_vir);
 }
 
 // Same timing-based choice as tune_pair_tpa for the bonded gather kernel
@@ -661,13 +685,17 @@ void Simulation::integrate_post_force() {
 // Device work of one time step. Every per-step quantity (step counter,
 // ramps, box, rebuild decision) lives in device memory, so the sequence is
 // identical from step to step and can be captured as a CUDA graph.
-void Simulation::launch_step(bool with_stress, bool ev) {
+void Simulation::launch_step(bool with_stress, bool ev, bool with_layers) {
     launch_film_center();
     integrate_pre_force();
     verlet_.step(p_.pos, p_.pos_ref, &d_status_->box, &d_status_->max_dr2_bits, p_.tag,
                  t_.excl_offsets, t_.excl_list, stream_);
-    launch_forces(ev);
+    launch_forces(ev, with_layers);
     integrate_post_force();
+    if (with_layers) {
+        sample_layers();
+        layer_corr_.push(d_layer_shear_, stream_);
+    }
     if (with_stress) {
         // device-only sample; a pending fused-NVT velocity scale is applied in the kernel
         stress_sampler_.sample(p_.vel, p_.pos, d_virial_, params_.natoms, &d_status_->box,
@@ -690,21 +718,22 @@ void Simulation::invalidate_graphs() {
 void Simulation::advance_one(bool want_ev) {
     ++step_;
     const bool with_stress = params_.stress_on && step_ % params_.stress_freq == 0;
-    const bool ev = want_ev || with_stress || params_.ensemble == Ensemble::NPT_NH;
+    const bool with_layers = params_.layer_n > 0 && step_ % params_.layer_freq == 0;
+    const bool ev = want_ev || with_stress || with_layers || params_.ensemble == Ensemble::NPT_NH;
     // the per-term bonded kernels take the box by value, so NPT then needs it
     // on the host every step and cannot be replayed from a graph
     const bool host_box = params_.ensemble == Ensemble::NPT_NH && !params_.bonded_gather;
     if (host_box) read_status();
     if (!params_.cuda_graphs || host_box) {
-        launch_step(with_stress, ev);
+        launch_step(with_stress, ev, with_layers);
         return;
     }
-    cudaGraphExec_t& exec = graph_exec_[with_stress ? 2 : ev ? 1 : 0];
+    cudaGraphExec_t& exec = graph_exec_[(ev ? 1 : 0) | (with_stress ? 2 : 0) | (with_layers ? 4 : 0)];
     if (!exec) {
         const bool pending = velocities_pending_;   // host bookkeeping replayed below
         cudaGraph_t graph;
         CUDA_CHECK(cudaStreamBeginCapture(stream_, cudaStreamCaptureModeThreadLocal));
-        launch_step(with_stress, ev);
+        launch_step(with_stress, ev, with_layers);
         CUDA_CHECK(cudaStreamEndCapture(stream_, &graph));
         CUDA_CHECK(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0));
         CUDA_CHECK(cudaGraphDestroy(graph));
@@ -1008,6 +1037,28 @@ void Simulation::apply_step_shear(float gamma) {
     set_tilt(box_.xy + gamma * box_.L.y, true);
 }
 
+// Per-layer stresses from the per-atom virial of the last force evaluation
+// (computed with atom_virial) and the full-step velocities.
+void Simulation::sample_layers() {
+    launch_layer_stress(p_.pos, p_.vel, p_.image, d_atom_vir_, params_.natoms, &d_status_->box,
+                        &d_status_->film_center, layer_spec_,
+                        velocities_pending_ ? &d_nh_state_->s_post : nullptr, d_layer_accum_,
+                        d_layer_ticket_, d_layer_out_, d_layer_shear_, stream_);
+}
+
+std::vector<double> Simulation::layer_stress() {
+    if (params_.layer_n <= 0) throw std::logic_error("layer_stress: no `layer_stress` in the config");
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+    launch_film_center();
+    launch_forces(true, true);   // same positions: recomputes forces and per-atom virials
+    sample_layers();
+    std::vector<double> out(6 * layer_spec_.n);
+    CUDA_CHECK(cudaMemcpyAsync(out.data(), d_layer_out_, out.size() * sizeof(double),
+                               cudaMemcpyDeviceToHost, stream_));
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+    return out;
+}
+
 void Simulation::launch_film_center() {
     if (params_.film_axis < 0) return;
     ::launch_film_center(p_.pos, p_.image, params_.natoms, params_.film_axis, &d_status_->box,
@@ -1038,6 +1089,12 @@ void Simulation::set_friction_profile(const FrictionProfile& spec, const std::ve
     }
     CUDA_CHECK(cudaStreamSynchronize(stream_));
     free_dev(d_friction_table_);
+    free_dev(d_atom_vir_);
+    free_dev(d_layer_accum_);
+    free_dev(d_layer_ticket_);
+    free_dev(d_layer_out_);
+    free_dev(d_layer_shear_);
+    if (layer_corr_.allocated()) layer_corr_.free();
     FrictionProfile p = spec;
     p.axis = params_.film_axis < 0 ? 2 : params_.film_axis;
     p.d_table = nullptr;
@@ -1078,6 +1135,22 @@ ThermoOutput Simulation::thermo() {
 }
 
 void Simulation::finish() {
+    if (params_.layer_n > 0) {
+        std::vector<std::string> cols;
+        for (int a = 0; a < layer_spec_.n; a++)
+            for (int b = 0; b < layer_spec_.n; b++)
+                cols.push_back("C_" + std::to_string(a) + "_" + std::to_string(b));
+        static const char* comp[6] = {"xx", "xy", "xz", "yy", "yz", "zz"};
+        char head[512];
+        snprintf(head, sizeof(head),
+                 "# layer stress cross-correlations C_a_b = <P_a(t) P_b(0)> of the extensive in-plane "
+                 "shear stress P_%s (kinetic + per-atom virial) of %d layers of width %g about the film "
+                 "reference plane (layer k: [(k - %d/2) w, (k + 1 - %d/2) w), outer layers unbounded); "
+                 "G_ab(t) = (C_ab - mean_a mean_b) / (k_B T V)\n",
+                 comp[layer_spec_.shear], layer_spec_.n, layer_spec_.width, layer_spec_.n, layer_spec_.n);
+        layer_corr_.write(params_.layer_file, params_.layer_freq, cols, head);
+        printf("Layer stress correlations written to %s\n", params_.layer_file);
+    }
     if (!params_.stress_on) return;
     char vol[160];
     snprintf(vol, sizeof(vol), "# stress = (kinetic + virial) / V with V = %.10g (box volume); "

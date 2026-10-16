@@ -339,6 +339,23 @@ SimParams parse_config(std::istream& in, const std::string& filename, TopologyDa
                 w.e_shift = (float)(w.eps * (2.0 / 15.0 * sr3 * sr3 * sr3 - sr3));
             }
             params.walls.w[params.walls.n++] = w;
+        } else if (key == "layer_stress") {
+            // layer_stress <nlayers> <width> <freq> <file> [p m]
+            long n = a.integer("nlayers");
+            if (n < 1 || n > 32) a.fail("<nlayers> must be in [1, 32]");
+            params.layer_n = (int)n;
+            params.layer_width = (float)a.positive("width");
+            long f = a.integer("freq");
+            if (f < 1) a.fail("<freq> must be >= 1");
+            params.layer_freq = (int)f;
+            copy_path(params.layer_file, a.str("file"), a);
+            if (a.more()) {
+                long p = a.integer("p"), m = a.integer("m");
+                if (m < 2 || p < 2 || p > 1024 || p % m != 0)
+                    a.fail("correlator needs m >= 2, 2 <= p <= 1024 and p a multiple of m");
+                params.layer_p = (int)p;
+                params.layer_m = (int)m;
+            }
         } else if (key == "film") {
             const std::string ax = a.str("x|y|z");
             if (ax != "x" && ax != "y" && ax != "z") a.fail("expected x, y or z (the film normal)");
@@ -702,6 +719,16 @@ void validate_system(const SimParams& params, const TopologyData& topo) {
             if (z < 0.0f || z > Lax[w.axis])
                 throw std::runtime_error("wall position " + std::to_string(z) + " outside [0, " +
                                          std::to_string(Lax[w.axis]) + "] (measured from the lower box edge)");
+    }
+    if (params.layer_n > 0) {
+        if (params.film_axis < 0)
+            throw std::runtime_error("layer_stress needs `film <axis>` (layers are measured from the "
+                                     "film reference plane)");
+        if (params.ewald_on || params.pair_soft || !topo.table_params.empty())
+            throw std::runtime_error("layer_stress supports the LJ pair style only (no coulomb, "
+                                     "pair_soft or table)");
+        if (!params.bonded_gather)
+            throw std::runtime_error("layer_stress needs bonded_mode gather");
     }
     if (params.friction_mode != 0) {
         if (params.film_axis < 0)

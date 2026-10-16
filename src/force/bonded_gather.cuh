@@ -47,4 +47,5 @@ void launch_bonded_gather_kernel(const float4* pos, float4* force, double* viria
                                  cudaStream_t stream = 0,
                                  int tpa = 1,    // threads per particle: 1, 2, 4, 8
                                  const Box* d_box = nullptr,
-                                 bool ev = true);   // false: forces only (no energy, no virial)
+                                 bool ev = true,    // false: forces only (no energy, no virial)
+                                 float* atom_vir = nullptr);   // ev: adds per-atom virial shares

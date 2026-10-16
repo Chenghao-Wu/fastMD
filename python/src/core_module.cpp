@@ -152,6 +152,13 @@ y + iy Ly, z + iz Lz.
              "factor = exp(a [exp(-s/ell) + exp(-(h-s)/ell)]), s = z - z_c + h/2 in [0, h].")
         .def("clear_friction_profile", &Engine::clear_friction_profile,
              "Back to uniform friction / collision rate.")
+        .def("layer_stress", [](Engine& e) { return as_array(e.layer_stress(), 6); },
+             "Extensive stress (kinetic + per-atom virial) of each film layer, (nlayers, 6) in the "
+             "order xx xy xz yy yz zz; layer k spans [(k - n/2) w, (k + 1 - n/2) w) about the film "
+             "reference plane, outer layers unbounded. Sums to V times the pressure tensor. Needs "
+             "`layer_stress`.")
+        .def_property_readonly("nlayers", &Engine::nlayers)
+        .def_property_readonly("layer_width", &Engine::layer_width)
         .def_property_readonly("nwalls", &Engine::nwalls, "Number of active walls.")
         .def_property_readonly("film_center", &Engine::film_center,
                                "Film reference plane: mass-weighted mean unwrapped coordinate "

@@ -23,7 +23,7 @@ __global__ void lj_verlet_kernel(
     const int* __restrict__ neighbors,
     const int* __restrict__ num_neighbors,
     int natoms, int ntypes,
-    float rc2, Box box, const Box* __restrict__ d_box)
+    float rc2, Box box, const Box* __restrict__ d_box, float* __restrict__ atom_vir)
 {
     if (d_box) box = *d_box;   // box on the device (NPT)
     const int t = blockIdx.x * blockDim.x + threadIdx.x;
@@ -103,6 +103,18 @@ __global__ void lj_verlet_kernel(
 
     if (EV) {
         float vir[6] = {vir_xx, vir_xy, vir_xz, vir_yy, vir_yz, vir_zz};
+        if (atom_vir) {   // per-atom virial (half of every pair) for layer stresses
+            float av[6] = {vir_xx, vir_xy, vir_xz, vir_yy, vir_yz, vir_zz};
+            if (TPA > 1) {
+#pragma unroll
+                for (int o = TPA / 2; o > 0; o >>= 1)
+#pragma unroll
+                    for (int c = 0; c < 6; c++) av[c] += __shfl_down_sync(0xffffffffu, av[c], o, TPA);
+            }
+            if (i < natoms && sub == 0)
+#pragma unroll
+                for (int c = 0; c < 6; c++) atom_vir[c * natoms + i] = av[c];
+        }
         block_reduce_virial(vir, virial);
     }
 }
@@ -114,7 +126,7 @@ void launch_lj_kernel(const float4* pos, float4* force, double* virial,
                        float rc2, Box box,
                        cudaStream_t stream,
                        const float2* lj_cap, float force_cap, int tpa, const Box* d_box,
-                       bool ev, bool shift)
+                       bool ev, bool shift, float* atom_vir)
 {
     if (tpa <= 0) tpa = pair_threads_per_atom(natoms);
     const bool cap = lj_cap && force_cap > 0.0f;
@@ -123,7 +135,7 @@ void launch_lj_kernel(const float4* pos, float4* force, double* virial,
 #define FASTMD_LJ_K2(C, T, E, S, X)                                                \
     lj_verlet_kernel<C, T, E, S, X><<<blocks, 256, 0, stream>>>(                  \
         pos, force, virial, lj_params, lj_cap, force_cap,                         \
-        neighbors, num_neighbors, natoms, ntypes, rc2, box, d_box)
+        neighbors, num_neighbors, natoms, ntypes, rc2, box, d_box, atom_vir)
 #define FASTMD_LJ_K(C, T, E, S)                                                    \
     do { if (tilted) FASTMD_LJ_K2(C, T, E, S, true); else FASTMD_LJ_K2(C, T, E, S, false); } while (0)
 #define FASTMD_LJ_LAUNCH(C, T)                                                     \

@@ -282,6 +282,19 @@ class SimulationAPITest(unittest.TestCase):
         with self.assertRaises(ValueError):
             nofilm.set_friction_profile(z, np.ones_like(z))          # needs `film z`
 
+    def test_layer_stress(self):
+        sim = fastmd.Simulation.from_text(self.config() + "film z\nlayer_stress 5 3.0 10 /dev/null\n")
+        sim.run(100)
+        ls = sim.layer_stress()
+        self.assertEqual(ls.shape, (5, 6))
+        self.assertEqual(sim.nlayers, 5)
+        V = np.prod(sim.box[:3])
+        P = sim.thermo().pressure
+        sums = ls.sum(axis=0)
+        np.testing.assert_allclose(sums[[0, 3, 5, 1, 2, 4]],
+                                   V * P[[0, 1, 2, 0, 0, 1], [0, 1, 2, 1, 2, 2]],
+                                   rtol=1e-4, atol=1e-2)
+
     def test_errors(self):
         sim = self.make()
         with self.assertRaises(ValueError):

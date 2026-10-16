@@ -99,6 +99,7 @@ add_library(core STATIC
     src/analysis/thermo.cu
     src/analysis/rg.cu
     src/analysis/film.cu
+    src/analysis/layer_stress.cu
     src/analysis/correlator.cu
     src/io/dump.cu
     src/io/config.cpp

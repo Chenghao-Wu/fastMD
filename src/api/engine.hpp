@@ -67,6 +67,10 @@ public:
     void set_friction_profile_analytic(double a, double ell, double h);
     void clear_friction_profile();
     void set_tilt(double xy, bool affine);
+    // Extensive per-layer stresses [nlayers * 6] (needs layer_stress) and layout.
+    std::vector<double> layer_stress();
+    int    nlayers() const;
+    double layer_width() const;
     int  nwalls() const;
     double film_center();   // film reference plane (needs `film <axis>`)
     void remove_walls();

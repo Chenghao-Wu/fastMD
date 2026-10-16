@@ -136,6 +136,9 @@ void Engine::set_friction_profile_analytic(double a, double ell, double h) {
 
 void Engine::clear_friction_profile() { sim_->set_friction_profile(FrictionProfile{}); }
 void Engine::set_tilt(double xy, bool affine) { sim_->set_tilt((float)xy, affine); }
+std::vector<double> Engine::layer_stress() { return sim_->layer_stress(); }
+int Engine::nlayers() const { return sim_->layer_spec().n; }
+double Engine::layer_width() const { return sim_->layer_spec().width; }
 int Engine::nwalls() const { return sim_->walls().n; }
 double Engine::film_center() { return sim_->film_center(); }
 void Engine::remove_walls() { sim_->set_walls(WallSet{}); }
