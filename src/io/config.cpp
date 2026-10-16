@@ -128,7 +128,7 @@ SimParams parse_config(std::istream& in, const std::string& filename, TopologyDa
         const std::string& key = a.key();
 
         static const std::set<std::string> repeatable = {
-            "lj", "lj_type", "table", "bond_type", "angle_type", "angle_cosine", "bond_harmonic",
+            "lj", "lj_type", "table", "bond_type", "angle_type", "angle_cosine", "bond_harmonic", "wall",
             "dihedral_opls", "bond_table", "angle_table"};
         if (!repeatable.count(key) && !seen.insert(key).second)
             a.fail("specified more than once");
@@ -261,6 +261,32 @@ SimParams parse_config(std::istream& in, const std::string& filename, TopologyDa
             params.ewald14_coul = (float)a.real("coul14");
             if (params.lj14 < 0 || params.lj14 > 1 || params.ewald14_coul < 0 || params.ewald14_coul > 1)
                 a.fail("scaling factors must be in [0, 1]");
+        } else if (key == "wall") {
+            // wall <xlo|xhi|ylo|yhi|zlo|zhi> <lj93|harmonic> eps sigma cutoff pos_start [pos_stop]
+            if (params.walls.n >= kMaxWalls) a.fail("at most " + std::to_string(kMaxWalls) + " walls");
+            const std::string face = a.str("face");
+            static const char* faces[] = {"xlo", "xhi", "ylo", "yhi", "zlo", "zhi"};
+            int fi = -1;
+            for (int k = 0; k < 6; k++) if (face == faces[k]) fi = k;
+            if (fi < 0) a.fail("face must be xlo, xhi, ylo, yhi, zlo or zhi");
+            for (int k = 0; k < params.walls.n; k++)
+                if (params.walls.w[k].axis * 2 + params.walls.w[k].side == fi) a.fail("wall " + face + " given twice");
+            const std::string style = a.str("style");
+            if (style != "lj93" && style != "harmonic") a.fail("style must be lj93 or harmonic");
+            WallSpec w{};
+            w.axis = fi / 2;
+            w.side = fi % 2;
+            w.style = style == "lj93" ? 0 : 1;
+            w.eps = (float)a.nonneg("eps");
+            w.sigma = (float)a.positive("sigma");
+            w.cutoff = (float)a.positive("cutoff");
+            w.pos_start = (float)a.real("pos_start");
+            w.pos_stop = a.more() ? (float)a.real("pos_stop") : w.pos_start;
+            if (w.style == 0) {   // energy shift so that E(cutoff) = 0
+                double sr = w.sigma / w.cutoff, sr3 = sr * sr * sr;
+                w.e_shift = (float)(w.eps * (2.0 / 15.0 * sr3 * sr3 * sr3 - sr3));
+            }
+            params.walls.w[params.walls.n++] = w;
         } else if (key == "pair_soft") {
             params.pair_soft = 1;
             params.soft_A_start = (float)a.nonneg("A_start");
@@ -613,6 +639,16 @@ void validate_system(const SimParams& params, const TopologyData& topo) {
         throw std::runtime_error("coulomb ewald/pme requires a cubic box (box is " +
                                  std::to_string(topo.box.x) + " x " + std::to_string(topo.box.y) +
                                  " x " + std::to_string(topo.box.z) + ")");
+    const float Lax[3] = {topo.box.x, topo.box.y, topo.box.z};
+    for (int k = 0; k < params.walls.n; k++) {
+        const WallSpec& w = params.walls.w[k];
+        for (float z : {w.pos_start, w.pos_stop})
+            if (z < 0.0f || z > Lax[w.axis])
+                throw std::runtime_error("wall position " + std::to_string(z) + " outside [0, " +
+                                         std::to_string(Lax[w.axis]) + "] (measured from the lower box edge)");
+    }
+    if (params.walls.n > 0 && params.ensemble == Ensemble::NPT_NH)
+        throw std::runtime_error("walls cannot be combined with npt_nh");
     if (params.dump_freq > 0 && !cubic)
         throw std::runtime_error("dump_freq (legacy trajectory format) requires a cubic box; use traj");
 

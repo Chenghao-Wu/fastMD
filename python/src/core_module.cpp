@@ -128,6 +128,9 @@ an orthorhombic box the unwrapped coordinates are
                                [](const Engine& e) { return as_array(e.per_atom_energy(), 1); })
         .def_property_readonly("types", [](const Engine& e) { return as_array(e.types(), 1); })
         .def_property_readonly("charges", [](const Engine& e) { return as_array(e.charges(), 1); })
+        .def_property_readonly("nwalls", &Engine::nwalls, "Number of active walls.")
+        .def("remove_walls", &Engine::remove_walls,
+             "Remove all walls (e.g. release a film after confined preparation).")
         .def("thermo", &Engine::thermo,
              "Kinetic and potential energy, temperature and pressure tensor of the current state.");
 }

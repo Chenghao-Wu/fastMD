@@ -65,6 +65,9 @@ public:
     // reset to 0 unless given, [3 N]) and recompute the neighbor list and forces.
     void set_positions(const std::vector<float3>& xyz, const std::vector<int>* images = nullptr);
     void set_velocities(const std::vector<float3>& v);
+    // Replace the walls (e.g. remove them after confined preparation).
+    void set_walls(const WallSet& walls);
+    const WallSet& walls() const { return params_.walls; }
     // Kinetic/potential energy, temperature and pressure tensor (xx xy xz yy
     // yz zz) of the current state.
     ThermoOutput thermo();
@@ -148,7 +151,12 @@ private:
         int   max_dr2_bits = 0;
         float V = 0.0f;
         Box   box = cubic_box(1.0f);
+        int   wall_error = 0;   // k + 1: a particle reached wall k's plane
     };
+    // device counter of the current step (ramps), owned by the active integrator
+    const int* current_step_ptr() const {
+        return is_nose_hoover(params_.ensemble) ? &d_nh_state_->step : d_step_;
+    }
     DeviceStatus* d_status_ = nullptr;
     DeviceStatus* h_status_ = nullptr;   // pinned
     int* d_step_ = nullptr;              // device step counter (Langevin; NH keeps its own)

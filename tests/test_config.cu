@@ -80,6 +80,10 @@ TEST(Config, RejectsUnknownAndDuplicateKeys) {
     expect_reject("pair_shift_bad", std::string(kBase) + "pair_shift maybe\n", "yes");
     expect_reject("two_angle_styles", std::string(kBase) + "lj 0 0 1 1\nangle_type 0 3 180\n"
                   "angle_cosine 0 1.5\n", "only one angle style");
+    expect_reject("wall_face", std::string(kBase) + "wall top lj93 1 1 2.5 0\n", "face must be");
+    expect_reject("wall_twice", std::string(kBase) + "wall zlo lj93 1 1 2.5 0\nwall zlo harmonic 1 1 1 0\n",
+                  "given twice");
+    expect_reject("wall_style", std::string(kBase) + "wall zlo soft 1 1 2.5 0\n", "lj93 or harmonic");
     expect_reject("stress_pm", std::string(kBase) + "stress 1 10 s.dat 16 3\n", "multiple of m");
     expect_reject("dup_lj", std::string(kBase) + "lj 0 0 1 1\nlj 0 0 2 1\n", "given twice");
 }

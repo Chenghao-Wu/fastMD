@@ -88,6 +88,9 @@ void Engine::set_velocities(const std::vector<float>& v) {
     sim_->set_velocities(float3_of(v, natoms(), "set_velocities"));
 }
 
+int Engine::nwalls() const { return sim_->walls().n; }
+void Engine::remove_walls() { sim_->set_walls(WallSet{}); }
+
 Thermo Engine::thermo() {
     ThermoOutput t = sim_->thermo();   // energies per atom
     Thermo out;

@@ -54,6 +54,7 @@ add_fastmd_test(test_dihedral_opls)
 add_fastmd_test(test_bonded_gather)
 add_fastmd_test(test_ewald)
 add_fastmd_test(test_pme)
+add_fastmd_test(test_wall)
 add_fastmd_test(test_simulation)
 
 # Python interface (built with -DFASTMD_BUILD_PYTHON=ON; needs numpy)

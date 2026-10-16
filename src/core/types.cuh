@@ -49,6 +49,23 @@ inline bool is_nose_hoover(Ensemble e) { return e == Ensemble::NVT_NH || e == En
 // xx yy zz xy xz yz (see analysis/thermo.cu).
 enum VirialIndex { VXX = 0, VXY = 1, VXZ = 2, VYY = 3, VYZ = 4, VZZ = 5 };
 
+// Planar wall acting on one coordinate (axis 0/1/2 = x/y/z). side 0 (lo)
+// pushes towards +axis, side 1 (hi) towards -axis. The plane position is
+// measured from the lower box edge and ramps linearly from pos_start to
+// pos_stop over the run. r is the distance of a particle from the plane,
+// on the side it acts on; for r < cutoff:
+//   style 0 (lj93):     E = eps [(2/15)(sigma/r)^9 - (sigma/r)^3] - E(cutoff)
+//   style 1 (harmonic): E = eps (r - cutoff)^2
+struct WallSpec {
+    int   axis, side, style;
+    float eps, sigma, cutoff, pos_start, pos_stop, e_shift;
+};
+static constexpr int kMaxWalls = 6;
+struct WallSet {
+    int n = 0;
+    WallSpec w[kMaxWalls];
+};
+
 struct SimParams {
     float3 box_L3;     // box edge lengths (Lx, Ly, Lz) from the data file
     float rc;
@@ -88,6 +105,7 @@ struct SimParams {
     int   traj_mode = 0;        // 0 off, 1 linear, 2 log-periodic
     int   traj_every = 0;       // linear interval / log block length (steps)
     float traj_base = 2.0f;     // log: frames at block offsets round(base^j)
+    WallSet walls;              // planar walls (film preparation)
 
     // Nosé-Hoover
     Ensemble ensemble = Ensemble::Langevin;

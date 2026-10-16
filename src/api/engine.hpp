@@ -58,6 +58,8 @@ public:
     void set_velocities(const std::vector<float>& v);
 
     Thermo thermo();   // energies, temperature and pressure tensor now
+    int  nwalls() const;
+    void remove_walls();
 
 private:
     explicit Engine(std::unique_ptr<Simulation> sim);

@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <random>
 #include <sstream>
 #include <array>
@@ -94,7 +95,8 @@ void replicate(TopologyData& t, int nx, int ny, int nz) {
 
 std::unique_ptr<Simulation> make_sim(const std::string& data, const std::string& extra, int nsteps,
                                      const std::string& ensemble = "nvt_nh 1.0 1.0 0.5 3",
-                                     int3 copies = make_int3(1, 1, 1)) {
+                                     int3 copies = make_int3(1, 1, 1),
+                                     std::function<void(TopologyData&)> edit = nullptr) {
     std::string conf = "sim_test_" + std::to_string(std::hash<std::string>{}(extra + ensemble)) + ".conf";
     std::ofstream(conf) << "ntypes 1\nrc 2.5\nskin 0.3\ndt 0.004\nnsteps " << nsteps << "\n"
                         << ensemble << "\nlj 0 0 1.0 1.0\nbond_type 0 30.0 1.5 1.0 1.0\n"
@@ -103,6 +105,7 @@ std::unique_ptr<Simulation> make_sim(const std::string& data, const std::string&
     SimParams p = parse_config(conf, topo);
     parse_lammps_data(topo.data_file, topo);
     if (copies.x * copies.y * copies.z > 1) replicate(topo, copies.x, copies.y, copies.z);
+    if (edit) edit(topo);
     p.natoms = (int)topo.positions.size();
     p.box_L3 = topo.box;
     validate_system(p, topo);
@@ -274,4 +277,38 @@ TEST(Simulation, NPTKeepsOrthorhombicAspectRatio) {
     EXPECT_NE(b1.L.x, b0.L.x) << "barostat did not act";
     EXPECT_NEAR(b1.L.x / b1.L.y, 2.0, 1e-5);
     EXPECT_NEAR(b1.L.z / b1.L.y, 1.0, 1e-5);
+}
+
+// Walls along z confine a slab placed in a taller box; a moving wall
+// compresses it; a wall plane through the system is an error.
+TEST(Simulation, WallsConfineAndCompress) {
+    std::string data = write_melt("sim_wall.data", 12, 20, 0.85f, 41);
+    const float margin = 3.0f;
+    auto lift = [&](TopologyData& t) {   // snake-lattice chains do not cross the z boundary
+        for (auto& p : t.positions) p.z += margin;
+        t.box.z += 2.0f * margin;
+    };
+    TopologyData probe;
+    parse_lammps_data(data, probe);
+    const float L = probe.box.z, top = L + 2.0f * margin;
+    std::ostringstream walls;
+    walls << "wall zlo lj93 1.0 1.0 2.5 " << margin - 1.0f << "\n"
+          << "wall zhi lj93 1.0 1.0 2.5 " << top - margin + 1.0f << " " << top - margin - 1.5f << "\n";
+    auto sim = make_sim(data, walls.str(), 2000, "nvt_langevin 1.0 1.0 1.0 3", make_int3(1, 1, 1), lift);
+    sim->run(2000);
+    std::vector<float4> pos = sim->positions();
+    float zmin = 1e9f, zmax = -1e9f;
+    for (auto& p : pos) { zmin = std::min(zmin, p.z); zmax = std::max(zmax, p.z); }
+    EXPECT_GT(zmin, margin - 1.0f);
+    EXPECT_LT(zmax, top - margin - 1.5f) << "the moving wall compressed the slab";
+    EXPECT_LT(zmax - zmin, L + 0.5f);
+    // remove the walls: the slab may now expand into the vacuum
+    sim->set_walls(WallSet{});
+    sim->run(200);
+    EXPECT_EQ(sim->walls().n, 0);
+
+    std::ostringstream bad;
+    bad << "wall zhi harmonic 1.0 1.0 1.0 " << margin + 0.5f * L << "\n";
+    auto broken = make_sim(data, bad.str(), 10, "nvt_langevin 1.0 1.0 1.0 3", make_int3(1, 1, 1), lift);
+    EXPECT_THROW(broken->run(10), std::runtime_error);
 }

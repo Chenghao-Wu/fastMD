@@ -3,6 +3,7 @@
 #include "../neighbor/skin_trigger.cuh"
 #include "../force/lj.cuh"
 #include "../force/soft.cuh"
+#include "../force/wall.cuh"
 #include "../force/lj_coul_long.cuh"
 #include "../force/ewald_recip.cuh"
 #include "../force/ewald_excl.cuh"
@@ -248,6 +249,7 @@ void Simulation::print_setup() const {
     if (!topo_.bonds.empty()) printf("  bonds=%zu", topo_.bonds.size());
     if (!topo_.angles.empty()) printf("  angles=%zu", topo_.angles.size());
     if (!topo_.dihedrals.empty()) printf("  dihedrals=%zu", topo_.dihedrals.size());
+    if (params_.walls.n > 0) printf("  walls=%d", params_.walls.n);
     printf("\n");
     if (params_.ewald_on) {
         if (params_.kspace == 1)
@@ -337,6 +339,13 @@ void Simulation::read_status() {
 // checkpoint (the Langevin noise depends only on seed, tag and step, so the
 // re-run is the same trajectory up to floating-point summation order).
 bool Simulation::validate() {
+    if (params_.walls.n > 0) {
+        read_status();
+        if (h_status_->wall_error)
+            throw std::runtime_error("a particle reached the plane of wall " +
+                                     std::to_string(h_status_->wall_error - 1) +
+                                     " (walls must not move through the system)");
+    }
     verlet_.read_state(stream_);
     const DeviceNeighborState& st = *verlet_.h_state;
     if (!st.grid_error && !st.overflow) return true;
@@ -394,6 +403,9 @@ void Simulation::launch_forces(bool ev) {
     // The smaller kernels below always add energies/virial (harmless when
     // ev is false: neither is read then).
     launch_pair_kernel(pair_tpa_, ev);
+    if (params_.walls.n > 0)
+        launch_wall_kernel(p_.pos, p_.force, n, params_.walls, current_step_ptr(), params_.nsteps,
+                           &d_status_->wall_error, st, ev);
     if (params_.ewald_on) {
         if (params_.kspace == 1) {
             pme_.compute(p_.pos, p_.charge, p_.force, d_virial_, d_box, st);
@@ -458,11 +470,9 @@ void Simulation::launch_forces(bool ev) {
 void Simulation::launch_pair_kernel(int tpa, bool ev) {
     const int n = params_.natoms;
     if (params_.pair_soft) {
-        // the ramp reads the step counter of the active integrator
-        const int* d_cur_step = is_nose_hoover(params_.ensemble) ? &d_nh_state_->step : d_step_;
         launch_soft_kernel(p_.pos, p_.force, d_virial_, verlet_.neighbors, verlet_.num_neighbors,
                            n, params_.rc, params_.soft_A_start, params_.soft_A_stop,
-                           params_.nsteps, d_cur_step, box_, stream_, tpa,
+                           params_.nsteps, current_step_ptr(), box_, stream_, tpa,
                            &d_status_->box, ev);
     } else if (params_.ewald_on)
         launch_lj_coul_long_kernel(p_.pos, p_.charge, p_.force, d_virial_, d_lj_params_,
@@ -917,6 +927,17 @@ void Simulation::set_velocities(const std::vector<float3>& v) {
     std::vector<float4> vel(n);
     for (int t = 0; t < n; t++) vel[t] = make_float4(v[t].x, v[t].y, v[t].z, 0.0f);
     p_.set_velocities(vel);
+}
+
+void Simulation::set_walls(const WallSet& walls) {
+    if (walls.n > 0 && params_.ensemble == Ensemble::NPT_NH)
+        throw std::invalid_argument("walls cannot be combined with npt_nh");
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+    params_.walls = walls;
+    invalidate_graphs();   // the wall set is a kernel argument of the captured steps
+    CUDA_CHECK(cudaMemsetAsync(&d_status_->wall_error, 0, sizeof(int), stream_));
+    launch_forces(true);
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
 }
 
 ThermoOutput Simulation::thermo() {
