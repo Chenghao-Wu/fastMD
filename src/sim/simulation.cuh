@@ -16,6 +16,7 @@
 #include "../analysis/rg.cuh"
 #include "../io/dump.cuh"
 #include "../io/config.hpp"
+#include "../io/trajectory.hpp"
 #include <chrono>
 #include <string>
 #include <vector>
@@ -176,6 +177,10 @@ private:
     ThermoBuffers thermo_bufs_;
     RgBuffers rg_bufs_;
     BinaryDumper dumper_;
+    TrajectorySchedule traj_sched_;
+    TrajectoryWriter traj_;
+    long long last_traj_step_ = -1;
+    void write_traj_frame_if_due();
     float4* d_out4_ = nullptr;           // tag-ordered scratch for output
 
     // All device work is ordered on one stream; host waits only for the

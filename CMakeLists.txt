@@ -103,6 +103,7 @@ add_library(core STATIC
     src/io/config.cpp
     src/io/lammps_data.cpp
     src/io/table_parser.cpp
+    src/io/trajectory.cpp
     src/sim/simulation.cu
 )
 target_include_directories(core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -130,7 +131,11 @@ if(FASTMD_BUILD_PYTHON)
     set_target_properties(_core PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
         LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/python/fastmd)
-    configure_file(python/fastmd/__init__.py ${CMAKE_BINARY_DIR}/python/fastmd/__init__.py COPYONLY)
+    file(GLOB _fastmd_py CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/python/fastmd/*.py)
+    foreach(_py ${_fastmd_py})
+        get_filename_component(_name ${_py} NAME)
+        configure_file(${_py} ${CMAKE_BINARY_DIR}/python/fastmd/${_name} COPYONLY)
+    endforeach()
 endif()
 
 if(FASTMD_BUILD_TESTS)

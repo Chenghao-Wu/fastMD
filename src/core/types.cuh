@@ -83,6 +83,10 @@ struct SimParams {
 
     char  forces_dump_file[256];
     char  dump_file[256];       // binary trajectory (default traj.bin)
+    char  traj_file[256];       // trajectory v2 (positions + images), see io/trajectory.hpp
+    int   traj_mode = 0;        // 0 off, 1 linear, 2 log-periodic
+    int   traj_every = 0;       // linear interval / log block length (steps)
+    float traj_base = 2.0f;     // log: frames at block offsets round(base^j)
 
     // Nosé-Hoover
     Ensemble ensemble = Ensemble::Langevin;

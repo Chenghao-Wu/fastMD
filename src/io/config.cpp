@@ -338,6 +338,28 @@ SimParams parse_config(std::istream& in, const std::string& filename, TopologyDa
             long n = a.integer("N");
             if (n < 0) a.fail("<N> must be >= 0 (0 = rebuild only when needed)");
             params.neigh_max_age = (int)n;
+        } else if (key == "traj") {
+            // traj <file> linear <N> | traj <file> log <block> [base]
+            copy_path(params.traj_file, a.str("file"), a);
+            std::string mode = a.str("linear|log");
+            if (mode == "linear") {
+                long n = a.integer("N");
+                if (n < 1) a.fail("<N> must be >= 1");
+                params.traj_mode = 1;
+                params.traj_every = (int)n;
+            } else if (mode == "log") {
+                long b = a.integer("block");
+                if (b < 1) a.fail("<block> must be >= 1");
+                params.traj_mode = 2;
+                params.traj_every = (int)b;
+                if (a.more()) {
+                    double base = a.real("base");
+                    if (!(base > 1.0)) a.fail("<base> must be > 1");
+                    params.traj_base = (float)base;
+                }
+            } else {
+                a.fail("expected 'linear' or 'log'");
+            }
         } else if (key == "dump_file") {
             copy_path(params.dump_file, a.str("path"), a);
         } else if (key == "forces_dump_file") {

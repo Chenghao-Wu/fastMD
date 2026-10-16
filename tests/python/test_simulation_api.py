@@ -168,6 +168,24 @@ class SimulationAPITest(unittest.TestCase):
         sim.run(10)   # thermostat restarts from rest without blowing up
         self.assertTrue(np.all(np.isfinite(sim.positions)))
 
+    def test_trajectory_round_trip(self):
+        from fastmd.trajectory import Trajectory
+        path = os.path.join(self.tmp, "api.fmd")
+        sim = fastmd.Simulation.from_text(self.config() + f"traj {path} linear 25\n")
+        sim.run(100)
+        x, im, L = sim.positions, sim.images, sim.box_length
+        del sim
+        traj = Trajectory(path)
+        self.assertEqual(list(traj.steps), [0, 25, 50, 75, 100])
+        self.assertEqual(traj.natoms, self.natoms)
+        np.testing.assert_array_equal(traj.positions(4), x)
+        np.testing.assert_array_equal(traj.images(4), im)
+        self.assertEqual(traj.box(4)[0], np.float64(np.float32(L)))
+        self.assertEqual(len(set(traj.mol_ids)), 40)
+        # unwrapped coordinates are continuous between frames
+        for k in range(1, len(traj)):
+            self.assertLess(np.abs(traj.unwrapped(k) - traj.unwrapped(k - 1)).max(), 2.0)
+
     def test_errors(self):
         sim = self.make()
         with self.assertRaises(ValueError):

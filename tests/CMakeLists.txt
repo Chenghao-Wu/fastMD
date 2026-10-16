@@ -34,6 +34,7 @@ endfunction()
 add_fastmd_test(test_table_parser CPU)
 add_fastmd_test(test_config CPU)
 add_fastmd_test(test_lammps_data CPU)
+add_fastmd_test(test_trajectory CPU)
 
 # Device tests
 add_fastmd_test(test_pbc)

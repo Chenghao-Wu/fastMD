@@ -228,6 +228,13 @@ void Simulation::setup_analysis() {
             rg_bufs_.allocate(topo_.mol_ids, params_.rg_file);
         }
     }
+    if (params_.traj_mode != 0) {
+        if (params_.traj_mode == 1) traj_sched_.set_linear(params_.traj_every);
+        else traj_sched_.set_log(params_.traj_every, params_.traj_base);
+        std::vector<int> types(params_.natoms);
+        for (int t = 0; t < params_.natoms; t++) types[t] = unpack_type_id(topo_.positions[t].w);
+        traj_.open(params_.traj_file, types, topo_.mol_ids);
+    }
     if (params_.dump_freq > 0)
         dumper_.open(params_.dump_file[0] ? params_.dump_file : "traj.bin", params_.natoms,
                      params_.ntypes);
@@ -662,7 +669,8 @@ void Simulation::advance_one(bool want_ev) {
 }
 
 bool Simulation::output_due(int s) const {
-    return (params_.thermo_on && s % params_.thermo_freq == 0) ||
+    return traj_sched_.due(s) ||
+           (params_.thermo_on && s % params_.thermo_freq == 0) ||
            (params_.rg_on && s % params_.rg_freq == 0) ||
            (params_.dump_freq > 0 && s % params_.dump_freq == 0) ||
            (params_.restart_freq > 0 && s % params_.restart_freq == 0);
@@ -706,6 +714,7 @@ void Simulation::write_outputs() {
     bool need_dump = params_.dump_freq > 0 && s % params_.dump_freq == 0;
     bool need_restart = params_.restart_freq > 0 && s % params_.restart_freq == 0 &&
                         s != params_.nsteps;
+    write_traj_frame_if_due();
     if (!(need_thermo || need_rg || need_dump || need_restart)) return;
     // the barostat may have changed the box during the post-force half step
     read_status();
@@ -733,6 +742,17 @@ void Simulation::write_outputs() {
     }
 
     if (need_restart) write_restart(build_restart_filename(params_.restart_file, s), s);
+}
+
+// Trajectory frames are written only at validated check points (output
+// steps are check points), so a rolled-back segment never reaches the file.
+void Simulation::write_traj_frame_if_due() {
+    if (!traj_.is_open() || !traj_sched_.due(step_) || last_traj_step_ == step_) return;
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+    read_status();
+    const double box[6] = {box_L_, box_L_, box_L_, 0.0, 0.0, 0.0};
+    traj_.write_frame(step_, box, p_.download_positions(), p_.download_images());
+    last_traj_step_ = step_;
 }
 
 void Simulation::print_progress() {
@@ -780,6 +800,7 @@ void Simulation::print_progress() {
 // sort_every steps, and the configured outputs are written when due.
 void Simulation::advance(int nsteps, bool progress) {
     const int target = step_ + nsteps;
+    write_traj_frame_if_due();   // time origin of the run (e.g. step 0)
     save_checkpoint();
     while (step_ < target) {
         advance_one(output_due(step_ + 1) || step_ + 1 == target);

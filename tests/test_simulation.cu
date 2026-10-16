@@ -4,6 +4,7 @@
 #include "io/lammps_data.hpp"
 #include "sim/simulation.cuh"
 #include <cmath>
+#include <cstring>
 #include <fstream>
 #include <random>
 #include <sstream>
@@ -159,4 +160,41 @@ TEST(Simulation, NVEConservesEnergy) {
     }
     EXPECT_LT(worst, 2e-3 * std::fabs(e0)) << "E0 per atom " << e0;
     printf("NVE: max |E - E0| per atom %.3e (E0 %.4f)\n", worst, e0);
+}
+
+// traj log-periodic frames at block offsets 0,1,2,4,...; each frame holds
+// the state of its step (checked for the final frame) in tag order.
+TEST(Simulation, TrajectoryFramesFollowScheduleAndState) {
+    std::string data = write_melt("sim_traj.data", 8, 20, 0.85f, 9);
+    auto sim = make_sim(data, "traj sim_traj.fmd log 50\n", 100);
+    sim->run(100);
+    std::vector<float4> pos = sim->positions();
+    std::vector<int> img = sim->images();
+    const double L = sim->box_length();
+    sim.reset();   // closes the file
+    std::ifstream in("sim_traj.fmd", std::ios::binary);
+    std::vector<char> b((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const size_t n = pos.size(), head = 24 + 8 * n, frame = 8 + 48 + 24 * n;
+    ASSERT_EQ((b.size() - head) % frame, 0u);
+    std::vector<long long> steps;
+    for (size_t off = head; off < b.size(); off += frame) {
+        int64_t s;
+        std::memcpy(&s, b.data() + off, 8);
+        steps.push_back(s);
+    }
+    EXPECT_EQ(steps, (std::vector<long long>{0, 1, 2, 4, 8, 16, 32, 50, 51, 52, 54, 58, 66, 82, 100}));
+    const char* last = b.data() + b.size() - frame;
+    double box[6];
+    std::memcpy(box, last + 8, 48);
+    EXPECT_EQ(box[0], L);
+    EXPECT_EQ(box[3], 0.0);
+    std::vector<float> xyz(3 * n);
+    std::vector<int32_t> im(3 * n);
+    std::memcpy(xyz.data(), last + 56, 12 * n);
+    std::memcpy(im.data(), last + 56 + 12 * n, 12 * n);
+    for (size_t t = 0; t < n; t++) {
+        EXPECT_EQ(xyz[3 * t], pos[t].x);
+        EXPECT_EQ(xyz[3 * t + 2], pos[t].z);
+        EXPECT_EQ(im[3 * t + 1], img[3 * t + 1]);
+    }
 }
