@@ -63,7 +63,7 @@ def build_lammps_in(data, rc, acc, pj, kspace='ewald'):
     return '\n'.join(lines) + '\n'
 
 
-def build_fastmd_conf(natoms, data_nm, rc_nm, alpha_nm, kmax, pj):
+def build_fastmd_conf(natoms, data_nm, rc_nm, alpha_nm, kmax, pj, coulomb=None):
     lines = [
         f"natoms {natoms}",
         f"ntypes {len(pj['atom_types'])}",
@@ -77,7 +77,7 @@ def build_fastmd_conf(natoms, data_nm, rc_nm, alpha_nm, kmax, pj):
     ]
     for i, t in enumerate(pj['atom_types']):
         lines.append(f"lj_type {i} {t['eps'] * KCAL2KJ} {t['sig'] * A2NM}")
-    lines.append(f"coulomb ewald {alpha_nm} {kmax}")
+    lines.append(coulomb or f"coulomb ewald {alpha_nm} {kmax}")
     for i, b in enumerate(pj['bond_types']):
         lines.append(f"bond_harmonic {i} {b['K'] * KCAL2KJ * 100.0} {b['r0'] * A2NM}")
     for i, a in enumerate(pj.get('angle_types', [])):
@@ -91,6 +91,13 @@ def build_fastmd_conf(natoms, data_nm, rc_nm, alpha_nm, kmax, pj):
         "forces_dump_file forces_fastmd.dat",
     ]
     return '\n'.join(lines) + '\n'
+
+
+def _fft_friendly(n):
+    for p in (2, 3, 5, 7):
+        while n % p == 0:
+            n //= p
+    return n == 1
 
 
 def convert_data_nm(src, dst):
@@ -129,6 +136,11 @@ def main():
     ap.add_argument('--rc', type=float, default=10.0)
     ap.add_argument('--ewald_acc', type=float, default=1e-4)
     ap.add_argument('--kmax', type=int, default=5)
+    ap.add_argument('--fastmd-kspace', choices=['ewald', 'pme'], default='ewald',
+                    help='fastMD reciprocal solver (alpha always matches LAMMPS)')
+    ap.add_argument('--pme-tol', type=float, default=1e-5,
+                    help='relative force tolerance used to size the PME grid')
+    ap.add_argument('--pme-order', type=int, default=5)
     ap.add_argument('--gpu', action='store_true',
                     help='run LAMMPS with -sf gpu (GPU pair style; ewald '
                          'kspace stays on CPU, matching fastMD direct Ewald)')
@@ -176,10 +188,24 @@ def main():
     alpha_nm = alpha_A * 10.0
     print("LAMMPS gewald = %.6f 1/A (%.6f 1/nm)" % (alpha_A, alpha_nm))
 
+    coulomb = None
+    if args.fastmd_kspace == 'pme':
+        L_nm = None
+        with open(data_nm) as f:
+            for line in f:
+                p = line.split()
+                if len(p) == 4 and p[2] == 'xlo':
+                    L_nm = float(p[1]) - float(p[0])
+        K = math.ceil(2 * alpha_nm * L_nm / (3 * args.pme_tol ** 0.2))
+        while not _fft_friendly(K):
+            K += 1
+        coulomb = f"coulomb pme {alpha_nm} {K} {args.pme_order}"
+        print("fastMD PME grid %d^3 order %d (tolerance %.0e)" % (K, args.pme_order, args.pme_tol))
+
     conf_path = os.path.join(args.workdir, 'fastmd_opls.conf')
     with open(conf_path, 'w') as f:
         f.write(build_fastmd_conf(natoms, data_nm, args.rc * A2NM,
-                                  alpha_nm, args.kmax, pj))
+                                  alpha_nm, args.kmax, pj, coulomb))
 
     r = subprocess.run([args.fastmd, os.path.basename(conf_path)],
                        cwd=args.workdir, capture_output=True, text=True)

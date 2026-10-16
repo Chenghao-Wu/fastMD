@@ -8,6 +8,7 @@
 #include "../force/bond_harmonic.cuh"
 #include "../force/dihedral_opls.cuh"
 #include "../force/bonded_gather.cuh"
+#include "../force/pme.cuh"
 #include "../integrate/langevin.cuh"
 #include "../integrate/nose_hoover.cuh"
 #include "../analysis/thermo.cuh"
@@ -100,6 +101,7 @@ private:
     int*         d_angle_table_idx_ = nullptr;
     TableParams* d_angle_table_params_ = nullptr;
     float4*      d_angle_table_data_ = nullptr;
+    PME    pme_;
     int3*  d_ewald_kvecs_ = nullptr;
     float* d_ewald_sfac_ = nullptr;
     double* d_virial_ = nullptr;         // [6] xx xy xz yy yz zz

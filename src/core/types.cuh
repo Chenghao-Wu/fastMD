@@ -78,6 +78,7 @@ struct SimParams {
     char  rg_file[256];
 
     char  forces_dump_file[256];
+    char  dump_file[256];       // binary trajectory (default traj.bin)
 
     // Nosé-Hoover
     Ensemble ensemble = Ensemble::Langevin;
@@ -89,10 +90,16 @@ struct SimParams {
     float Pdamp   = 0.0f;
     int   nh_chain_length = 3;
 
-    // Ewald / OPLS Coulomb
+    // Ewald / OPLS Coulomb. ewald_on: any long-range Coulomb; kspace selects
+    // the reciprocal solver. ewald_tol > 0: alpha and kmax / grid are chosen
+    // at setup for that relative RMS force error.
     int   ewald_on   = 0;
+    int   kspace     = 0;             // 0 direct Ewald, 1 PME
     float ewald_alpha = 0.0f;
     int   ewald_kmax = 0;
+    float ewald_tol  = 0.0f;
+    int   pme_grid   = 0;
+    int   pme_order  = 5;
     float coul_const = 138.9354576f;  // e^2/(4 pi eps0) N_A in kJ*nm/(mol e^2)
     float ewald14_coul = 0.5f;        // OPLS 1-4 scaling
     float lj14 = 0.5f;

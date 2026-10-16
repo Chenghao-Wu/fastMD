@@ -169,11 +169,27 @@ void Simulation::upload_force_field() {
     if (params_.ewald_on) {
         if (topo_.charges.empty())
             throw std::runtime_error("coulomb ewald requires charges (Atoms # full)");
-        std::vector<int3> kvecs = ewald_build_kvectors(params_.ewald_kmax, box_L_,
-                                                       params_.ewald_alpha);
-        params_.ewald_kcount = (int)kvecs.size();
-        d_ewald_kvecs_ = upload_vec(kvecs);
-        CUDA_CHECK(cudaMalloc(&d_ewald_sfac_, 2 * kvecs.size() * sizeof(float)));
+        if (params_.ewald_tol > 0.0f) {
+            // relative RMS force error target -> alpha and kmax / grid
+            params_.ewald_alpha = ewald_alpha_for_tolerance(params_.ewald_tol, params_.rc);
+            if (params_.kspace == 1)
+                params_.pme_grid = pme_grid_for_tolerance(params_.ewald_tol, params_.ewald_alpha, box_L_);
+            else
+                params_.ewald_kmax = ewald_kmax_for_tolerance(params_.ewald_tol, params_.ewald_alpha, box_L_);
+        }
+        if (params_.kspace == 1) {
+            pme_.allocate(params_.natoms, params_.pme_grid, params_.pme_order,
+                          params_.ewald_alpha, params_.coul_const);
+        } else {
+            if (params_.ewald_kmax > 64)
+                throw std::runtime_error("direct Ewald needs kmax " + std::to_string(params_.ewald_kmax) +
+                                         " > 64 for this tolerance and box; use 'coulomb pme'");
+            std::vector<int3> kvecs = ewald_build_kvectors(params_.ewald_kmax, box_L_,
+                                                           params_.ewald_alpha);
+            params_.ewald_kcount = (int)kvecs.size();
+            d_ewald_kvecs_ = upload_vec(kvecs);
+            CUDA_CHECK(cudaMalloc(&d_ewald_sfac_, 2 * kvecs.size() * sizeof(float)));
+        }
         params_.ewald_self_offset = ewald_self_offset(topo_.charges, params_.coul_const,
                                                       params_.ewald_alpha, box_L_);
     }
@@ -208,7 +224,9 @@ void Simulation::setup_analysis() {
             rg_bufs_.allocate(topo_.mol_ids, params_.rg_file);
         }
     }
-    dumper_.open("traj.bin", params_.natoms, params_.ntypes);
+    if (params_.dump_freq > 0)
+        dumper_.open(params_.dump_file[0] ? params_.dump_file : "traj.bin", params_.natoms,
+                     params_.ntypes);
 }
 
 void Simulation::print_setup() const {
@@ -219,11 +237,15 @@ void Simulation::print_setup() const {
     if (!topo_.dihedrals.empty()) printf("  dihedrals=%zu", topo_.dihedrals.size());
     printf("\n");
     if (params_.ewald_on) {
-        printf("[setup]  coulomb=ewald  alpha=%.4f  kmax=%d  kcount=%d  coul_const=%.4f  "
-               "lj14=%.2f  coul14=%.2f  self-energy=%.4f\n",
-               params_.ewald_alpha, params_.ewald_kmax, params_.ewald_kcount,
-               params_.coul_const, params_.lj14, params_.ewald14_coul,
-               params_.ewald_self_offset);
+        if (params_.kspace == 1)
+            printf("[setup]  coulomb=pme  alpha=%.4f  grid=%d^3  order=%d", params_.ewald_alpha,
+                   params_.pme_grid, params_.pme_order);
+        else
+            printf("[setup]  coulomb=ewald  alpha=%.4f  kmax=%d  kcount=%d", params_.ewald_alpha,
+                   params_.ewald_kmax, params_.ewald_kcount);
+        if (params_.ewald_tol > 0.0f) printf("  (auto, tolerance %.1e)", params_.ewald_tol);
+        printf("  coul_const=%.4f  lj14=%.2f  coul14=%.2f  self-energy=%.4f\n",
+               params_.coul_const, params_.lj14, params_.ewald14_coul, params_.ewald_self_offset);
     }
     if (params_.ensemble != Ensemble::Langevin) {
         printf("[setup]  ensemble=%s  T_start=%.2f  T_stop=%.2f  Tdamp=%.2f  chain=%d",
@@ -357,11 +379,15 @@ void Simulation::launch_forces() {
     // Nonbonded kernels overwrite force[i] (=), everything after accumulates.
     launch_pair_kernel(pair_tpa_);
     if (params_.ewald_on) {
-        launch_ewald_sf_kernel(p_.pos, p_.charge, d_ewald_kvecs_, d_ewald_sfac_,
-                               n, params_.ewald_kcount, L, st, d_box);
-        launch_ewald_recip_kernel(p_.pos, p_.charge, d_ewald_kvecs_, d_ewald_sfac_,
-                                  p_.force, d_virial_, n, params_.ewald_kcount,
-                                  params_.coul_const, params_.ewald_alpha, L, st, d_box);
+        if (params_.kspace == 1) {
+            pme_.compute(p_.pos, p_.charge, p_.force, d_virial_, d_box, st);
+        } else {
+            launch_ewald_sf_kernel(p_.pos, p_.charge, d_ewald_kvecs_, d_ewald_sfac_,
+                                   n, params_.ewald_kcount, L, st, d_box);
+            launch_ewald_recip_kernel(p_.pos, p_.charge, d_ewald_kvecs_, d_ewald_sfac_,
+                                      p_.force, d_virial_, n, params_.ewald_kcount,
+                                      params_.coul_const, params_.ewald_alpha, L, st, d_box);
+        }
         launch_ewald_excl_kernel(p_.pos, p_.charge, p_.force, d_virial_,
                                  t_.excl13_offsets, t_.excl13_list, p_.rank,
                                  n, t_.nexcl13, params_.coul_const, params_.ewald_alpha,
@@ -787,7 +813,7 @@ void Simulation::finish() {
 
 Simulation::~Simulation() {
     cudaDeviceSynchronize();
-    dumper_.close();
+    if (params_.dump_freq > 0) dumper_.close();
     thermo_bufs_.close_file();
     thermo_bufs_.free();
     if (params_.rg_on) rg_bufs_.free();
@@ -819,6 +845,7 @@ Simulation::~Simulation() {
     free_dev(d_angle_table_idx_);
     free_dev(d_angle_table_params_);
     free_dev(d_angle_table_data_);
+    if (params_.ewald_on && params_.kspace == 1) pme_.free();
     free_dev(d_ewald_kvecs_);
     free_dev(d_ewald_sfac_);
     free_dev(d_virial_);

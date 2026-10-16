@@ -1,4 +1,6 @@
 #include "dump.cuh"
+#include <stdexcept>
+#include <string>
 
 __global__ void pack_float3(float3* __restrict__ dst,
                              const float4* __restrict__ src, int n) {
@@ -21,6 +23,7 @@ void BinaryDumper::open(const char* filename, int natoms_in, int ntypes) {
     CUDA_CHECK(cudaMalloc(&d_temp, natoms * sizeof(float3)));
 
     fp = fopen(filename, "wb");
+    if (!fp) throw std::runtime_error(std::string("cannot open trajectory file ") + filename);
     int32_t magic = 0x4D444247;
     fwrite(&magic, sizeof(int32_t), 1, fp);
     fwrite(&natoms, sizeof(int32_t), 1, fp);

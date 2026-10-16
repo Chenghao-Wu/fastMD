@@ -24,6 +24,7 @@ public:
     [[noreturn]] void fail(const std::string& msg) const {
         throw std::runtime_error(file_ + ":" + std::to_string(line_) + ": '" + key() + "': " + msg);
     }
+    const std::string& peek() const { return tok_[pos_]; }
     std::string str(const char* what) {
         if (!more()) fail(std::string("missing argument <") + what + ">");
         return tok_[pos_++];
@@ -211,13 +212,29 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
         } else if (key == "lj_force_cap") {
             params.lj_force_cap = (float)a.positive("F_max");
         } else if (key == "coulomb") {
+            // coulomb ewald <alpha> <kmax> | coulomb ewald auto <tol>
+            // coulomb pme <alpha> <grid> [order] | coulomb pme auto <tol> [order]
             std::string style = a.str("style");
-            if (style != "ewald") a.fail("unknown style '" + style + "' (supported: ewald)");
+            if (style != "ewald" && style != "pme")
+                a.fail("unknown style '" + style + "' (supported: ewald, pme)");
             params.ewald_on = 1;
-            params.ewald_alpha = (float)a.positive("alpha");
-            long kmax = a.integer("kmax");
-            if (kmax < 1 || kmax > 64) a.fail("<kmax> must be in [1, 64]");
-            params.ewald_kmax = (int)kmax;
+            params.kspace = style == "pme" ? 1 : 0;
+            if (a.more() && a.peek() == "auto") {
+                a.str("auto");
+                params.ewald_tol = (float)a.positive("tolerance");
+                if (params.ewald_tol >= 0.1f) a.fail("<tolerance> must be < 0.1");
+            } else {
+                params.ewald_alpha = (float)a.positive("alpha");
+                long k = a.integer(style == "pme" ? "grid" : "kmax");
+                if (style == "ewald" && (k < 1 || k > 64)) a.fail("<kmax> must be in [1, 64]");
+                if (style == "pme" && (k < 8 || k > 1024)) a.fail("<grid> must be in [8, 1024]");
+                if (style == "pme") params.pme_grid = (int)k; else params.ewald_kmax = (int)k;
+            }
+            if (style == "pme" && a.more()) {
+                long order = a.integer("order");
+                if (order < 3 || order > 8) a.fail("<order> must be in [3, 8]");
+                params.pme_order = (int)order;
+            }
         } else if (key == "coulomb_const") {
             params.coul_const = (float)a.positive("C");
         } else if (key == "special_bonds_14") {
@@ -295,6 +312,8 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
             long n = a.integer("N");
             if (n < 0) a.fail("<N> must be >= 0 (0 = rebuild only when needed)");
             params.neigh_max_age = (int)n;
+        } else if (key == "dump_file") {
+            copy_path(params.dump_file, a.str("path"), a);
         } else if (key == "forces_dump_file") {
             copy_path(params.forces_dump_file, a.str("path"), a);
         } else if (key == "temperature" || key == "gamma" || key == "seed") {

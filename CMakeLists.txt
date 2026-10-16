@@ -77,6 +77,7 @@ add_library(core STATIC
     src/force/lj_coul_long.cu
     src/force/ewald_recip.cu
     src/force/ewald_excl.cu
+    src/force/pme.cu
     src/force/bond_harmonic.cu
     src/force/dihedral_opls.cu
     src/force/table.cu
@@ -99,7 +100,7 @@ add_library(core STATIC
 target_include_directories(core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 # PUBLIC so host-only translation units (config.cpp, lammps_data.cpp) and
 # every consumer get the CUDA include path and runtime.
-target_link_libraries(core PUBLIC CUDA::cudart CUDA::curand)
+target_link_libraries(core PUBLIC CUDA::cudart CUDA::curand CUDA::cufft)
 set_target_properties(core PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
     POSITION_INDEPENDENT_CODE ON)
