@@ -33,7 +33,8 @@ sys.path.insert(0, os.path.join(HERE, "..", "python"))
 def read_data(path):
     """Unwrapped positions, molecule ids (atom-id order) and box edge lengths
     (Lx, Ly, Lz) of a LAMMPS data file written by fastMD or the tools."""
-    lines = open(path).read().splitlines()
+    with open(path) as f:
+        lines = f.read().splitlines()
     L = np.zeros(3)
     atoms = []
     section = None
@@ -85,7 +86,8 @@ def run_stage(fmd, name, data, args, pair_lines, rc, dt, steps, workdir):
         "bond_type 0 30.0 1.5 1.0 1.0", *angles, *pair_lines,
         f"lammps_data_file {os.path.abspath(data)}", f"restart 0 {name}.data"]) + "\n"
     path = os.path.join(workdir, f"{name}.conf")
-    open(path, "w").write(conf)
+    with open(path, "w") as f:
+        f.write(conf)
     r = subprocess.run([fmd, f"{name}.conf"], cwd=workdir, capture_output=True, text=True)
     if r.returncode != 0:
         sys.exit(f"stage {name} failed:\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}")
@@ -141,7 +143,8 @@ def main():
         lines.append(f"{name:8s} " + " ".join(f"{rr[k - 1]:.3f}" for k in pick))
     text = "\n".join(lines)
     print(text)
-    open(os.path.join(args.workdir, "internal_distances.txt"), "w").write(text + "\n")
+    with open(os.path.join(args.workdir, "internal_distances.txt"), "w") as f:
+        f.write(text + "\n")
     print(f"equilibrated melt: {data}")
 
 

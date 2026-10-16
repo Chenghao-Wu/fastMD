@@ -43,7 +43,8 @@ WCA93 = (2.0 / 5.0) ** (1.0 / 6.0)   # minimum of the LJ 9-3 wall potential (sig
 def unwrap_into_tall_box(src, dst, vacuum):
     """Rewrite a LAMMPS data file with the chains unwrapped along z and a
     taller box. Returns (zlo_new_box_height, original height, z positions)."""
-    lines = open(src).read().splitlines()
+    with open(src) as f:
+        lines = f.read().splitlines()
     zlo = zhi = None
     head_end = None
     for k, line in enumerate(lines):
@@ -83,7 +84,8 @@ def unwrap_into_tall_box(src, dst, vacuum):
         tok = out[j].split()
         if len(tok) == 4 and tok[2] == "zlo":
             out[j] = f"0 {height:.8f} zlo zhi"
-    open(dst, "w").write("\n".join(out) + "\n")
+    with open(dst, "w") as f:
+        f.write("\n".join(out) + "\n")
     return height, Lz, zu + shift
 
 
@@ -96,7 +98,8 @@ def run_stage(fmd, name, data, args, extra, steps, workdir):
         f"thermo 1 {max(1, steps // 20)} thermo_{name}.dat",
         "bond_type 0 30.0 1.5 1.0 1.0", *angles, *pair, *extra,
         f"lammps_data_file {os.path.abspath(data)}", f"restart 0 {name}.data"]) + "\n"
-    open(os.path.join(workdir, f"{name}.conf"), "w").write(conf)
+    with open(os.path.join(workdir, f"{name}.conf"), "w") as f:
+        f.write(conf)
     r = subprocess.run([fmd, f"{name}.conf"], cwd=workdir, capture_output=True, text=True)
     if r.returncode != 0:
         sys.exit(f"stage {name} failed:\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}")
@@ -153,7 +156,8 @@ def main():
     lines = [f"# film {data}", f"# thickness {thick:.4f} (dividing surfaces {lo:.3f} {hi:.3f} "
              f"about the centre), plateau density {rho_bulk:.4f}", "# z-z_c  rho"]
     lines += [f"{a:.3f} {b:.5f}" for a, b in zip(zc, rho)]
-    open(os.path.join(args.workdir, "film_profile.txt"), "w").write("\n".join(lines) + "\n")
+    with open(os.path.join(args.workdir, "film_profile.txt"), "w") as f:
+        f.write("\n".join(lines) + "\n")
     print(lines[1][2:])
     print(f"film: {data}")
 
