@@ -98,6 +98,7 @@ add_library(core STATIC
     src/integrate/nose_hoover.cu
     src/analysis/thermo.cu
     src/analysis/rg.cu
+    src/analysis/film.cu
     src/analysis/correlator.cu
     src/io/dump.cu
     src/io/config.cpp

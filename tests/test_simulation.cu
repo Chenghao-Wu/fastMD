@@ -312,3 +312,22 @@ TEST(Simulation, WallsConfineAndCompress) {
     auto broken = make_sim(data, bad.str(), 10, "nvt_langevin 1.0 1.0 1.0 3", make_int3(1, 1, 1), lift);
     EXPECT_THROW(broken->run(10), std::runtime_error);
 }
+
+// The film reference plane is the mass-weighted mean unwrapped z.
+TEST(Simulation, FilmCenterTracksSlab) {
+    std::string data = write_melt("sim_film.data", 12, 20, 0.85f, 47);
+    auto lift = [](TopologyData& t) {
+        for (auto& p : t.positions) p.z += 8.0f;
+        t.box.z += 16.0f;
+    };
+    auto sim = make_sim(data, "film z\n", 1000, "nvt_langevin 1.0 1.0 1.0 9", make_int3(1, 1, 1), lift);
+    sim->run(1000);
+    std::vector<float4> pos = sim->positions();
+    std::vector<int> img = sim->images();
+    const double Lz = sim->box().L.z;
+    double sum = 0;
+    for (size_t t = 0; t < pos.size(); t++) sum += pos[t].z + img[3 * t + 2] * Lz;   // unit masses
+    EXPECT_NEAR(sim->film_center(), sum / pos.size(), 1e-4 * Lz);
+    auto plain = make_sim(data, "", 10);
+    EXPECT_THROW(plain->film_center(), std::logic_error);
+}

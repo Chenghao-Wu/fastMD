@@ -4,6 +4,7 @@
 #include "../force/lj.cuh"
 #include "../force/soft.cuh"
 #include "../force/wall.cuh"
+#include "../analysis/film.cuh"
 #include "../force/lj_coul_long.cuh"
 #include "../force/ewald_recip.cuh"
 #include "../force/ewald_excl.cuh"
@@ -76,6 +77,14 @@ Simulation::Simulation(const SimParams& params, TopologyData topo)
     h_status_->box = box_;
     h_status_->V = box_.volume();
     CUDA_CHECK(cudaMemcpy(d_status_, h_status_, sizeof(DeviceStatus), cudaMemcpyHostToDevice));
+    {
+        double mass = 0.0;
+        for (const float4& p : topo_.positions) {
+            int t = unpack_type_id(p.w);
+            mass += t < (int)topo_.masses.size() ? topo_.masses[t] : 1.0;
+        }
+        inv_total_mass_ = mass > 0.0 ? 1.0 / mass : 0.0;
+    }
     CUDA_CHECK(cudaMalloc(&d_step_, sizeof(int)));
     const int first_step = 1;
     CUDA_CHECK(cudaMemcpy(d_step_, &first_step, sizeof(int), cudaMemcpyHostToDevice));
@@ -96,6 +105,7 @@ Simulation::Simulation(const SimParams& params, TopologyData topo)
     if (d_nh_state_) CUDA_CHECK(cudaMalloc(&d_ckpt_nh_, sizeof(NoseHooverDeviceState)));
 
     rebuild_neighbors(params_.sort_every > 0);
+    launch_film_center();   // valid before the first step (depth-dependent friction)
     tune_pair_tpa();
     tune_bonded_tpa();
     launch_forces(true);
@@ -632,6 +642,7 @@ void Simulation::integrate_post_force() {
 // ramps, box, rebuild decision) lives in device memory, so the sequence is
 // identical from step to step and can be captured as a CUDA graph.
 void Simulation::launch_step(bool with_stress, bool ev) {
+    launch_film_center();
     integrate_pre_force();
     verlet_.step(p_.pos, p_.pos_ref, &d_status_->box, &d_status_->max_dr2_bits, p_.tag,
                  t_.excl_offsets, t_.excl_list, stream_);
@@ -927,6 +938,20 @@ void Simulation::set_velocities(const std::vector<float3>& v) {
     std::vector<float4> vel(n);
     for (int t = 0; t < n; t++) vel[t] = make_float4(v[t].x, v[t].y, v[t].z, 0.0f);
     p_.set_velocities(vel);
+}
+
+void Simulation::launch_film_center() {
+    if (params_.film_axis < 0) return;
+    ::launch_film_center(p_.pos, p_.image, params_.natoms, params_.film_axis, &d_status_->box,
+                         inv_total_mass_, &d_status_->film_accum, &d_status_->film_ticket,
+                         &d_status_->film_center, stream_);
+}
+
+float Simulation::film_center() {
+    if (params_.film_axis < 0) throw std::logic_error("film_center: no `film <axis>` in the config");
+    launch_film_center();
+    read_status();
+    return h_status_->film_center;
 }
 
 void Simulation::set_walls(const WallSet& walls) {

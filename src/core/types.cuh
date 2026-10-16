@@ -106,6 +106,7 @@ struct SimParams {
     int   traj_every = 0;       // linear interval / log block length (steps)
     float traj_base = 2.0f;     // log: frames at block offsets round(base^j)
     WallSet walls;              // planar walls (film preparation)
+    int   film_axis = -1;       // film normal (0/1/2) for the film reference plane, -1 = off
 
     // Nosé-Hoover
     Ensemble ensemble = Ensemble::Langevin;

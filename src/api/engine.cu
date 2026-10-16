@@ -89,6 +89,7 @@ void Engine::set_velocities(const std::vector<float>& v) {
 }
 
 int Engine::nwalls() const { return sim_->walls().n; }
+double Engine::film_center() { return sim_->film_center(); }
 void Engine::remove_walls() { sim_->set_walls(WallSet{}); }
 
 Thermo Engine::thermo() {

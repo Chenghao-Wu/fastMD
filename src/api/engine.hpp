@@ -59,6 +59,7 @@ public:
 
     Thermo thermo();   // energies, temperature and pressure tensor now
     int  nwalls() const;
+    double film_center();   // film reference plane (needs `film <axis>`)
     void remove_walls();
 
 private:

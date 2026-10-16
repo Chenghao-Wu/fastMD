@@ -287,6 +287,10 @@ SimParams parse_config(std::istream& in, const std::string& filename, TopologyDa
                 w.e_shift = (float)(w.eps * (2.0 / 15.0 * sr3 * sr3 * sr3 - sr3));
             }
             params.walls.w[params.walls.n++] = w;
+        } else if (key == "film") {
+            const std::string ax = a.str("x|y|z");
+            if (ax != "x" && ax != "y" && ax != "z") a.fail("expected x, y or z (the film normal)");
+            params.film_axis = ax[0] - 'x';
         } else if (key == "pair_soft") {
             params.pair_soft = 1;
             params.soft_A_start = (float)a.nonneg("A_start");

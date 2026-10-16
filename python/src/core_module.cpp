@@ -129,6 +129,9 @@ an orthorhombic box the unwrapped coordinates are
         .def_property_readonly("types", [](const Engine& e) { return as_array(e.types(), 1); })
         .def_property_readonly("charges", [](const Engine& e) { return as_array(e.charges(), 1); })
         .def_property_readonly("nwalls", &Engine::nwalls, "Number of active walls.")
+        .def_property_readonly("film_center", &Engine::film_center,
+                               "Film reference plane: mass-weighted mean unwrapped coordinate "
+                               "along the film normal (needs `film <axis>`).")
         .def("remove_walls", &Engine::remove_walls,
              "Remove all walls (e.g. release a film after confined preparation).")
         .def("thermo", &Engine::thermo,

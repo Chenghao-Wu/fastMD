@@ -68,6 +68,9 @@ public:
     // Replace the walls (e.g. remove them after confined preparation).
     void set_walls(const WallSet& walls);
     const WallSet& walls() const { return params_.walls; }
+    // Film reference plane (mass-weighted mean unwrapped coordinate along
+    // the film normal); requires `film <axis>`.
+    float film_center();
     // Kinetic/potential energy, temperature and pressure tensor (xx xy xz yy
     // yz zz) of the current state.
     ThermoOutput thermo();
@@ -152,6 +155,9 @@ private:
         float V = 0.0f;
         Box   box = cubic_box(1.0f);
         int   wall_error = 0;   // k + 1: a particle reached wall k's plane
+        float film_center = 0.0f;         // film reference plane (unwrapped)
+        unsigned int film_ticket = 0;     // scratch of the film-center reduction
+        double film_accum = 0.0;
     };
     // device counter of the current step (ramps), owned by the active integrator
     const int* current_step_ptr() const {
@@ -190,6 +196,8 @@ private:
     TrajectoryWriter traj_;
     long long last_traj_step_ = -1;
     void write_traj_frame_if_due();
+    double inv_total_mass_ = 0.0;
+    void launch_film_center();
     float4* d_out4_ = nullptr;           // tag-ordered scratch for output
 
     // All device work is ordered on one stream; host waits only for the
