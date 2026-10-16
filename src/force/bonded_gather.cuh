@@ -45,4 +45,5 @@ void launch_bonded_gather_kernel(const float4* pos, float4* force, double* viria
                                  const BondedParams& params,
                                  int natoms, float L, float inv_L,
                                  cudaStream_t stream = 0,
-                                 int tpa = 1);   // threads per particle: 1, 2, 4, 8
+                                 int tpa = 1,    // threads per particle: 1, 2, 4, 8
+                                 const float* d_box = nullptr);

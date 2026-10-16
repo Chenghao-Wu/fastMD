@@ -12,8 +12,11 @@ __global__ void bonded_gather_kernel(const float4* __restrict__ pos, float4* __r
                                      const int2* __restrict__ bonds,
                                      const int4* __restrict__ angles,
                                      const int4* __restrict__ dihedrals,
-                                     BondedParams bp, int natoms, float L, float inv_L)
+                                     BondedParams bp, int natoms, float L, float inv_L,
+                                     const float* __restrict__ d_box)
 {
+    if (d_box) { L = d_box[0]; inv_L = d_box[1]; }   // box on the device (NPT)
+
     const int g = blockIdx.x * blockDim.x + threadIdx.x;
     const int i = g / TPA;
     const int sub = g & (TPA - 1);
@@ -106,13 +109,13 @@ void launch_bonded_gather_kernel(const float4* pos, float4* force, double* viria
                                  const int2* bonds, const int4* angles, const int4* dihedrals,
                                  const BondedParams& params,
                                  int natoms, float L, float inv_L, cudaStream_t stream,
-                                 int tpa) {
+                                 int tpa, const float* d_box) {
     if (!term_offsets) return;
     if (tpa != 1 && tpa != 2 && tpa != 4 && tpa != 8) tpa = 1;
     const int blocks = div_ceil(natoms * tpa, 256);
 #define FASTMD_LAUNCH(T) bonded_gather_kernel<T><<<blocks, 256, 0, stream>>>(       \
         pos, force, virial, tag, term_offsets, terms, bonds, angles, dihedrals,    \
-        params, natoms, L, inv_L)
+        params, natoms, L, inv_L, d_box)
     switch (tpa) {
         case 1: FASTMD_LAUNCH(1); break;
         case 2: FASTMD_LAUNCH(2); break;

@@ -15,7 +15,7 @@ void launch_ewald_excl_kernel(const float4* __restrict__ pos,
                                int natoms, int nexcl,
                                float coul_const, float alpha,
                                float L, float inv_L,
-                               cudaStream_t stream = 0);
+                               cudaStream_t stream = 0, const float* d_box = nullptr);
 
 // Scaled 1-4 pairs (each stored once):
 //   LJ part:   lj14  * 4 eps (sr12 - sr6)
@@ -31,4 +31,4 @@ void launch_pair14_kernel(const float4* __restrict__ pos,
                            float coul_const, float alpha,
                            float lj14, float ewald14,
                            float L, float inv_L,
-                           cudaStream_t stream = 0);
+                           cudaStream_t stream = 0, const float* d_box = nullptr);

@@ -20,8 +20,9 @@ __global__ void lj_verlet_kernel(
     const int* __restrict__ neighbors,
     const int* __restrict__ num_neighbors,
     int natoms, int ntypes,
-    float rc2, float L, float inv_L)
+    float rc2, float L, float inv_L, const float* __restrict__ d_box)
 {
+    if (d_box) { L = d_box[0]; inv_L = d_box[1]; }   // box on the device (NPT)
     const int t = blockIdx.x * blockDim.x + threadIdx.x;
     const int i = t / TPA;
     const int sub = t & (TPA - 1);
@@ -102,7 +103,7 @@ void launch_lj_kernel(const float4* pos, float4* force, double* virial,
                        int natoms, int ntypes,
                        float rc2, float L, float inv_L,
                        cudaStream_t stream,
-                       const float2* lj_cap, float force_cap, int tpa)
+                       const float2* lj_cap, float force_cap, int tpa, const float* d_box)
 {
     if (tpa <= 0) tpa = pair_threads_per_atom(natoms);
     const bool cap = lj_cap && force_cap > 0.0f;
@@ -110,7 +111,7 @@ void launch_lj_kernel(const float4* pos, float4* force, double* virial,
 #define FASTMD_LJ_LAUNCH(C, T)                                                     \
     lj_verlet_kernel<C, T><<<blocks, 256, 0, stream>>>(                           \
         pos, force, virial, lj_params, lj_cap, force_cap,                         \
-        neighbors, num_neighbors, natoms, ntypes, rc2, L, inv_L)
+        neighbors, num_neighbors, natoms, ntypes, rc2, L, inv_L, d_box)
     switch ((cap ? 16 : 0) + tpa) {
         case 1:  FASTMD_LJ_LAUNCH(false, 1); break;
         case 2:  FASTMD_LJ_LAUNCH(false, 2); break;

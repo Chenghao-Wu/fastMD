@@ -19,7 +19,8 @@ void launch_lj_kernel(const float4* __restrict__ pos,
                        cudaStream_t stream = 0,
                        const float2* __restrict__ lj_cap = nullptr,
                        float force_cap = 0.0f,
-                       int tpa = 0);   // threads per atom: 1,2,4,8 or 0 = heuristic
+                       int tpa = 0,    // threads per atom: 1,2,4,8 or 0 = heuristic
+                       const float* d_box = nullptr);   // {L, 1/L} on the device overrides L
 
 // Host: (r_cap, U(r_cap)) per type pair for a force cap; r_cap = 0 when the
 // pair never reaches the cap (eps == 0).

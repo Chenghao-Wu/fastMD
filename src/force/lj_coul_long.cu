@@ -25,8 +25,9 @@ __global__ void lj_coul_long_kernel(
     const int* __restrict__ num_neighbors,
     int natoms, int ntypes,
     float coul_const, float alpha,
-    float rc2, float L, float inv_L)
+    float rc2, float L, float inv_L, const float* __restrict__ d_box)
 {
+    if (d_box) { L = d_box[0]; inv_L = d_box[1]; }   // box on the device (NPT)
     const int t = blockIdx.x * blockDim.x + threadIdx.x;
     const int i = t / TPA;
     const int sub = t & (TPA - 1);
@@ -117,13 +118,13 @@ void launch_lj_coul_long_kernel(const float4* pos, const float* charges,
                                  int natoms, int ntypes,
                                  float coul_const, float alpha,
                                  float rc2, float L, float inv_L,
-                                 cudaStream_t stream, int tpa)
+                                 cudaStream_t stream, int tpa, const float* d_box)
 {
     if (tpa <= 0) tpa = pair_threads_per_atom(natoms);
     const int blocks = div_ceil(natoms * tpa, 256);
 #define FASTMD_LAUNCH(T) lj_coul_long_kernel<T><<<blocks, 256, 0, stream>>>(       \
         pos, charges, force, virial, lj_params, neighbors, num_neighbors,          \
-        natoms, ntypes, coul_const, alpha, rc2, L, inv_L)
+        natoms, ntypes, coul_const, alpha, rc2, L, inv_L, d_box)
     switch (tpa) {
         case 1: FASTMD_LAUNCH(1); break;
         case 2: FASTMD_LAUNCH(2); break;

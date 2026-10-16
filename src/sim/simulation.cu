@@ -349,31 +349,32 @@ void Simulation::launch_forces() {
     const int n = params_.natoms;
 
     cudaStream_t st = stream_;
+    const float* d_box = &d_status_->L;   // {L, 1/L}: kernels read the current box
     CUDA_CHECK(cudaMemsetAsync(d_virial_, 0, 6 * sizeof(double), st));
 
     // Nonbonded kernels overwrite force[i] (=), everything after accumulates.
     launch_pair_kernel(pair_tpa_);
     if (params_.ewald_on) {
         launch_ewald_sf_kernel(p_.pos, p_.charge, d_ewald_kvecs_, d_ewald_sfac_,
-                               n, params_.ewald_kcount, L, st);
+                               n, params_.ewald_kcount, L, st, d_box);
         launch_ewald_recip_kernel(p_.pos, p_.charge, d_ewald_kvecs_, d_ewald_sfac_,
                                   p_.force, d_virial_, n, params_.ewald_kcount,
-                                  params_.coul_const, params_.ewald_alpha, L, st);
+                                  params_.coul_const, params_.ewald_alpha, L, st, d_box);
         launch_ewald_excl_kernel(p_.pos, p_.charge, p_.force, d_virial_,
                                  t_.excl13_offsets, t_.excl13_list, p_.rank,
                                  n, t_.nexcl13, params_.coul_const, params_.ewald_alpha,
-                                 L, inv_L, st);
+                                 L, inv_L, st, d_box);
     }
     if (t_.npairs14 > 0) {
         launch_pair14_kernel(p_.pos, p_.charge, p_.force, d_virial_, t_.pairs14, d_lj_params_,
                              t_.npairs14, params_.ntypes, params_.coul_const,
                              params_.ewald_alpha, params_.lj14, params_.ewald14_coul,
-                             L, inv_L, st);
+                             L, inv_L, st, d_box);
     }
     if (d_table_params_) {
         launch_table_kernel(p_.pos, p_.force, d_virial_, d_table_idx_, d_table_params_,
                             d_table_data_, verlet_.neighbors, verlet_.num_neighbors,
-                            n, params_.ntypes, params_.rc2, L, inv_L, st, pair_tpa_);
+                            n, params_.ntypes, params_.rc2, L, inv_L, st, pair_tpa_, d_box);
     }
 
     // Bonded terms accumulate into the same force buffer, so they follow the
@@ -416,12 +417,12 @@ void Simulation::launch_pair_kernel(int tpa) {
         launch_lj_coul_long_kernel(p_.pos, p_.charge, p_.force, d_virial_, d_lj_params_,
                                    verlet_.neighbors, verlet_.num_neighbors,
                                    n, params_.ntypes, params_.coul_const, params_.ewald_alpha,
-                                   params_.rc2, box_L_, inv_L_, stream_, tpa);
+                                   params_.rc2, box_L_, inv_L_, stream_, tpa, &d_status_->L);
     else
         launch_lj_kernel(p_.pos, p_.force, d_virial_, d_lj_params_,
                          verlet_.neighbors, verlet_.num_neighbors,
                          n, params_.ntypes, params_.rc2, box_L_, inv_L_, stream_,
-                         d_lj_cap_, params_.lj_force_cap, tpa);
+                         d_lj_cap_, params_.lj_force_cap, tpa, &d_status_->L);
 }
 
 // Time the overwriting pair kernel with 1, 2, 4 and 8 threads per particle on
@@ -454,7 +455,7 @@ void Simulation::tune_pair_tpa() {
 void Simulation::launch_bonded_kernel(int tpa) {
     launch_bonded_gather_kernel(p_.pos, p_.force, d_virial_, p_.tag, t_.term_offsets,
                                 t_.terms, t_.bonds, t_.angles, t_.dihedrals, bonded_params_,
-                                params_.natoms, box_L_, inv_L_, stream_, tpa);
+                                params_.natoms, box_L_, inv_L_, stream_, tpa, &d_status_->L);
 }
 
 // Same timing-based choice as tune_pair_tpa for the bonded gather kernel
@@ -568,8 +569,8 @@ void Simulation::integrate_post_force() {
 void Simulation::step() {
     ++step_;
     integrate_pre_force();
-    // NPT: force kernels take the box as an argument; the barostat changed it
-    if (params_.ensemble == Ensemble::NPT_NH) read_status();
+    // the per-term bonded kernels take the box by value; NPT then needs it
+    if (params_.ensemble == Ensemble::NPT_NH && !params_.bonded_gather) read_status();
     verlet_.step(p_.pos, p_.pos_ref, &d_status_->L, &d_status_->max_dr2_bits, p_.tag,
                  t_.excl_offsets, t_.excl_list, stream_);
     launch_forces();

@@ -16,8 +16,10 @@ __global__ void table_verlet_kernel(
     const int* __restrict__ neighbors,
     const int* __restrict__ num_neighbors,
     int natoms, int ntypes,
-    float rc2, float L, float inv_L)
+    float rc2, float L, float inv_L, const float* __restrict__ d_box)
 {
+    if (d_box) { L = d_box[0]; inv_L = d_box[1]; }   // box on the device (NPT)
+
     __shared__ float4 s_table[TABLE_MAX_SHARED];
 
     const int t = blockIdx.x * blockDim.x + threadIdx.x;
@@ -149,13 +151,13 @@ void launch_table_kernel(const float4* pos, float4* force, double* virial,
                          const int* neighbors, const int* num_neighbors,
                          int natoms, int ntypes,
                          float rc2, float L, float inv_L,
-                         cudaStream_t stream, int tpa)
+                         cudaStream_t stream, int tpa, const float* d_box)
 {
     if (tpa <= 0) tpa = pair_threads_per_atom(natoms);
     const int blocks = div_ceil(natoms * tpa, 256);
 #define FASTMD_LAUNCH(T) table_verlet_kernel<T><<<blocks, 256, 0, stream>>>(       \
         pos, force, virial, table_idx, table_params, table_data,                  \
-        neighbors, num_neighbors, natoms, ntypes, rc2, L, inv_L)
+        neighbors, num_neighbors, natoms, ntypes, rc2, L, inv_L, d_box)
     switch (tpa) {
         case 1: FASTMD_LAUNCH(1); break;
         case 2: FASTMD_LAUNCH(2); break;
