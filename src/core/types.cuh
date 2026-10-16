@@ -41,7 +41,7 @@ __host__ __device__ inline int unpack_type_id(float w) {
 #endif
 }
 
-enum class Ensemble { Langevin = 0, NVT_NH = 1, NPT_NH = 2, NVE = 3 };
+enum class Ensemble { Langevin = 0, NVT_NH = 1, NPT_NH = 2, NVE = 3, Andersen = 4 };
 inline bool is_nose_hoover(Ensemble e) { return e == Ensemble::NVT_NH || e == Ensemble::NPT_NH; }
 
 // Layout of every 6-component virial / stress array on the device and in
@@ -108,6 +108,9 @@ struct SimParams {
     float traj_base = 2.0f;     // log: frames at block offsets round(base^j)
     WallSet walls;              // planar walls (film preparation)
     int   film_axis = -1;       // film normal (0/1/2) for the film reference plane, -1 = off
+    float andersen_nu = 0.0f;   // nvt_andersen collision frequency
+    int   friction_mode = 0;    // friction_profile: 0 none, 1 analytic, 2 table
+    float friction_a = 0.0f, friction_ell = 1.0f, friction_h = 0.0f;
 
     // Nosé-Hoover
     Ensemble ensemble = Ensemble::Langevin;

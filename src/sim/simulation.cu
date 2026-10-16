@@ -214,9 +214,24 @@ void Simulation::upload_force_field() {
 void Simulation::setup_integrator() {
     langevin_.init(p_.natoms_padded, params_.Tdamp, params_.dt, params_.T_start, params_.seed,
                    params_.T_stop, params_.nsteps);
-    if (params_.ensemble == Ensemble::NVE) {   // velocity Verlet: no friction, no noise
-        langevin_.c1 = 1.0f;
+    if (params_.ensemble == Ensemble::NVE || params_.ensemble == Ensemble::Andersen) {
+        langevin_.c1 = 1.0f;   // velocity Verlet: no friction (Andersen adds collisions)
         langevin_.c2 = 0.0f;
+        langevin_.gamma_dt = 0.0f;
+    }
+    if (params_.ensemble == Ensemble::Andersen) {
+        langevin_.andersen = 1;
+        langevin_.nu_dt = params_.andersen_nu * params_.dt;
+    }
+    langevin_.d_film_center = &d_status_->film_center;
+    if (params_.friction_mode != 0) {
+        FrictionProfile fp;
+        fp.mode = params_.friction_mode;
+        fp.axis = params_.film_axis;
+        fp.a = params_.friction_a;
+        fp.ell = params_.friction_ell;
+        fp.h = params_.friction_h;
+        set_friction_profile(fp, topo_.friction_table, topo_.friction_zmin, topo_.friction_dz);
     }
     if (is_nose_hoover(params_.ensemble)) {
         nose_hoover_.init(params_);
@@ -276,6 +291,9 @@ void Simulation::print_setup() const {
     }
     if (params_.ensemble == Ensemble::NVE) {
         printf("[setup]  ensemble=nve");
+    } else if (params_.ensemble == Ensemble::Andersen) {
+        printf("[setup]  ensemble=nvt_andersen  T_start=%.2f  T_stop=%.2f  nu=%.3f",
+               params_.T_start, params_.T_stop, params_.andersen_nu);
     } else if (is_nose_hoover(params_.ensemble)) {
         printf("[setup]  ensemble=%s  T_start=%.2f  T_stop=%.2f  Tdamp=%.2f  chain=%d",
                params_.ensemble == Ensemble::NPT_NH ? "npt_nh" : "nvt_nh",
@@ -1004,6 +1022,37 @@ float Simulation::film_center() {
     return h_status_->film_center;
 }
 
+// Depth-dependent friction (Langevin) or collision rate (Andersen) relative
+// to the film reference plane; mode 0 removes it.
+void Simulation::set_friction_profile(const FrictionProfile& spec, const std::vector<float>& table,
+                                      float zmin, float dz) {
+    if (spec.mode != 0) {
+        if (params_.film_axis < 0)
+            throw std::invalid_argument("a friction profile needs `film <axis>`");
+        if (params_.ensemble != Ensemble::Langevin && params_.ensemble != Ensemble::Andersen)
+            throw std::invalid_argument("a friction profile needs nvt_langevin or nvt_andersen");
+        if (spec.mode == 2 && (table.size() < 2 || !(dz > 0.0f)))
+            throw std::invalid_argument("friction profile table needs >= 2 points and dz > 0");
+        if (spec.mode == 1 && !(spec.ell > 0.0f && spec.h > 0.0f))
+            throw std::invalid_argument("analytic friction profile needs ell > 0 and h > 0");
+    }
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+    free_dev(d_friction_table_);
+    FrictionProfile p = spec;
+    p.axis = params_.film_axis < 0 ? 2 : params_.film_axis;
+    p.d_table = nullptr;
+    if (spec.mode == 2) {
+        d_friction_table_ = upload_vec(table);
+        p.d_table = d_friction_table_;
+        p.npoints = (int)table.size();
+        p.zmin = zmin;
+        p.inv_dz = 1.0f / dz;
+    }
+    langevin_.profile = p;
+    params_.friction_mode = p.mode;
+    invalidate_graphs();   // the profile is a kernel argument of the captured steps
+}
+
 void Simulation::set_walls(const WallSet& walls) {
     if (walls.n > 0 && params_.ensemble == Ensemble::NPT_NH)
         throw std::invalid_argument("walls cannot be combined with npt_nh");
@@ -1061,6 +1110,7 @@ Simulation::~Simulation() {
     free_dev(d_lj_cap_);
     free_dev(d_fene_params_);
     free_dev(d_angle_params_);
+    free_dev(d_friction_table_);
     free_dev(d_hbond_params_);
     free_dev(d_dihedral_params_);
     free_dev(d_table_idx_);

@@ -138,6 +138,20 @@ y + iy Ly, z + iz Lz.
         .def("set_tilt", &Engine::set_tilt, py::arg("xy"), py::arg("affine") = false,
              "Set the box xy tilt. affine=True moves particles with the box (a strain); "
              "otherwise unwrapped positions are kept (e.g. to restore a saved state).")
+        .def("set_friction_profile",
+             [](Engine& e, const py::array_t<double, py::array::c_style | py::array::forcecast>& z,
+                const py::array_t<double, py::array::c_style | py::array::forcecast>& f) {
+                 e.set_friction_profile(std::vector<double>(z.data(), z.data() + z.size()),
+                                        std::vector<double>(f.data(), f.data() + f.size()));
+             }, py::arg("z"), py::arg("factor"),
+             "Depth-dependent Langevin friction (or Andersen collision rate): gamma = gamma_b "
+             "factor(z - z_c), linear in the tabulated (z, factor), z relative to the film "
+             "reference plane. Needs `film <axis>` and nvt_langevin or nvt_andersen.")
+        .def("set_friction_profile_analytic", &Engine::set_friction_profile_analytic,
+             py::arg("a"), py::arg("ell"), py::arg("h"),
+             "factor = exp(a [exp(-s/ell) + exp(-(h-s)/ell)]), s = z - z_c + h/2 in [0, h].")
+        .def("clear_friction_profile", &Engine::clear_friction_profile,
+             "Back to uniform friction / collision rate.")
         .def_property_readonly("nwalls", &Engine::nwalls, "Number of active walls.")
         .def_property_readonly("film_center", &Engine::film_center,
                                "Film reference plane: mass-weighted mean unwrapped coordinate "

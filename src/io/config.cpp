@@ -181,6 +181,58 @@ SimParams parse_config(std::istream& in, const std::string& filename, TopologyDa
             if (freq < 0) a.fail("<freq> must be >= 0 (0 = final restart only)");
             params.restart_freq = (int)freq;
             copy_path(params.restart_file, a.str("file"), a);
+        } else if (key == "nvt_andersen") {
+            // nvt_andersen T_start T_stop nu [seed]
+            if (!ensemble_key.empty())
+                a.fail("only one ensemble may be given (already '" + ensemble_key + "')");
+            ensemble_key = key;
+            params.ensemble = Ensemble::Andersen;
+            params.T_start = (float)a.positive("T_start");
+            params.T_stop = (float)a.positive("T_stop");
+            params.andersen_nu = (float)a.positive("nu");
+            long seed = a.more() ? a.integer("seed") : 42;
+            if (seed < 0) a.fail("<seed> must be >= 0");
+            params.seed = (uint64_t)seed;
+        } else if (key == "friction_profile") {
+            // friction_profile analytic <a> <ell> <h> | friction_profile table <file>
+            const std::string kind = a.str("analytic|table");
+            if (kind == "analytic") {
+                params.friction_mode = 1;
+                params.friction_a = (float)a.real("a");
+                params.friction_ell = (float)a.positive("ell");
+                params.friction_h = (float)a.positive("h");
+            } else if (kind == "table") {
+                params.friction_mode = 2;
+                const std::string file = a.str("file");
+                std::ifstream tf(file);
+                if (!tf.is_open()) a.fail("cannot open friction table " + file);
+                std::vector<double> zs, fs;
+                for (std::string ln; std::getline(tf, ln);) {
+                    ln = ln.substr(0, ln.find('#'));
+                    std::istringstream ls(ln);
+                    double zv, fv;
+                    if (ls >> zv >> fv) { zs.push_back(zv); fs.push_back(fv); }
+                }
+                if (zs.size() < 2) a.fail(file + ": need at least two 'z factor' rows");
+                for (size_t k = 1; k < zs.size(); k++)
+                    if (!(zs[k] > zs[k - 1])) a.fail(file + ": z must increase");
+                for (double fv : fs)
+                    if (!(fv >= 0.0)) a.fail(file + ": factors must be >= 0");
+                const int npts = 1024;
+                topo.friction_zmin = (float)zs.front();
+                topo.friction_dz = (float)((zs.back() - zs.front()) / (npts - 1));
+                topo.friction_table.resize(npts);
+                size_t j = 0;
+                for (int k = 0; k < npts; k++) {   // resample (linear) on a uniform grid
+                    double zk = zs.front() + k * (zs.back() - zs.front()) / (npts - 1);
+                    while (j + 2 < zs.size() && zs[j + 1] < zk) j++;
+                    double u = (zk - zs[j]) / (zs[j + 1] - zs[j]);
+                    u = std::min(1.0, std::max(0.0, u));
+                    topo.friction_table[k] = (float)(fs[j] + u * (fs[j + 1] - fs[j]));
+                }
+            } else {
+                a.fail("expected 'analytic' or 'table'");
+            }
         } else if (key == "nve") {
             if (!ensemble_key.empty())
                 a.fail("only one ensemble may be given (already '" + ensemble_key + "')");
@@ -417,7 +469,7 @@ SimParams parse_config(std::istream& in, const std::string& filename, TopologyDa
     require("dt");
     require("nsteps");
     if (ensemble_key.empty())
-        throw std::runtime_error(filename + ": no ensemble given (nve, nvt_langevin, nvt_nh or npt_nh)");
+        throw std::runtime_error(filename + ": no ensemble given (nve, nvt_langevin, nvt_andersen, nvt_nh or npt_nh)");
     if (topo.data_file.empty() && coords_file.empty())
         throw std::runtime_error(filename + ": give lammps_data_file or coords_file");
     if (!topo.data_file.empty() && !coords_file.empty())
@@ -650,6 +702,13 @@ void validate_system(const SimParams& params, const TopologyData& topo) {
             if (z < 0.0f || z > Lax[w.axis])
                 throw std::runtime_error("wall position " + std::to_string(z) + " outside [0, " +
                                          std::to_string(Lax[w.axis]) + "] (measured from the lower box edge)");
+    }
+    if (params.friction_mode != 0) {
+        if (params.film_axis < 0)
+            throw std::runtime_error("friction_profile needs `film <axis>` (the profile is measured "
+                                     "from the film reference plane)");
+        if (params.ensemble != Ensemble::Langevin && params.ensemble != Ensemble::Andersen)
+            throw std::runtime_error("friction_profile needs nvt_langevin or nvt_andersen");
     }
     if (params.walls.n > 0 && params.ensemble == Ensemble::NPT_NH)
         throw std::runtime_error("walls cannot be combined with npt_nh");

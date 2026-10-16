@@ -85,6 +85,8 @@ TEST(Config, RejectsUnknownAndDuplicateKeys) {
                   "given twice");
     expect_reject("wall_style", std::string(kBase) + "wall zlo soft 1 1 2.5 0\n", "lj93 or harmonic");
     expect_reject("film_axis", std::string(kBase) + "film w\n", "film normal");
+    expect_reject("andersen_nu", "ntypes 1\nnvt_andersen 1 1 0\n", "must be > 0");
+    expect_reject("friction_kind", std::string(kBase) + "friction_profile cubic 1 1 1\n", "analytic");
     expect_reject("stress_pm", std::string(kBase) + "stress 1 10 s.dat 16 3\n", "multiple of m");
     expect_reject("dup_lj", std::string(kBase) + "lj 0 0 1 1\nlj 0 0 2 1\n", "given twice");
 }

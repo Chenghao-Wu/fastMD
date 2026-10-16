@@ -264,6 +264,24 @@ class SimulationAPITest(unittest.TestCase):
         sim.set_tilt(0.0)           # non-affine: unwrapped positions unchanged
         np.testing.assert_allclose(sim.unwrapped_positions, after, atol=2e-4)
 
+    def test_friction_profile_api(self):
+        sim = fastmd.Simulation.from_text(self.config() + "film z\n")
+        z = np.linspace(-20, 20, 9)
+        sim.set_friction_profile(z, np.where(z < 0, 10.0, 1.0))
+        sim.run(50)
+        sim.set_friction_profile_analytic(1.5, 2.0, 10.0)
+        sim.run(50)
+        sim.clear_friction_profile()
+        sim.run(50)
+        self.assertTrue(np.isfinite(sim.positions).all())
+        with self.assertRaises(ValueError):
+            sim.set_friction_profile(z[::-1], np.ones_like(z))       # z must increase
+        with self.assertRaises(ValueError):
+            sim.set_friction_profile(z, -np.ones_like(z))            # factors >= 0
+        nofilm = self.make()
+        with self.assertRaises(ValueError):
+            nofilm.set_friction_profile(z, np.ones_like(z))          # needs `film z`
+
     def test_errors(self):
         sim = self.make()
         with self.assertRaises(ValueError):

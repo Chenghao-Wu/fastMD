@@ -60,6 +60,12 @@ public:
 
     Thermo thermo();   // energies, temperature and pressure tensor now
     void apply_step_shear(double gamma);
+    // Depth-dependent friction / Andersen collision-rate factor f(z - z_c):
+    // tabulated (z increasing; resampled on a uniform grid), analytic (the
+    // two-surface exponential form), or removed.
+    void set_friction_profile(const std::vector<double>& z, const std::vector<double>& factor);
+    void set_friction_profile_analytic(double a, double ell, double h);
+    void clear_friction_profile();
     void set_tilt(double xy, bool affine);
     int  nwalls() const;
     double film_center();   // film reference plane (needs `film <axis>`)

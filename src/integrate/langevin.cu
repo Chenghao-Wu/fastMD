@@ -6,8 +6,9 @@
 
 void LangevinState::init(int /*natoms_padded*/, float Tdamp, float dt,
                          float T_start_in, uint64_t seed_in, float T_stop_in, int nsteps_in) {
-    float gamma = 1.0f / Tdamp;
-    c1 = expf(-gamma * dt);
+    float gamma = Tdamp > 0.0f ? 1.0f / Tdamp : 0.0f;
+    gamma_dt = gamma * dt;
+    c1 = expf(-gamma_dt);
     c2 = sqrtf(1.0f - c1 * c1);
     half_dt = 0.5f * dt;
     T_start = T_start_in;
@@ -24,16 +25,15 @@ __global__ void integrator_pre_force_kernel(
     int* __restrict__ d_max_dr2_int,
     int* __restrict__ image,
     const int* __restrict__ tag,
-    uint64_t seed, const int* __restrict__ d_step,
-    int natoms, Box box,
-    float half_dt, float c1, float c2,
-    float T_start, float T_stop, int nsteps)
+    const int* __restrict__ d_step,
+    int natoms, Box box, LangevinState lang)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= natoms) return;
     const int step = *d_step;
-    const float kT = T_start + (T_stop - T_start) *
-                     (nsteps > 0 ? (float)(step - 1) / (float)nsteps : 0.0f);
+    const float half_dt = lang.half_dt;
+    const float kT = lang.T_start + (lang.T_stop - lang.T_start) *
+                     (lang.nsteps > 0 ? (float)(step - 1) / (float)lang.nsteps : 0.0f);
 
     float4 r = pos[i];
     float4 v = vel[i];
@@ -51,16 +51,38 @@ __global__ void integrator_pre_force_kernel(
     r.y += half_dt * v.y;
     r.z += half_dt * v.z;
 
-    if (c2 > 0.0f) {   // c2 = 0: plain velocity Verlet (NVE), no random numbers drawn
+    float c1 = lang.c1, c2 = lang.c2, factor = 1.0f;
+    if (lang.profile.mode != 0) {   // depth below/above the film reference plane
+        const int* im = image ? image + 3 * i : nullptr;
+        const float ix = im ? (float)im[0] : 0.0f, iy = im ? (float)im[1] : 0.0f,
+                    iz = im ? (float)im[2] : 0.0f;
+        const float u = lang.profile.axis == 0 ? r.x + ix * box.L.x + iy * box.xy
+                      : lang.profile.axis == 1 ? r.y + iy * box.L.y : r.z + iz * box.L.z;
+        factor = friction_factor(lang.profile, u - *lang.d_film_center);
+        if (!lang.andersen) {
+            c1 = __expf(-lang.gamma_dt * factor);
+            c2 = sqrtf(fmaxf(1.0f - c1 * c1, 0.0f));
+        }
+    }
+    if (c2 > 0.0f || lang.andersen) {   // NVE (c2 = 0): no random numbers drawn
         // Philox stream: subsequence = particle tag, one 4-word block per step
         curandStatePhilox4_32_10_t rs;
-        curand_init(seed, (unsigned long long)(tag ? tag[i] : i), (unsigned long long)step * 4ull, &rs);
+        curand_init(lang.seed, (unsigned long long)(tag ? tag[i] : i), (unsigned long long)step * 4ull, &rs);
         float4 rand4 = curand_normal4(&rs);
-
-        float noise_scale = c2 * sqrtf(kT / m_i);
-        v.x = c1 * v.x + noise_scale * rand4.x;
-        v.y = c1 * v.y + noise_scale * rand4.y;
-        v.z = c1 * v.z + noise_scale * rand4.z;
+        const float sd = sqrtf(kT / m_i);
+        if (lang.andersen) {
+            // collision with probability nu f dt; the fourth normal gives the
+            // uniform variate through its CDF
+            if (normcdff(rand4.w) < lang.nu_dt * factor) {
+                v.x = sd * rand4.x;
+                v.y = sd * rand4.y;
+                v.z = sd * rand4.z;
+            }
+        } else {
+            v.x = c1 * v.x + c2 * sd * rand4.x;
+            v.y = c1 * v.y + c2 * sd * rand4.y;
+            v.z = c1 * v.z + c2 * sd * rand4.z;
+        }
     }
 
     r.x += half_dt * v.x;
@@ -82,10 +104,10 @@ void launch_integrator_pre_force(float4* pos, float4* vel, const float4* force,
                                   int natoms, const Box& box,
                                   float half_dt, cudaStream_t stream) {
     int blocks = div_ceil(natoms, 256);
+    LangevinState l = lang;
+    l.half_dt = half_dt;
     integrator_pre_force_kernel<<<blocks, 256, 0, stream>>>(
-        pos, vel, force, pos_ref, d_max_dr2_int, image, tag,
-        lang.seed, d_step, natoms, box,
-        half_dt, lang.c1, lang.c2, lang.T_start, lang.T_stop, lang.nsteps);
+        pos, vel, force, pos_ref, d_max_dr2_int, image, tag, d_step, natoms, box, l);
 }
 
 __global__ void integrator_post_force_kernel(

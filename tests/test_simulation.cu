@@ -397,3 +397,143 @@ TEST(Simulation, StepShearStressResponse) {
     sim->run(2000);
     EXPECT_GT(sim->thermo().stress[VXY] - before, 0.5 * (after - before));   // relaxing
 }
+
+namespace {
+// Slab of the snake-lattice melt in a box taller by 2 x 8 along z.
+std::function<void(TopologyData&)> slab_lift() {
+    return [](TopologyData& t) {
+        for (auto& p : t.positions) p.z += 8.0f;
+        t.box.z += 16.0f;
+    };
+}
+
+// Kinetic temperature in bins of z - z_c (unit masses), accumulated over calls.
+struct TempProfile {
+    std::vector<double> ke, n;
+    double width = 2.0, half = 12.0;
+    void add(Simulation& sim) {
+        if (ke.empty()) { ke.assign((int)(2 * half / width), 0.0); n = ke; }
+        std::vector<float4> v = sim.velocities(), x = sim.positions();
+        std::vector<int> im = sim.images();
+        const double zc = sim.film_center(), Lz = sim.box().L.z;
+        for (size_t t = 0; t < x.size(); t++) {
+            double d = x[t].z + im[3 * t + 2] * Lz - zc;
+            int k = (int)std::floor((d + half) / width);
+            if (k < 0 || k >= (int)ke.size()) continue;
+            ke[k] += v[t].x * v[t].x + v[t].y * v[t].y + v[t].z * v[t].z;
+            n[k] += 3;
+        }
+    }
+};
+}  // namespace
+
+// Depth-dependent friction changes the dynamics, not the equilibrium:
+// after equilibrating with uniform friction, switching on strongly varying
+// profiles leaves the temperature flat.
+TEST(Simulation, FrictionProfileKeepsTemperatureFlat) {
+    std::string data = write_melt("sim_fric.data", 16, 25, 0.85f, 61);
+    std::vector<std::pair<FrictionProfile, std::vector<float>>> profiles;
+    FrictionProfile an;
+    an.mode = 1; an.ell = 1.5f; an.h = 12.0f;
+    an.a = 2.0f;
+    profiles.push_back({an, {}});
+    an.a = -2.0f;
+    profiles.push_back({an, {}});
+    FrictionProfile tab;
+    tab.mode = 2;
+    std::vector<float> step(64);
+    for (int k = 0; k < 64; k++) step[k] = k < 32 ? 30.0f : 0.1f;   // d in [-30, 30]
+    profiles.push_back({tab, step});
+    for (auto& pr : profiles) {
+        auto sim = make_sim(data, "film z\npair_tpa 1\n", 10000, "nvt_langevin 1.0 1.0 1.0 5",
+                            make_int3(1, 1, 1), slab_lift());
+        sim->run(3000);   // relax the lattice start with uniform friction
+        sim->set_friction_profile(pr.first, pr.second, -30.0f, 60.0f / 63.0f);
+        sim->run(3000);
+        TempProfile tp;
+        // bins hold ~70 particles: per-snapshot T scatter ~10%, 60 correlated snapshots
+        for (int k = 0; k < 60; k++) { sim->run(100); tp.add(*sim); }
+        for (size_t k = 0; k < tp.ke.size(); k++) {
+            if (tp.n[k] < 6000) continue;   // vacuum / sparse surface bins
+            double T = tp.ke[k] / tp.n[k];
+            EXPECT_NEAR(T, 1.0, 0.07) << "profile mode " << pr.first.mode << " a " << pr.first.a
+                                      << " bin " << k << " (d = " << (k + 0.5) * tp.width - tp.half
+                                      << ", " << tp.n[k] / 3 << " samples)";
+        }
+    }
+}
+
+TEST(Simulation, FrictionProfileSlowsDynamicsWhereLarge) {
+    std::string data = write_melt("sim_fric2.data", 16, 25, 0.85f, 63);
+    std::ofstream("fric_half.txt") << "-30 100\n-0.01 100\n0.01 1\n30 1\n";
+    auto sim = make_sim(data, "film z\nfriction_profile table fric_half.txt\n", 4000,
+                        "nvt_langevin 1.0 1.0 2.0 7", make_int3(1, 1, 1), slab_lift());
+    sim->run(500);
+    auto unwrapped = [&] {
+        std::vector<float4> x = sim->positions();
+        std::vector<int> im = sim->images();
+        const Box b = sim->box();
+        std::vector<double> u(3 * x.size());
+        for (size_t t = 0; t < x.size(); t++) {
+            u[3 * t] = x[t].x + im[3 * t] * b.L.x + im[3 * t + 1] * b.xy;
+            u[3 * t + 1] = x[t].y + im[3 * t + 1] * b.L.y;
+            u[3 * t + 2] = x[t].z + im[3 * t + 2] * b.L.z;
+        }
+        return u;
+    };
+    std::vector<double> u0 = unwrapped();
+    const double zc = sim->film_center();
+    sim->run(1000);
+    std::vector<double> u1 = unwrapped();
+    double msd[2] = {0, 0}, cnt[2] = {0, 0};
+    for (size_t t = 0; t < u0.size() / 3; t++) {
+        double d = u0[3 * t + 2] - zc;
+        if (std::fabs(d) < 1.0 || std::fabs(d) > 4.0) continue;   // away from the step and surfaces
+        int side = d < 0 ? 0 : 1;
+        for (int c = 0; c < 2; c++) msd[side] += std::pow(u1[3 * t + c] - u0[3 * t + c], 2);   // in-plane
+        cnt[side] += 1;
+    }
+    ASSERT_GT(cnt[0], 50);
+    ASSERT_GT(cnt[1], 50);
+    EXPECT_LT(msd[0] / cnt[0], 0.5 * msd[1] / cnt[1]) << "high-friction side should move less";
+}
+
+// A unit table reproduces uniform Langevin friction.
+TEST(Simulation, UnitFrictionProfileMatchesUniform) {
+    std::string data = write_melt("sim_fric3.data", 8, 20, 0.85f, 65);
+    std::ofstream("fric_one.txt") << "-50 1\n50 1\n";
+    auto a = make_sim(data, "film z\npair_tpa 1\n", 100, "nvt_langevin 1.0 1.0 1.0 9");
+    auto b = make_sim(data, "film z\npair_tpa 1\nfriction_profile table fric_one.txt\n", 100,
+                      "nvt_langevin 1.0 1.0 1.0 9");
+    a->run(100);
+    b->run(100);
+    EXPECT_LT(max_pos_diff(a->positions(), b->positions(), a->box().L.x), 1e-3);
+}
+
+// Andersen collisions thermostat a system started at rest, also with a
+// collision-rate profile that is zero in half of the film.
+TEST(Simulation, AndersenThermostat) {
+    std::string data = write_melt("sim_and.data", 16, 25, 0.85f, 67);
+    auto sim = make_sim(data, "", 3000, "nvt_andersen 1.2 1.2 5.0 3");
+    sim->set_velocities(std::vector<float3>(sim->positions().size(), make_float3(0, 0, 0)));
+    sim->run(2000);
+    double T = 0;
+    for (int k = 0; k < 10; k++) { sim->run(50); T += sim->thermo().temperature; }
+    EXPECT_NEAR(T / 10, 1.2, 0.04);
+
+    auto film = make_sim(data, "film z\npair_tpa 1\n", 10000, "nvt_andersen 1.0 1.0 5.0 4",
+                         make_int3(1, 1, 1), slab_lift());
+    film->run(3000);
+    FrictionProfile half;
+    half.mode = 2;
+    std::vector<float> rate(64);
+    for (int k = 0; k < 64; k++) rate[k] = k < 32 ? 0.0f : 2.0f;   // no collisions for d < 0
+    film->set_friction_profile(half, rate, -30.0f, 60.0f / 63.0f);
+    film->run(3000);
+    TempProfile tp;
+    for (int k = 0; k < 60; k++) { film->run(100); tp.add(*film); }
+    for (size_t k = 0; k < tp.ke.size(); k++) {
+        if (tp.n[k] < 6000) continue;
+        EXPECT_NEAR(tp.ke[k] / tp.n[k], 1.0, 0.07) << "bin " << k;
+    }
+}

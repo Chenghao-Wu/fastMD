@@ -2,6 +2,7 @@
 #include "../io/config.hpp"
 #include "../sim/simulation.cuh"
 #include <sstream>
+#include <algorithm>
 #include <stdexcept>
 
 namespace fastmd {
@@ -102,6 +103,38 @@ void Engine::set_velocities(const std::vector<float>& v) {
 }
 
 void Engine::apply_step_shear(double gamma) { sim_->apply_step_shear((float)gamma); }
+
+void Engine::set_friction_profile(const std::vector<double>& z, const std::vector<double>& f) {
+    if (z.size() != f.size() || z.size() < 2)
+        throw std::invalid_argument("set_friction_profile: need >= 2 (z, factor) pairs of equal length");
+    for (size_t k = 1; k < z.size(); k++)
+        if (!(z[k] > z[k - 1])) throw std::invalid_argument("set_friction_profile: z must increase");
+    for (double v : f)
+        if (!(v >= 0.0)) throw std::invalid_argument("set_friction_profile: factors must be >= 0");
+    const int n = 1024;
+    std::vector<float> table(n);
+    size_t j = 0;
+    for (int k = 0; k < n; k++) {
+        double zk = z.front() + k * (z.back() - z.front()) / (n - 1);
+        while (j + 2 < z.size() && z[j + 1] < zk) j++;
+        double u = std::min(1.0, std::max(0.0, (zk - z[j]) / (z[j + 1] - z[j])));
+        table[k] = (float)(f[j] + u * (f[j + 1] - f[j]));
+    }
+    FrictionProfile p;
+    p.mode = 2;
+    sim_->set_friction_profile(p, table, (float)z.front(), (float)((z.back() - z.front()) / (n - 1)));
+}
+
+void Engine::set_friction_profile_analytic(double a, double ell, double h) {
+    FrictionProfile p;
+    p.mode = 1;
+    p.a = (float)a;
+    p.ell = (float)ell;
+    p.h = (float)h;
+    sim_->set_friction_profile(p);
+}
+
+void Engine::clear_friction_profile() { sim_->set_friction_profile(FrictionProfile{}); }
 void Engine::set_tilt(double xy, bool affine) { sim_->set_tilt((float)xy, affine); }
 int Engine::nwalls() const { return sim_->walls().n; }
 double Engine::film_center() { return sim_->film_center(); }

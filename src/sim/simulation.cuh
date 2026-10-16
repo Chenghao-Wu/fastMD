@@ -70,6 +70,11 @@ public:
     // strain gamma (x += gamma y, tilt += gamma Ly).
     void set_tilt(float xy, bool affine);
     void apply_step_shear(float gamma);
+    // Depth-dependent Langevin friction / Andersen collision rate factor
+    // f(z - z_c) (see integrate/langevin.cuh); mode 0 removes the profile.
+    // table: f on the uniform grid zmin + k dz (mode 2).
+    void set_friction_profile(const FrictionProfile& spec, const std::vector<float>& table = {},
+                              float zmin = 0.0f, float dz = 0.0f);
     // Replace the walls (e.g. remove them after confined preparation).
     void set_walls(const WallSet& walls);
     const WallSet& walls() const { return params_.walls; }
@@ -202,6 +207,7 @@ private:
     long long last_traj_step_ = -1;
     void write_traj_frame_if_due();
     double inv_total_mass_ = 0.0;
+    float* d_friction_table_ = nullptr;
     void launch_film_center();
     void check_tilt_allowed(float xy) const;
     float4* d_out4_ = nullptr;           // tag-ordered scratch for output

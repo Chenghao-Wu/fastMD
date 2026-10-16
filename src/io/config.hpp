@@ -27,6 +27,9 @@ struct TopologyData {
     // which bonded types were explicitly parameterised (index = type)
     std::vector<char> bond_params_set, hbond_params_set, angle_params_set, dihedral_params_set;
     bool angle_cosine = false;   // angle_params hold K of E = K (1 + cos theta)
+    // friction_profile table resampled on a uniform grid of d = z - z_c
+    std::vector<float> friction_table;
+    float friction_zmin = 0.0f, friction_dz = 0.0f;
     std::string data_file;
 
     std::vector<int> exclusion_offsets;
