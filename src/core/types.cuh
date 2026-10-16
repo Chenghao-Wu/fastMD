@@ -68,6 +68,7 @@ struct WallSet {
 
 struct SimParams {
     float3 box_L3;     // box edge lengths (Lx, Ly, Lz) from the data file
+    float  box_xy = 0.0f;   // xy tilt from the data file (sheared box)
     float rc;
     float rc2;
     float skin;

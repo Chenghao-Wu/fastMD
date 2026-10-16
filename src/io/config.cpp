@@ -706,6 +706,7 @@ void load_config(std::istream& in, const std::string& source, SimParams& params,
     if (!topo.data_file.empty()) parse_lammps_data(topo.data_file, topo);
     if (params.natoms == 0) params.natoms = (int)topo.positions.size();
     params.box_L3 = topo.box;
+    params.box_xy = topo.tilt_xy;
     validate_system(params, topo);
     finalize_params(params);
 }

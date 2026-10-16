@@ -54,7 +54,7 @@ __global__ void ewald_excl_kernel(
             int j = rank ? rank[tj] : tj;
             float4 ri = pos[i];
             float4 rj = pos[j];
-            const float3 dd_ = min_image_dr(ri, rj, box);
+            const float3 dd_ = min_image_dr_ortho(ri, rj, box);
             float dx = dd_.x, dy = dd_.y, dz = dd_.z;
             float r2 = fmaxf(dx*dx + dy*dy + dz*dz, 1e-12f);
             float r = sqrtf(r2);
@@ -133,7 +133,7 @@ __global__ void pair14_kernel(
         int ti = __float_as_int(ri.w);
         int tj = __float_as_int(rj.w);
 
-        const float3 dd_ = min_image_dr(ri, rj, box);
+        const float3 dd_ = min_image_dr_ortho(ri, rj, box);
         float dx = dd_.x, dy = dd_.y, dz = dd_.z;
         float r2 = fmaxf(dx*dx + dy*dy + dz*dz, 1e-12f);
         float r = sqrtf(r2);

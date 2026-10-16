@@ -65,6 +65,11 @@ public:
     // reset to 0 unless given, [3 N]) and recompute the neighbor list and forces.
     void set_positions(const std::vector<float3>& xyz, const std::vector<int>* images = nullptr);
     void set_velocities(const std::vector<float3>& v);
+    // Sheared box: set the xy tilt (affine: particles follow the box, a step
+    // strain; otherwise unwrapped positions are kept) / apply a step shear
+    // strain gamma (x += gamma y, tilt += gamma Ly).
+    void set_tilt(float xy, bool affine);
+    void apply_step_shear(float gamma);
     // Replace the walls (e.g. remove them after confined preparation).
     void set_walls(const WallSet& walls);
     const WallSet& walls() const { return params_.walls; }
@@ -198,6 +203,7 @@ private:
     void write_traj_frame_if_due();
     double inv_total_mass_ = 0.0;
     void launch_film_center();
+    void check_tilt_allowed(float xy) const;
     float4* d_out4_ = nullptr;           // tag-ordered scratch for output
 
     // All device work is ordered on one stream; host waits only for the

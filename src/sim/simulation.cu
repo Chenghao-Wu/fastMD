@@ -47,6 +47,8 @@ Simulation::Simulation(const SimParams& params, TopologyData topo)
                                  ") does not match the number of atoms read (" +
                                  std::to_string(topo_.positions.size()) + ")");
     box_ = make_box(params_.box_L3);
+    box_.xy = params_.box_xy;
+    if (box_.xy != 0.0f) check_tilt_allowed(box_.xy);
 
     set_type_masses(topo_.masses, params_.ntypes);
 
@@ -901,25 +903,15 @@ void Simulation::set_positions(const std::vector<float3>& xyz, const std::vector
     read_status();
     std::vector<float4> pos = p_.download_positions();   // keeps the packed types
     std::vector<int> img = images ? *images : std::vector<int>(3 * n, 0);
-    const float Ls[3] = {box_.L.x, box_.L.y, box_.L.z};
     for (int t = 0; t < n; t++) {
-        const float in[3] = {xyz[t].x, xyz[t].y, xyz[t].z};
-        float out[3];
-        for (int d = 0; d < 3; d++) {
-            if (!std::isfinite(in[d]))
-                throw std::invalid_argument("set_positions: non-finite coordinate for particle " +
-                                            std::to_string(t));
-            const float L = Ls[d];
-            int shift = (int)std::floor(in[d] / L);
-            float x = in[d] - shift * L;
-            if (x >= L) { x -= L; shift++; }
-            if (x < 0.0f) { x += L; shift--; }
-            out[d] = x;
-            img[3 * t + d] += shift;
-        }
-        pos[t].x = out[0];
-        pos[t].y = out[1];
-        pos[t].z = out[2];
+        float x = xyz[t].x, y = xyz[t].y, z = xyz[t].z;
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+            throw std::invalid_argument("set_positions: non-finite coordinate for particle " +
+                                        std::to_string(t));
+        wrap_position_host(x, y, z, &img[3 * t], box_);
+        pos[t].x = x;
+        pos[t].y = y;
+        pos[t].z = z;
     }
     p_.set_positions(pos);
     p_.set_images(img);
@@ -940,6 +932,64 @@ void Simulation::set_velocities(const std::vector<float3>& v) {
     p_.set_velocities(vel);
 }
 
+// Requirements for a sheared (xy-tilted) box.
+void Simulation::check_tilt_allowed(float xy) const {
+    if (std::fabs(xy) > 0.5f * box_.L.x)
+        throw std::invalid_argument("xy tilt " + std::to_string(xy) + " exceeds Lx / 2");
+    if (params_.ensemble == Ensemble::NPT_NH)
+        throw std::invalid_argument("a tilted box cannot be combined with npt_nh");
+    if (params_.ewald_on)
+        throw std::invalid_argument("a tilted box cannot be combined with coulomb ewald/pme");
+    if (!topo_.dihedrals.empty())
+        throw std::invalid_argument("a tilted box cannot be combined with dihedrals (1-4 pair terms)");
+    if (params_.dump_freq > 0)
+        throw std::invalid_argument("the legacy dump format cannot describe a tilted box; use traj");
+    for (int k = 0; k < params_.walls.n; k++)
+        if (params_.walls.w[k].axis != 2)
+            throw std::invalid_argument("with a tilted box walls must be along z");
+}
+
+// Change the xy tilt. affine: particles move with the box (x += dxy y / Ly,
+// a homogeneous shear strain dxy / Ly; velocities unchanged), as in a step
+// shear. Otherwise the unwrapped positions are kept and only re-wrapped.
+void Simulation::set_tilt(float xy, bool affine) {
+    if (xy != 0.0f) check_tilt_allowed(xy);
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+    read_status();
+    const int n = params_.natoms;
+    std::vector<float4> pos = p_.download_positions();
+    std::vector<int> img = p_.download_images();
+    const float dxy = xy - box_.xy;
+    for (int t = 0; t < n; t++) {
+        // unwrapped coordinates in the current box
+        float ux = pos[t].x + img[3 * t] * box_.L.x + img[3 * t + 1] * box_.xy;
+        float uy = pos[t].y + img[3 * t + 1] * box_.L.y;
+        float uz = pos[t].z + img[3 * t + 2] * box_.L.z;
+        if (affine) ux += dxy * uy / box_.L.y;
+        img[3 * t] = img[3 * t + 1] = img[3 * t + 2] = 0;
+        // re-wrap in the new box from the unwrapped coordinates
+        Box nb = box_;
+        nb.xy = xy;
+        wrap_position_host(ux, uy, uz, &img[3 * t], nb);
+        pos[t].x = ux;
+        pos[t].y = uy;
+        pos[t].z = uz;
+    }
+    box_.xy = xy;
+    h_status_->box = box_;
+    CUDA_CHECK(cudaMemcpy(&d_status_->box, &box_, sizeof(Box), cudaMemcpyHostToDevice));
+    p_.set_positions(pos);
+    p_.set_images(img);
+    invalidate_graphs();
+    rebuild_neighbors(false);
+    launch_forces(true);
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+}
+
+void Simulation::apply_step_shear(float gamma) {
+    set_tilt(box_.xy + gamma * box_.L.y, true);
+}
+
 void Simulation::launch_film_center() {
     if (params_.film_axis < 0) return;
     ::launch_film_center(p_.pos, p_.image, params_.natoms, params_.film_axis, &d_status_->box,
@@ -957,6 +1007,9 @@ float Simulation::film_center() {
 void Simulation::set_walls(const WallSet& walls) {
     if (walls.n > 0 && params_.ensemble == Ensemble::NPT_NH)
         throw std::invalid_argument("walls cannot be combined with npt_nh");
+    if (box_.xy != 0.0f)
+        for (int k = 0; k < walls.n; k++)
+            if (walls.w[k].axis != 2) throw std::invalid_argument("with a tilted box walls must be along z");
     CUDA_CHECK(cudaStreamSynchronize(stream_));
     params_.walls = walls;
     invalidate_graphs();   // the wall set is a kernel argument of the captured steps

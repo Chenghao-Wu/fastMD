@@ -52,7 +52,7 @@ __global__ void __launch_bounds__(256, 5) lj_coul_long_kernel(
             float4 pos_j = __ldg(&pos[j]);
             int type_j = __float_as_int(pos_j.w);
 
-            const float3 dd_ = min_image_dr(pos_i, pos_j, box);
+            const float3 dd_ = min_image_dr_ortho(pos_i, pos_j, box);
             float dx = dd_.x, dy = dd_.y, dz = dd_.z;
             float r2 = dx*dx + dy*dy + dz*dz;
 

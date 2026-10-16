@@ -207,3 +207,52 @@ TEST(VerletList, CompleteInOrthorhombicBoxes) {
         free_device(d_pos);
     }
 }
+
+// Sheared (xy-tilted) boxes: cells in fractional coordinates; compare with
+// the true minimum distance over lattice images.
+TEST(VerletList, CompleteInTiltedBoxes) {
+    const float rcut = 2.8f;
+    for (float tilt : {0.1f, -0.35f, 0.5f}) {
+        Box box = make_box(13.0f, 11.0f, 9.0f);
+        box.xy = tilt * box.L.x;
+        const int n = (int)(0.6f * box.volume());
+        std::mt19937 rng(23);
+        std::uniform_real_distribution<float> u(0.0f, 1.0f);
+        std::vector<float4> pos(n);
+        for (auto& p : pos) {   // uniform in the sheared cell
+            float sx = u(rng), sy = u(rng), sz = u(rng);
+            p = make_float4(sx * box.L.x + sy * box.xy, sy * box.L.y, sz * box.L.z, pack_type_id(0));
+        }
+        float4* d_pos = to_device(pos);
+        VerletList v;
+        v.allocate(n, rcut, box);
+        v.build(d_pos, n, box, nullptr, nullptr, rcut);
+        auto num = to_host(v.num_neighbors, n);
+        auto flat = to_host(v.neighbors, (size_t)v.max_neighbors * n);
+        int missing = 0, extra = 0;
+        for (int i = 0; i < n; i++) {
+            std::set<int> got;
+            for (int k = 0; k < num[i]; k++) got.insert(flat[(size_t)k * n + i]);
+            for (int j = 0; j < n; j++) {
+                if (j == i) continue;
+                double best = 1e30;
+                for (int a = -1; a <= 1; a++)
+                    for (int b = -1; b <= 1; b++)
+                        for (int c = -1; c <= 1; c++) {
+                            double dx = pos[i].x - pos[j].x + a * box.L.x + b * box.xy;
+                            double dy = pos[i].y - pos[j].y + b * box.L.y;
+                            double dz = pos[i].z - pos[j].z + c * box.L.z;
+                            best = std::min(best, dx * dx + dy * dy + dz * dz);
+                        }
+                double r = std::sqrt(best);
+                if (std::fabs(r - rcut) < 1e-4) continue;
+                if (r < rcut && !got.count(j)) missing++;
+                if (r >= rcut && got.count(j)) extra++;
+            }
+        }
+        EXPECT_EQ(missing, 0) << "tilt " << tilt;
+        EXPECT_EQ(extra, 0) << "tilt " << tilt;
+        v.free();
+        free_device(d_pos);
+    }
+}

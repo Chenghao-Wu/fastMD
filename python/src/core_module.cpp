@@ -64,9 +64,9 @@ A fastMD simulation resident on the GPU.
 Construct from a config file (``Simulation(path)``) or config text
 (``Simulation.from_text(text)``); paths inside the config are relative to the
 working directory. Per-particle arrays are (natoms, 3) numpy arrays in the
-atom order of the input data file. Positions are wrapped into the box; for
-an orthorhombic box the unwrapped coordinates are
-``positions + images * box[:3]``.
+atom order of the input data file. Positions are wrapped into the box
+(sheared by the xy tilt); ``unwrapped_positions`` gives x + ix Lx + iy xy,
+y + iy Ly, z + iz Lz.
 )doc")
         .def(py::init([](const std::string& path) { return Engine::from_file(path); }),
              py::arg("config"), "Load a config file and set up the simulation.")
@@ -117,6 +117,9 @@ an orthorhombic box the unwrapped coordinates are
              "Replace positions (wrapped into the box; wrapping adds to the given image "
              "counts) and recompute the neighbor list and forces.")
         .def_property_readonly("images", [](const Engine& e) { return as_array(e.images(), 3); })
+        .def_property_readonly("unwrapped_positions",
+                               [](const Engine& e) { return as_array(e.unwrapped_positions(), 3); },
+                               "Unwrapped positions (natoms, 3), float64, including the box tilt.")
         .def_property("velocities",
                       [](Engine& e) { return as_array(e.velocities(), 3); },
                       [](Engine& e, const py::array_t<float, py::array::c_style | py::array::forcecast>& a) {
@@ -128,6 +131,13 @@ an orthorhombic box the unwrapped coordinates are
                                [](const Engine& e) { return as_array(e.per_atom_energy(), 1); })
         .def_property_readonly("types", [](const Engine& e) { return as_array(e.types(), 1); })
         .def_property_readonly("charges", [](const Engine& e) { return as_array(e.charges(), 1); })
+        .def("apply_step_shear", &Engine::apply_step_shear, py::arg("gamma"),
+             "Step shear strain gamma in the xy plane: particles move affinely (x += gamma y, "
+             "velocities unchanged) and the box tilt xy grows by gamma Ly. The neighbor list "
+             "and forces are recomputed.")
+        .def("set_tilt", &Engine::set_tilt, py::arg("xy"), py::arg("affine") = false,
+             "Set the box xy tilt. affine=True moves particles with the box (a strain); "
+             "otherwise unwrapped positions are kept (e.g. to restore a saved state).")
         .def_property_readonly("nwalls", &Engine::nwalls, "Number of active walls.")
         .def_property_readonly("film_center", &Engine::film_center,
                                "Film reference plane: mass-weighted mean unwrapped coordinate "

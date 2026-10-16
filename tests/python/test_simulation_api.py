@@ -249,6 +249,21 @@ class SimulationAPITest(unittest.TestCase):
         self.assertGreater(L[2] - (x[:, 2].max() - x[:, 2].min()), 10.0)   # vacuum remains
         self.assertIn("thickness", out)
 
+    def test_step_shear(self):
+        sim = self.make()
+        sim.run(100)
+        before = sim.unwrapped_positions
+        Ly = sim.box[1]
+        sim.apply_step_shear(0.1)
+        self.assertAlmostEqual(sim.box[3], 0.1 * Ly, places=4)
+        after = sim.unwrapped_positions
+        np.testing.assert_allclose(after[:, 0], before[:, 0] + 0.1 * before[:, 1], atol=2e-4)
+        np.testing.assert_allclose(after[:, 1:], before[:, 1:], atol=2e-4)
+        with self.assertRaises(ValueError):
+            sim.box_length          # not cubic any more
+        sim.set_tilt(0.0)           # non-affine: unwrapped positions unchanged
+        np.testing.assert_allclose(sim.unwrapped_positions, after, atol=2e-4)
+
     def test_errors(self):
         sim = self.make()
         with self.assertRaises(ValueError):

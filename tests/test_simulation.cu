@@ -331,3 +331,69 @@ TEST(Simulation, FilmCenterTracksSlab) {
     auto plain = make_sim(data, "", 10);
     EXPECT_THROW(plain->film_center(), std::logic_error);
 }
+
+// Sheared boxes. Tilts +Lx/2 and -Lx/2 are the same lattice: re-tilting
+// without moving particles leaves every force unchanged.
+TEST(Simulation, TiltedLatticeEquivalence) {
+    std::string data = write_melt("sim_tilt.data", 12, 20, 0.85f, 51);
+    auto sim = make_sim(data, "pair_tpa 1\n", 10, "nvt_langevin 1.0 1.0 1.0 3", make_int3(2, 1, 1));
+    const float Lx = sim->box().L.x;
+    sim->set_tilt(0.5f * Lx, true);   // a large affine shear
+    EXPECT_FLOAT_EQ(sim->box().xy, 0.5f * Lx);
+    std::vector<float4> f1 = sim->forces();
+    sim->set_tilt(-0.5f * Lx, false);  // same lattice, positions re-wrapped only
+    std::vector<float4> f2 = sim->forces();
+    double worst = 0, fmax = 0;
+    for (size_t t = 0; t < f1.size(); t++) {
+        worst = std::max({worst, (double)std::fabs(f1[t].x - f2[t].x), (double)std::fabs(f1[t].y - f2[t].y),
+                          (double)std::fabs(f1[t].z - f2[t].z)});
+        fmax = std::max(fmax, (double)std::fabs(f1[t].x));
+    }
+    EXPECT_LT(worst, 1e-4 * fmax);
+    sim->run(50);   // dynamics in the tilted box
+    for (const float4& p : sim->positions()) EXPECT_TRUE(std::isfinite(p.x) && std::isfinite(p.y));
+}
+
+// Stress-strain consistency in a sheared box: for an affine shear
+// x += gamma y, dU/dgamma = -W_xy (W_xy = sum r_y F_x over pairs), i.e.
+// at zero velocities dU/dgamma = -V P_xy.
+TEST(Simulation, ShearVirialIsStrainDerivative) {
+    std::string data = write_melt("sim_strain.data", 12, 20, 0.85f, 53);
+    // energy-shifted LJ: the energy must be continuous where pairs cross rc
+    auto sim = make_sim(data, "pair_tpa 1\npair_shift yes\n", 10, "nvt_langevin 1.0 1.0 1.0 3");
+    sim->run(300);   // leave the lattice
+    sim->set_velocities(std::vector<float3>(sim->positions().size(), make_float3(0, 0, 0)));
+    for (float xy0 : {0.0f, 0.3f * sim->box().L.y}) {
+        sim->set_tilt(xy0, true);
+        const double V = sim->box().volume(), N = (double)sim->positions().size(), Ly = sim->box().L.y;
+        const double Pxy = sim->thermo().stress[VXY];
+        const float dg = 2e-3f;
+        auto U_at = [&](float g) {
+            sim->set_tilt(xy0 + g * (float)Ly, true);
+            double U = sim->thermo().potential_energy * N;
+            sim->set_tilt(xy0, true);
+            return U;
+        };
+        // strains measured relative to the current (sheared) state
+        const double dUdg = (U_at(dg) - U_at(-dg)) / (2.0 * dg);
+        EXPECT_NEAR(dUdg, -V * Pxy, 0.01 * std::fabs(V * Pxy) + 0.5) << "tilt " << xy0;
+        printf("tilt %.3f: dU/dgamma %.4f  -V Pxy %.4f\n", xy0, dUdg, -V * Pxy);
+    }
+}
+
+// A positive step strain makes P_xy jump negative (shear stress
+// sigma_xy = -P_xy > 0), then relax.
+TEST(Simulation, StepShearStressResponse) {
+    std::string data = write_melt("sim_step.data", 16, 25, 0.85f, 55);
+    auto sim = make_sim(data, "", 10, "nvt_langevin 1.0 1.0 1.0 3");
+    sim->run(2000);
+    double before = 0;
+    for (int k = 0; k < 10; k++) { sim->run(20); before += sim->thermo().stress[VXY]; }
+    before /= 10;
+    sim->apply_step_shear(0.05f);
+    EXPECT_NEAR(sim->box().xy, 0.05f * sim->box().L.y, 1e-5);
+    const double after = sim->thermo().stress[VXY];
+    EXPECT_LT(after - before, -0.3) << "before " << before << " after " << after;
+    sim->run(2000);
+    EXPECT_GT(sim->thermo().stress[VXY] - before, 0.5 * (after - before));   // relaxing
+}

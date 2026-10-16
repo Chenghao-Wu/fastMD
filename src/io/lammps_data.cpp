@@ -156,8 +156,9 @@ void parse_lammps_data(const std::string& path, TopologyData& topo) {
             } else if (tok.size() >= 6 && tok[3] == "xy") {
                 float xy = to_float(tok[0], path, lineno), xz = to_float(tok[1], path, lineno),
                       yz = to_float(tok[2], path, lineno);
-                if (xy != 0.0f || xz != 0.0f || yz != 0.0f)
-                    data_error(path, lineno, "triclinic boxes are not supported");
+                if (xz != 0.0f || yz != 0.0f)
+                    data_error(path, lineno, "only an xy tilt is supported (xz = yz = 0)");
+                topo.tilt_xy = xy;
             }
             // other header lines (extra/per-atom, ellipsoids, ...) are irrelevant here
             continue;
@@ -303,20 +304,20 @@ void parse_lammps_data(const std::string& path, TopologyData& topo) {
         if (!(L[d] > 0.0f)) throw std::runtime_error(path + ": box length must be positive");
     }
     topo.box = make_float3(L[0], L[1], L[2]);
+    if (std::fabs(topo.tilt_xy) > 0.5f * L[0])
+        throw std::runtime_error(path + ": |xy| tilt exceeds Lx / 2");
+    Box wrap_box = make_box(topo.box);
+    wrap_box.xy = topo.tilt_xy;
     topo.box_lo = make_float3(lo[0], lo[1], lo[2]);
 
     // Shift to a box spanning [0, L) and wrap, keeping unwrapped coordinates
     // (position + image * L) unchanged.
     for (size_t i = 0; i < topo.positions.size(); i++) {
-        float* p = &topo.positions[i].x;
-        for (int d = 0; d < 3; d++) {
-            float x = p[d] - lo[d];
-            int shift = (int)std::floor(x / L[d]);
-            x -= shift * L[d];
-            if (x >= L[d]) { x -= L[d]; shift++; }   // round-off at the upper edge
-            p[d] = x;
-            topo.images[3 * i + d] += shift;
-        }
+        float4& p = topo.positions[i];
+        p.x -= lo[0];
+        p.y -= lo[1];
+        p.z -= lo[2];
+        wrap_position_host(p.x, p.y, p.z, &topo.images[3 * i], wrap_box);
     }
 
     int ntypes = n_atom_types > 0 ? n_atom_types : 1;

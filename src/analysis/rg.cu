@@ -40,7 +40,7 @@ __global__ void rg_kernel(const float4* __restrict__ pos,
         int t = mol_members[start + k];
         int i = rank ? rank[t] : t;
         float4 r = pos[i];
-        cx += r.x + image[3 * i + 0] * box.L.x;
+        cx += r.x + image[3 * i + 0] * box.L.x + image[3 * i + 1] * box.xy;
         cy += r.y + image[3 * i + 1] * box.L.y;
         cz += r.z + image[3 * i + 2] * box.L.z;
     }
@@ -55,7 +55,7 @@ __global__ void rg_kernel(const float4* __restrict__ pos,
         int t = mol_members[start + k];
         int i = rank ? rank[t] : t;
         float4 r = pos[i];
-        float dx = r.x + image[3 * i + 0] * box.L.x - cx;
+        float dx = r.x + image[3 * i + 0] * box.L.x + image[3 * i + 1] * box.xy - cx;
         float dy = r.y + image[3 * i + 1] * box.L.y - cy;
         float dz = r.z + image[3 * i + 2] * box.L.z - cz;
         rg2 += dx * dx + dy * dy + dz * dz;

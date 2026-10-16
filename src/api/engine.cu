@@ -62,6 +62,19 @@ void Engine::run_config() { sim_->run(); }
 
 std::vector<float> Engine::positions() const { return xyz_of(sim_->positions()); }
 std::vector<int> Engine::images() const { return sim_->images(); }
+
+std::vector<double> Engine::unwrapped_positions() const {
+    std::vector<float4> p = sim_->positions();
+    std::vector<int> im = sim_->images();
+    const Box& b = sim_->box();
+    std::vector<double> out(3 * p.size());
+    for (size_t i = 0; i < p.size(); i++) {
+        out[3 * i] = (double)p[i].x + (double)im[3 * i] * b.L.x + (double)im[3 * i + 1] * b.xy;
+        out[3 * i + 1] = (double)p[i].y + (double)im[3 * i + 1] * b.L.y;
+        out[3 * i + 2] = (double)p[i].z + (double)im[3 * i + 2] * b.L.z;
+    }
+    return out;
+}
 std::vector<float> Engine::velocities() { return xyz_of(sim_->velocities()); }
 std::vector<float> Engine::forces() const { return xyz_of(sim_->forces()); }
 std::vector<float> Engine::charges() const { return sim_->charges(); }
@@ -88,6 +101,8 @@ void Engine::set_velocities(const std::vector<float>& v) {
     sim_->set_velocities(float3_of(v, natoms(), "set_velocities"));
 }
 
+void Engine::apply_step_shear(double gamma) { sim_->apply_step_shear((float)gamma); }
+void Engine::set_tilt(double xy, bool affine) { sim_->set_tilt((float)xy, affine); }
 int Engine::nwalls() const { return sim_->walls().n; }
 double Engine::film_center() { return sim_->film_center(); }
 void Engine::remove_walls() { sim_->set_walls(WallSet{}); }

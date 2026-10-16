@@ -31,11 +31,13 @@ __device__ __forceinline__ int wrap_near(int c, int n) {   // c in [-n, 2n)
     return c < 0 ? c + n : (c >= n ? c - n : c);
 }
 
-// Cell coordinates of a wrapped position (nx, ny, nz cells along the box edges).
+// Cell coordinates of a position: cells divide the fractional coordinates
+// (nx, ny, nz cells along the cell vectors; sheared cells for a tilted box).
 __device__ __forceinline__ int3 cell_of(float4 r, const Box& b, int nx, int ny, int nz) {
-    return make_int3(wrap_cell(__float2int_rd(r.x * b.inv_L.x * nx), nx),
-                     wrap_cell(__float2int_rd(r.y * b.inv_L.y * ny), ny),
-                     wrap_cell(__float2int_rd(r.z * b.inv_L.z * nz), nz));
+    const float3 s = fractional(r, b);
+    return make_int3(wrap_cell(__float2int_rd(s.x * nx), nx),
+                     wrap_cell(__float2int_rd(s.y * ny), ny),
+                     wrap_cell(__float2int_rd(s.z * nz), nz));
 }
 
 // Rebuild criterion, evaluated identically by every thread from device state:
@@ -134,11 +136,13 @@ __global__ void nl_bin_kernel(BinArgs a) {
         a.cell_slot[i] = atomicAdd(&a.cell_count[key], 1);
         a.pos_ref[i] = r;
     }
-    if (i == 0 && (box.L.x * a.cell_div / a.nx < a.rc + a.skin ||
-                   box.L.y * a.cell_div / a.ny < a.rc + a.skin ||
-                   box.L.z * a.cell_div / a.nz < a.rc + a.skin ||
-                   box.min_length() < 2.0f * a.rc_min_image))
-        a.st->grid_error = 1;
+    if (i == 0) {
+        const float3 w = perpendicular_widths(box);
+        if (w.x * a.cell_div / a.nx < a.rc + a.skin || w.y * a.cell_div / a.ny < a.rc + a.skin ||
+            w.z * a.cell_div / a.nz < a.rc + a.skin ||
+            fminf(w.x, fminf(w.y, w.z)) < 2.0f * a.rc_min_image)
+            a.st->grid_error = 1;
+    }
 
     // The last block to finish scans the counts, scatters and gathers.
     __shared__ bool last;
@@ -207,7 +211,7 @@ struct BuildArgs {
 // lanes stride over each cell's candidates; hits are compacted with a
 // group-wide ballot so every lane keeps the same running count. Counts
 // continue past the capacity so overflow is detected exactly.
-template <int TPA, int R>
+template <int TPA, int R, bool TILT>
 __global__ void nl_build_kernel(BuildArgs a) {
     const int g = blockIdx.x * blockDim.x + threadIdx.x;
     if (!a.st->rebuild) {
@@ -251,7 +255,7 @@ __global__ void nl_build_kernel(BuildArgs a) {
                         const int b = base + sub;
                         int j = -1;
                         if (b < end && b != k) {
-                            float3 d = min_image_dr(pos_i, a.pos_sorted[b], box);
+                            float3 d = min_image_dr_t<TILT>(pos_i, a.pos_sorted[b], box);
                             if (d.x * d.x + d.y * d.y + d.z * d.z < a.rc_skin2) {
                                 j = __ldg(&a.order[b]);
                                 int tag_j = a.tag ? __ldg(&a.tag[j]) : j;
@@ -345,8 +349,10 @@ void VerletList::free() {
 
 bool VerletList::grid_ok_for(const Box& box) const {
     const float need = rc + skin;
-    return nx > 0 && box.L.x * cell_div / nx >= need && box.L.y * cell_div / ny >= need &&
-           box.L.z * cell_div / nz >= need && box.min_length() >= 2.0f * rc_min_image;
+    const float3 w = perpendicular_widths(box);
+    return nx > 0 && tilted_ == (box.xy != 0.0f) &&   // the build variant follows the tilt
+           w.x * cell_div / nx >= need && w.y * cell_div / ny >= need &&
+           w.z * cell_div / nz >= need && std::min({w.x, w.y, w.z}) >= 2.0f * rc_min_image;
 }
 
 int VerletList::cells_along(float length) const {
@@ -354,20 +360,24 @@ int VerletList::cells_along(float length) const {
 }
 
 bool VerletList::grid_matches(const Box& box) const {
-    return nx == cells_along(box.L.x) && ny == cells_along(box.L.y) && nz == cells_along(box.L.z);
+    const float3 w = perpendicular_widths(box);
+    return nx == cells_along(w.x) && ny == cells_along(w.y) && nz == cells_along(w.z) &&
+           tilted_ == (box.xy != 0.0f);
 }
 
 void VerletList::set_grid(const Box& box) {
     for (float l : {box.L.x, box.L.y, box.L.z})
         if (!(l > 0.0f) || !std::isfinite(l)) throw std::runtime_error("VerletList: invalid box length");
-    nx = cells_along(box.L.x);
-    ny = cells_along(box.L.y);
-    nz = cells_along(box.L.z);
+    const float3 w = perpendicular_widths(box);
+    tilted_ = box.xy != 0.0f;
+    nx = cells_along(w.x);
+    ny = cells_along(w.y);
+    nz = cells_along(w.z);
     if (std::max({nx, ny, nz}) > 1024)
         throw std::runtime_error("VerletList: more than 1024 cells per dimension");
     if ((long long)nx * ny * nz > (1ll << 28)) throw std::runtime_error("VerletList: too many cells");
     ncells = nx * ny * nz;
-    cell_size = std::min({box.L.x / nx, box.L.y / ny, box.L.z / nz});
+    cell_size = std::min({w.x / nx, w.y / ny, w.z / nz});
     if (ncells > ncells_alloc) {
         for (int** p : {&cell_count, &cell_starts, &cell_ends, &cell_rank})
             if (*p) CUDA_CHECK(cudaFree(*p));
@@ -453,10 +463,11 @@ void VerletList::launch_build(const float4* /*pos*/, const Box* d_box, const int
                 natoms, nx, ny, nz, max_neighbors, (rc + skin) * (rc + skin)};
     const int tpa = build_tpa;
     const int blocks = div_ceil(natoms * tpa, kBlock);
-#define FASTMD_BUILD(T) do {                                                        \
-        if (cell_div == 2) nl_build_kernel<T, 2><<<blocks, kBlock, 0, stream>>>(a); \
-        else nl_build_kernel<T, 1><<<blocks, kBlock, 0, stream>>>(a);               \
+#define FASTMD_BUILD2(T, X) do {                                                       \
+        if (cell_div == 2) nl_build_kernel<T, 2, X><<<blocks, kBlock, 0, stream>>>(a); \
+        else nl_build_kernel<T, 1, X><<<blocks, kBlock, 0, stream>>>(a);               \
     } while (0)
+#define FASTMD_BUILD(T) do { if (tilted_) FASTMD_BUILD2(T, true); else FASTMD_BUILD2(T, false); } while (0)
     switch (tpa) {
         case 1: FASTMD_BUILD(1); break;
         case 2: FASTMD_BUILD(2); break;
@@ -464,6 +475,7 @@ void VerletList::launch_build(const float4* /*pos*/, const Box* d_box, const int
         default: FASTMD_BUILD(8); break;
     }
 #undef FASTMD_BUILD
+#undef FASTMD_BUILD2
     CUDA_CHECK(cudaGetLastError());
 }
 

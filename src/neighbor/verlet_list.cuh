@@ -65,7 +65,7 @@ struct VerletList {
     void set_grid(const Box& box);
     bool grid_ok_for(const Box& box) const;   // cells still >= (rc + skin) / cell_div
     bool grid_matches(const Box& box) const;  // grid set_grid(box) would choose
-    int  cells_along(float length) const;
+    int  cells_along(float width) const;     // cells for a perpendicular cell width
 
     // Device-side maintenance (enqueue only). d_box: current box on the
     // device; d_max_dr2_bits: max squared displacement since the last build
@@ -104,6 +104,7 @@ struct VerletList {
 
 private:
     Box*  d_box_scratch_ = nullptr;    // box for synchronous builds
+    bool  tilted_ = false;             // xy tilt at the last set_grid (selects the build variant)
     int*   d_dr2_scratch_ = nullptr;
     float4* d_ref_scratch_ = nullptr;
     void launch_bin(const float4* pos, float4* pos_ref, const Box* d_box,

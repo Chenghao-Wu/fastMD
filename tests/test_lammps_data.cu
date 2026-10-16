@@ -155,3 +155,29 @@ TEST(LammpsData, OplsSpecialPairsFromBondGraph) {
     // branched: 1-4 across a branch point
     EXPECT_EQ(pairs_for({{0, 1}, {1, 2}, {1, 3}, {3, 4}}, {}, 5, false), (S{{0, 4}, {2, 4}}));
 }
+
+// An xy tilt is read, positions are wrapped into the sheared cell keeping
+// unwrapped coordinates, and the restart writer writes the tilt back.
+TEST(LammpsData, TiltedBoxRoundTrip) {
+    std::ofstream("tilted.data") << "tilted\n\n2 atoms\n1 atom types\n\n"
+        "0 10 xlo xhi\n0 8 ylo yhi\n0 6 zlo zhi\n2.5 0 0 xy xz yz\n\n"
+        "Masses\n\n1 1\n\nAtoms # atomic\n\n1 1 1.0 9.0 1.0 0 0 0\n2 1 12.0 1.0 1.0 0 0 0\n";
+    TopologyData t;
+    parse_lammps_data("tilted.data", t);
+    EXPECT_FLOAT_EQ(t.tilt_xy, 2.5f);
+    Box b = make_box(t.box);
+    b.xy = t.tilt_xy;
+    for (int i = 0; i < 2; i++) {   // unwrapped coordinates preserved
+        float ux = t.positions[i].x + t.images[3 * i] * b.L.x + t.images[3 * i + 1] * b.xy;
+        float uy = t.positions[i].y + t.images[3 * i + 1] * b.L.y;
+        EXPECT_NEAR(ux, i == 0 ? 1.0f : 12.0f, 1e-5f);
+        EXPECT_NEAR(uy, i == 0 ? 9.0f : 1.0f, 1e-5f);
+        float sx = (t.positions[i].x - b.xy * t.positions[i].y / b.L.y) / b.L.x;   // in the cell
+        EXPECT_GE(sx, 0.0f);
+        EXPECT_LT(sx, 1.0f);
+    }
+    std::ofstream("tilted_bad.data") << "bad\n\n1 atoms\n1 atom types\n\n"
+        "0 10 xlo xhi\n0 8 ylo yhi\n0 6 zlo zhi\n0 1 0 xy xz yz\n\nAtoms # atomic\n\n1 1 1 1 1\n";
+    TopologyData bad;
+    EXPECT_THROW(parse_lammps_data("tilted_bad.data", bad), std::runtime_error);
+}

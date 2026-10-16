@@ -46,6 +46,7 @@ public:
 
     std::vector<float> positions() const;
     std::vector<int>   images() const;
+    std::vector<double> unwrapped_positions() const;   // x + ix Lx + iy xy, y + iy Ly, z + iz Lz
     std::vector<float> velocities();          // applies a pending thermostat scale
     std::vector<float> forces() const;
     std::vector<float> per_atom_energy() const;
@@ -58,6 +59,8 @@ public:
     void set_velocities(const std::vector<float>& v);
 
     Thermo thermo();   // energies, temperature and pressure tensor now
+    void apply_step_shear(double gamma);
+    void set_tilt(double xy, bool affine);
     int  nwalls() const;
     double film_center();   // film reference plane (needs `film <axis>`)
     void remove_walls();

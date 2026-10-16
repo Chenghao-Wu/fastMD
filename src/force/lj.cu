@@ -12,7 +12,7 @@
 // across the consecutive particles of a warp), then the group sums its
 // partial forces with shuffles. TPA > 1 raises occupancy when the system is
 // small relative to the GPU.
-template <bool CAP, int TPA, bool EV, bool SHIFT>
+template <bool CAP, int TPA, bool EV, bool SHIFT, bool TILT>
 __global__ void lj_verlet_kernel(
     const float4* __restrict__ pos,
     float4* __restrict__ force,
@@ -45,7 +45,7 @@ __global__ void lj_verlet_kernel(
             float4 pos_j = __ldg(&pos[j]);
             int type_j = __float_as_int(pos_j.w);
 
-            const float3 dd_ = min_image_dr(pos_i, pos_j, box);
+            const float3 dd_ = min_image_dr_t<TILT>(pos_i, pos_j, box);
             float dx = dd_.x, dy = dd_.y, dz = dd_.z;
             float r2 = dx*dx + dy*dy + dz*dz;
 
@@ -118,11 +118,14 @@ void launch_lj_kernel(const float4* pos, float4* force, double* virial,
 {
     if (tpa <= 0) tpa = pair_threads_per_atom(natoms);
     const bool cap = lj_cap && force_cap > 0.0f;
+    const bool tilted = box.xy != 0.0f;   // the tilt only changes at host events
     const int blocks = div_ceil(natoms * tpa, 256);
-#define FASTMD_LJ_K(C, T, E, S)                                                    \
-    lj_verlet_kernel<C, T, E, S><<<blocks, 256, 0, stream>>>(                     \
+#define FASTMD_LJ_K2(C, T, E, S, X)                                                \
+    lj_verlet_kernel<C, T, E, S, X><<<blocks, 256, 0, stream>>>(                  \
         pos, force, virial, lj_params, lj_cap, force_cap,                         \
         neighbors, num_neighbors, natoms, ntypes, rc2, box, d_box)
+#define FASTMD_LJ_K(C, T, E, S)                                                    \
+    do { if (tilted) FASTMD_LJ_K2(C, T, E, S, true); else FASTMD_LJ_K2(C, T, E, S, false); } while (0)
 #define FASTMD_LJ_LAUNCH(C, T)                                                     \
     do {                                                                           \
         if (!ev) FASTMD_LJ_K(C, T, false, false);                                  \
@@ -141,6 +144,7 @@ void launch_lj_kernel(const float4* pos, float4* force, double* virial,
     }
 #undef FASTMD_LJ_LAUNCH
 #undef FASTMD_LJ_K
+#undef FASTMD_LJ_K2
 }
 
 std::vector<float2> lj_force_cap_table(const std::vector<float2>& lj_params,
