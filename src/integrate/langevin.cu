@@ -17,6 +17,7 @@ void LangevinState::init(int /*natoms_padded*/, float Tdamp, float dt,
     seed = seed_in;
 }
 
+template <bool TILT>
 __global__ void integrator_pre_force_kernel(
     float4* __restrict__ pos,
     float4* __restrict__ vel,
@@ -89,9 +90,9 @@ __global__ void integrator_pre_force_kernel(
     r.y += half_dt * v.y;
     r.z += half_dt * v.z;
 
-    wrap_into_box(r, image ? image + 3 * i : nullptr, box);
+    wrap_into_box_t<TILT>(r, image ? image + 3 * i : nullptr, box);
 
-    update_max_displacement(r, pos_ref[i], d_max_dr2_int, box);
+    update_max_displacement<TILT>(r, pos_ref[i], d_max_dr2_int, box);
 
     pos[i] = r;
     vel[i] = v;
@@ -106,8 +107,12 @@ void launch_integrator_pre_force(float4* pos, float4* vel, const float4* force,
     int blocks = div_ceil(natoms, 256);
     LangevinState l = lang;
     l.half_dt = half_dt;
-    integrator_pre_force_kernel<<<blocks, 256, 0, stream>>>(
-        pos, vel, force, pos_ref, d_max_dr2_int, image, tag, d_step, natoms, box, l);
+    if (box.xy != 0.0f)   // the tilt only changes at host events
+        integrator_pre_force_kernel<true><<<blocks, 256, 0, stream>>>(
+            pos, vel, force, pos_ref, d_max_dr2_int, image, tag, d_step, natoms, box, l);
+    else
+        integrator_pre_force_kernel<false><<<blocks, 256, 0, stream>>>(
+            pos, vel, force, pos_ref, d_max_dr2_int, image, tag, d_step, natoms, box, l);
 }
 
 __global__ void integrator_post_force_kernel(

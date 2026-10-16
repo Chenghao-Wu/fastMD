@@ -2,10 +2,11 @@
 #include "../core/types.cuh"
 #include <cstring>
 
+template <bool TILT = true>
 __device__ __forceinline__
 void update_max_displacement(float4 pos_new, float4 pos_ref,
                               int* d_max_dr2_int, const Box& box) {
-    float3 d = min_image_dr(pos_new, pos_ref, box);
+    float3 d = min_image_dr_t<TILT>(pos_new, pos_ref, box);
     float dr2 = d.x * d.x + d.y * d.y + d.z * d.z;
     atomicMax(d_max_dr2_int, __float_as_int(dr2));
 }

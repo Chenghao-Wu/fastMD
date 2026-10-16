@@ -4,7 +4,7 @@
 #include "../core/reduce.cuh"
 
 // EV = false: forces only (no energy added to force.w, no virial).
-template <int TPA, bool EV>
+template <int TPA, bool EV, bool TILT>
 __global__ void bonded_gather_kernel(const float4* __restrict__ pos, float4* __restrict__ force,
                                      double* __restrict__ virial,
                                      const int* __restrict__ tag,
@@ -43,7 +43,7 @@ __global__ void bonded_gather_kernel(const float4* __restrict__ pos, float4* __r
             if (kind == BONDED_BOND) {
                 if (bp.bond_style == 0) continue;
                 int2 b = __ldg(&bonds[term]);
-                float3 d = min_image_dr(__ldg(&pos[b.x]), __ldg(&pos[b.y]), box);
+                float3 d = min_image_dr_t<TILT>(__ldg(&pos[b.x]), __ldg(&pos[b.y]), box);
                 int type = __ldg(&bp.bond_type[term]);
                 BondTerm bt;
                 if (bp.bond_style == 1) {
@@ -65,8 +65,8 @@ __global__ void bonded_gather_kernel(const float4* __restrict__ pos, float4* __r
                 if (bp.angle_style == 0) continue;
                 int4 a = __ldg(&angles[term]);
                 float4 rj = __ldg(&pos[a.y]);
-                float3 dij = min_image_dr(__ldg(&pos[a.x]), rj, box);
-                float3 dkj = min_image_dr(__ldg(&pos[a.z]), rj, box);
+                float3 dij = min_image_dr_t<TILT>(__ldg(&pos[a.x]), rj, box);
+                float3 dkj = min_image_dr_t<TILT>(__ldg(&pos[a.z]), rj, box);
                 AngleTerm at;
                 if (bp.angle_style == 1) {
                     at = harmonic_angle_term(dij, dkj, bp.angle[a.w]);
@@ -90,9 +90,9 @@ __global__ void bonded_gather_kernel(const float4* __restrict__ pos, float4* __r
                 if (bp.dihedral_style == 0) continue;
                 int4 d4 = __ldg(&dihedrals[term]);
                 float4 r2 = __ldg(&pos[d4.y]), r3 = __ldg(&pos[d4.z]);
-                DihedralTerm dt = opls_dihedral_term(min_image_dr(__ldg(&pos[d4.x]), r2, box),
-                                                     min_image_dr(r3, r2, box),
-                                                     min_image_dr(__ldg(&pos[d4.w]), r3, box),
+                DihedralTerm dt = opls_dihedral_term(min_image_dr_t<TILT>(__ldg(&pos[d4.x]), r2, box),
+                                                     min_image_dr_t<TILT>(r3, r2, box),
+                                                     min_image_dr_t<TILT>(__ldg(&pos[d4.w]), r3, box),
                                                      bp.opls[__ldg(&bp.dihedral_type[term])]);
                 float3 fr = role == 0 ? dt.f1 : role == 1 ? dt.f2 : role == 2 ? dt.f3 : dt.f4;
                 f.x += fr.x; f.y += fr.y; f.z += fr.z;
@@ -134,9 +134,11 @@ void launch_bonded_gather_kernel(const float4* pos, float4* force, double* viria
     if (!term_offsets) return;
     if (tpa != 1 && tpa != 2 && tpa != 4 && tpa != 8) tpa = 1;
     const int blocks = div_ceil(natoms * tpa, 256);
-#define FASTMD_LAUNCH_EV(T, E) bonded_gather_kernel<T, E><<<blocks, 256, 0, stream>>>( \
+    const bool tilted = box.xy != 0.0f;   // the tilt only changes at host events
+#define FASTMD_LAUNCH_EV2(T, E, X) bonded_gather_kernel<T, E, X><<<blocks, 256, 0, stream>>>( \
         pos, force, virial, tag, term_offsets, terms, bonds, angles, dihedrals,    \
         params, natoms, box, d_box, atom_vir)
+#define FASTMD_LAUNCH_EV(T, E) do { if (tilted) FASTMD_LAUNCH_EV2(T, E, true); else FASTMD_LAUNCH_EV2(T, E, false); } while (0)
 #define FASTMD_LAUNCH(T) do { if (ev) FASTMD_LAUNCH_EV(T, true); else FASTMD_LAUNCH_EV(T, false); } while (0)
     switch (tpa) {
         case 1: FASTMD_LAUNCH(1); break;
@@ -146,4 +148,5 @@ void launch_bonded_gather_kernel(const float4* pos, float4* force, double* viria
     }
 #undef FASTMD_LAUNCH
 #undef FASTMD_LAUNCH_EV
+#undef FASTMD_LAUNCH_EV2
 }

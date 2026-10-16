@@ -128,4 +128,19 @@ __device__ __forceinline__ void wrap_into_box(float4& r, int* img, const Box& b)
         img[2] += iz;
     }
 }
+// Compile-time variant (orthogonal wrap when TILT is false).
+template <bool TILT>
+__device__ __forceinline__ void wrap_into_box_t(float4& r, int* img, const Box& b) {
+    if (TILT) { wrap_into_box(r, img, b); return; }
+    const int ix = (int)floorf(r.x * b.inv_L.x), iy = (int)floorf(r.y * b.inv_L.y),
+              iz = (int)floorf(r.z * b.inv_L.z);
+    r.x -= ix * b.L.x;
+    r.y -= iy * b.L.y;
+    r.z -= iz * b.L.z;
+    if (img) {
+        img[0] += ix;
+        img[1] += iy;
+        img[2] += iz;
+    }
+}
 #endif  // __CUDACC__
