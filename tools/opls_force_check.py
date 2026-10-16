@@ -108,7 +108,7 @@ def convert_data_nm(src, dst):
             stripped = line.strip()
             parts = stripped.split()
             if len(parts) == 4 and parts[2] in ('xlo', 'ylo', 'zlo'):
-                out.append("%.6f %.6f %s %s\n" % (float(parts[0]) * A2NM,
+                out.append("%.9f %.9f %s %s\n" % (float(parts[0]) * A2NM,
                                                   float(parts[1]) * A2NM,
                                                   parts[2], parts[3]))
                 continue
@@ -117,9 +117,9 @@ def convert_data_nm(src, dst):
                 out.append(line)
                 continue
             if in_atoms and len(parts) >= 7:
-                parts[4] = "%.6f" % (float(parts[4]) * A2NM)
-                parts[5] = "%.6f" % (float(parts[5]) * A2NM)
-                parts[6] = "%.6f" % (float(parts[6]) * A2NM)
+                parts[4] = "%.9f" % (float(parts[4]) * A2NM)
+                parts[5] = "%.9f" % (float(parts[5]) * A2NM)
+                parts[6] = "%.9f" % (float(parts[6]) * A2NM)
                 out.append(' '.join(parts) + '\n')
                 continue
             out.append(line)
