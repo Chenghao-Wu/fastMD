@@ -2,6 +2,7 @@
 #include "../core/system.cuh"
 #include "../neighbor/skin_trigger.cuh"
 #include "../force/lj.cuh"
+#include "../force/soft.cuh"
 #include "../force/lj_coul_long.cuh"
 #include "../force/ewald_recip.cuh"
 #include "../force/ewald_excl.cuh"
@@ -456,7 +457,14 @@ void Simulation::launch_forces(bool ev) {
 
 void Simulation::launch_pair_kernel(int tpa, bool ev) {
     const int n = params_.natoms;
-    if (params_.ewald_on)
+    if (params_.pair_soft) {
+        // the ramp reads the step counter of the active integrator
+        const int* d_cur_step = is_nose_hoover(params_.ensemble) ? &d_nh_state_->step : d_step_;
+        launch_soft_kernel(p_.pos, p_.force, d_virial_, verlet_.neighbors, verlet_.num_neighbors,
+                           n, params_.rc, params_.soft_A_start, params_.soft_A_stop,
+                           params_.nsteps, d_cur_step, box_L_, inv_L_, stream_, tpa,
+                           &d_status_->L, ev);
+    } else if (params_.ewald_on)
         launch_lj_coul_long_kernel(p_.pos, p_.charge, p_.force, d_virial_, d_lj_params_,
                                    verlet_.neighbors, verlet_.num_neighbors,
                                    n, params_.ntypes, params_.coul_const, params_.ewald_alpha,

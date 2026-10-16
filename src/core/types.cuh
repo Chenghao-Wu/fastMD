@@ -71,6 +71,8 @@ struct SimParams {
     int   stress_freq;
     char  stress_file[256];
     int   pair_shift = 0;     // 1: energy-shifted LJ (U(rc) = 0)
+    int   pair_soft = 0;      // 1: soft repulsion A [1 + cos(pi r / rc)] replaces LJ
+    float soft_A_start = 0.0f, soft_A_stop = 0.0f;
     int   stress_p = 16;      // correlator points per level
     int   stress_m = 2;       // correlator block-averaging factor
 

@@ -163,3 +163,49 @@ TEST(LJ, EnergyShiftAndForcesOnlyVariant) {
     }
     free_device(d_lj);
 }
+
+#include "force/soft.cuh"
+
+// Soft repulsion: F = -dE/dr, finite at overlap, amplitude ramps with the
+// device step counter (A(step) = A0 + (A1 - A0) (step - 1) / nsteps).
+TEST(Soft, ForceEnergyRampAndOverlap) {
+    const float L = 10.0f, rc = 1.12246f;
+    auto eval = [&](float r, int step, float* energy) {
+        std::vector<float4> pos(32, make_float4(0, 0, 0, pack_type_id(-1)));
+        pos[0] = make_float4(5.0f, 5.0f, 5.0f, pack_type_id(0));
+        pos[1] = make_float4(5.0f + r, 5.0f, 5.0f, pack_type_id(0));
+        float4* d_pos = to_device(pos);
+        int* d_step = to_device(std::vector<int>{step});
+        float4* d_f;
+        double* d_v;
+        CUDA_CHECK(cudaMalloc(&d_f, 32 * sizeof(float4)));
+        CUDA_CHECK(cudaMalloc(&d_v, 6 * sizeof(double)));
+        CUDA_CHECK(cudaMemset(d_v, 0, 6 * sizeof(double)));
+        VerletList v;
+        v.allocate(2, rc + 0.3f, L);
+        v.build(d_pos, 2, L, 1.0f / L, nullptr, nullptr, rc + 0.3f);
+        launch_soft_kernel(d_pos, d_f, d_v, v.neighbors, v.num_neighbors, 2, rc, 10.0f, 50.0f, 100,
+                           d_step, L, 1.0f / L, 0, 1, nullptr, true);
+        auto f = to_host(d_f, 2);
+        *energy = f[0].w + f[1].w;
+        v.free();
+        free_device(d_pos); free_device(d_f); free_device(d_v); free_device(d_step);
+        return f[1].x;
+    };
+    for (int step : {1, 51, 101, 500}) {
+        double A = 10.0 + 40.0 * std::min(1.0, (step - 1) / 100.0);
+        for (float r : {0.05f, 0.3f, 0.7f, 1.0f}) {
+            float e, ep, em;
+            float F = eval(r, step, &e);
+            const float h = 1e-3f;
+            eval(r + h, step, &ep);
+            eval(r - h, step, &em);
+            EXPECT_NEAR(e, A * (1.0 + std::cos(M_PI * r / rc)), 1e-4 * A) << "step " << step << " r " << r;
+            EXPECT_NEAR(F, -(ep - em) / (2 * h), 2e-3 * A) << "step " << step << " r " << r;
+            EXPECT_GT(F, 0.0f);
+        }
+    }
+    float e;
+    EXPECT_EQ(eval(1.2f, 1, &e), 0.0f);   // beyond rc
+    EXPECT_EQ(e, 0.0f);
+}

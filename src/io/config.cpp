@@ -260,6 +260,10 @@ SimParams parse_config(std::istream& in, const std::string& filename, TopologyDa
             params.ewald14_coul = (float)a.real("coul14");
             if (params.lj14 < 0 || params.lj14 > 1 || params.ewald14_coul < 0 || params.ewald14_coul > 1)
                 a.fail("scaling factors must be in [0, 1]");
+        } else if (key == "pair_soft") {
+            params.pair_soft = 1;
+            params.soft_A_start = (float)a.nonneg("A_start");
+            params.soft_A_stop = (float)a.nonneg("A_stop");
         } else if (key == "pair_shift") {
             std::string v = a.str("yes|no");
             if (v != "yes" && v != "no") a.fail("expected 'yes' or 'no'");
@@ -471,7 +475,11 @@ SimParams parse_config(std::istream& in, const std::string& filename, TopologyDa
         }
         topo.table_idx[e.ti * nt + e.tj] = topo.table_idx[e.tj * nt + e.ti] = idx;
     }
-    for (int ti = 0; ti < nt; ti++)
+    if (params.pair_soft) {
+        if (!lj_entries.empty() || !lj_type_entries.empty() || !table_entries.empty() || params.ewald_on)
+            throw std::runtime_error(filename + ": pair_soft replaces the pair interaction: "
+                                     "do not combine it with lj, lj_type, table or coulomb");
+    } else for (int ti = 0; ti < nt; ti++)
         for (int tj = 0; tj < nt; tj++)
             if (!lj_set[ti * nt + tj] && topo.table_idx[ti * nt + tj] < 0)
                 throw std::runtime_error(filename + ": no lj or table interaction for type pair (" +

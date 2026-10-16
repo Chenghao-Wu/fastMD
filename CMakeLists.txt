@@ -82,6 +82,7 @@ add_library(core STATIC
     src/neighbor/tile_list.cu
     src/neighbor/verlet_list.cu
     src/force/lj.cu
+    src/force/soft.cu
     src/force/lj_coul_long.cu
     src/force/ewald_recip.cu
     src/force/ewald_excl.cu

@@ -186,6 +186,33 @@ class SimulationAPITest(unittest.TestCase):
         for k in range(1, len(traj)):
             self.assertLess(np.abs(traj.unwrapped(k) - traj.unwrapped(k - 1)).max(), 2.0)
 
+    def test_pushoff_pipeline(self):
+        """Random-walk chains with overlaps -> soft push-off -> capped LJ -> LJ."""
+        work = os.path.join(self.tmp, "pushoff")
+        raw = os.path.join(self.tmp, "raw.data")
+        subprocess.run([sys.executable, os.path.join(SRC, "tools", "make_kg_chains.py"),
+                        "--nchains", "40", "--chain-length", "25", "--kbend", "1.5", "-o", raw],
+                       check=True, capture_output=True)
+        fmd = os.environ.get("FASTMD_BINARY")
+        if not fmd:
+            self.skipTest("FASTMD_BINARY not set")
+        r = subprocess.run([sys.executable, os.path.join(SRC, "tools", "equilibrate_melt.py"), raw,
+                            "--fastmd", fmd, "--kbend", "1.5", "--soft-steps", "2000",
+                            "--cap-steps", "500", "--equil-steps", "2000", "--workdir", work],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        sim = fastmd.Simulation.from_text(
+            "ntypes 1\nrc 1.122462\nskin 0.3\ndt 0.005\nnsteps 10\nnve\nlj 0 0 1 1\n"
+            "bond_type 0 30 1.5 1 1\nangle_cosine 0 1.5\n"
+            f"lammps_data_file {os.path.join(work, 'equil_final.data')}\n")
+        x = sim.positions
+        L = sim.box_length
+        d = x[:, None, :] - x[None, :, :]
+        d -= L * np.round(d / L)
+        r2 = (d ** 2).sum(axis=2) + np.eye(len(x)) * 100
+        self.assertGreater(np.sqrt(r2.min()), 0.7)   # overlaps removed
+        self.assertTrue(np.isfinite(sim.forces).all())
+
     def test_errors(self):
         sim = self.make()
         with self.assertRaises(ValueError):

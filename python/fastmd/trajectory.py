@@ -15,7 +15,7 @@ import numpy as np
 
 MAGIC = b"FMDTRJ02"
 
-__all__ = ["Trajectory", "unwrap"]
+__all__ = ["Trajectory", "unwrap", "write_trajectory"]
 
 
 def unwrap(pos, images, box):
@@ -86,6 +86,29 @@ class Trajectory:
         if len(idx) == 0:
             raise KeyError(step)
         return int(idx[0])
+
+
+def write_trajectory(path, steps, boxes, positions, images, types=None, mol_ids=None):
+    """Write frames in the fastMD v2 format (e.g. for tests or conversion).
+
+    steps: (F,); boxes: (F, 6) or (6,); positions: (F, N, 3) wrapped;
+    images: (F, N, 3)."""
+    positions = np.asarray(positions, dtype="<f4")
+    images = np.asarray(images, dtype="<i4")
+    F, N, _ = positions.shape
+    boxes = np.broadcast_to(np.asarray(boxes, dtype="<f8"), (F, 6))
+    types = np.zeros(N, "<i4") if types is None else np.asarray(types, "<i4")
+    mol_ids = np.zeros(N, "<i4") if mol_ids is None else np.asarray(mol_ids, "<i4")
+    with open(path, "wb") as f:
+        f.write(MAGIC)
+        f.write(np.array([2, N, 1, 0], "<i4").tobytes())
+        f.write(types.tobytes())
+        f.write(mol_ids.tobytes())
+        for k in range(F):
+            f.write(np.array([steps[k]], "<i8").tobytes())
+            f.write(boxes[k].tobytes())
+            f.write(positions[k].tobytes())
+            f.write(images[k].tobytes())
 
 
 def _file_size(path):

@@ -65,5 +65,15 @@ if(TARGET _core)
              WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/python)
     set_tests_properties(test_python_api PROPERTIES
         LABELS gpu
+        ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python;FASTMD_SOURCE_DIR=${PROJECT_SOURCE_DIR};FASTMD_BINARY=$<TARGET_FILE:fastmd>")
+endif()
+
+# Analysis module, trajectory reader and system builders (numpy; no GPU)
+if(TARGET _core)
+    add_test(NAME test_python_analysis
+             COMMAND ${Python_EXECUTABLE} -m unittest -v test_analysis
+             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/python)
+    set_tests_properties(test_python_analysis PROPERTIES
+        LABELS cpu
         ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python;FASTMD_SOURCE_DIR=${PROJECT_SOURCE_DIR}")
 endif()
