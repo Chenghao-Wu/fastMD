@@ -103,13 +103,14 @@ TEST(VerletList, CompleteAfterBoxExpansionAndCompression) {
     std::iota(tag.begin(), tag.end(), 0);
     VerletList v;
     v.allocate(n, rcut, L0);
-    for (float s : {1.0f, 1.3f, 0.75f, 1.05f}) {
+    // 0.5: fewer than 2R+1 cells per side (stencil cells repeat under PBC)
+    for (float s : {1.0f, 1.3f, 0.75f, 1.05f, 0.5f}) {
         float L = L0 * s;
         std::vector<float4> pos(pos0);
         for (auto& p : pos) { p.x *= s; p.y *= s; p.z *= s; }
         float4* d_pos = to_device(pos);
         v.build(d_pos, n, L, 1.0f / L, nullptr, nullptr, rcut);
-        EXPECT_EQ(v.nx, int(L / rcut)) << "grid not derived from the current box";
+        EXPECT_EQ(v.nx, int(L * v.cell_div / rcut)) << "grid not derived from the current box";
         expect_list_matches(v, pos, L, rcut, tag, {});
         free_device(d_pos);
     }

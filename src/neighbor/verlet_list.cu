@@ -2,6 +2,7 @@
 #include "../core/pbc.cuh"
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -10,6 +11,7 @@
 namespace {
 
 constexpr int kBlock = 256;        // nl_build
+constexpr float kHalfCellThreshold = 64.0f;   // particles per (rc+skin)^3 cell
 constexpr int kBinBlock = 1024;    // nl_bin: its last block scans/scatters/gathers alone
 
 uint32_t spread3_host(uint32_t v) {
@@ -25,7 +27,7 @@ __device__ __forceinline__ int wrap_cell(int c, int n) {
     return c < 0 ? c + n : c;
 }
 
-__device__ __forceinline__ int wrap_near(int c, int n) {   // c in [-1, n]
+__device__ __forceinline__ int wrap_near(int c, int n) {   // c in [-n, 2n)
     return c < 0 ? c + n : (c >= n ? c - n : c);
 }
 
@@ -69,6 +71,7 @@ struct BinArgs {
     int natoms, natoms_padded, nx, ny, nz, ncells;
     float rc, skin, rc_min_image;
     int max_age;
+    int cell_div;
 };
 
 // Exclusive scan of cell counts by one block; returns the max occupancy.
@@ -132,7 +135,8 @@ __global__ void nl_bin_kernel(BinArgs a) {
         a.cell_slot[i] = atomicAdd(&a.cell_count[key], 1);
         a.pos_ref[i] = r;
     }
-    if (i == 0 && (L / a.nx < a.rc + a.skin || L < 2.0f * a.rc_min_image)) a.st->grid_error = 1;
+    if (i == 0 && (L * a.cell_div / a.nx < a.rc + a.skin || L < 2.0f * a.rc_min_image))
+        a.st->grid_error = 1;
 
     // The last block to finish scans the counts, scatters and gathers.
     __shared__ bool last;
@@ -194,11 +198,14 @@ struct BuildArgs {
 };
 
 // TPA threads per particle, particles taken in cell order (the groups of a
-// warp share a home cell and scan the same neighbor cells). The group's
+// warp share a home cell and scan the same neighbor cells). Cells are at
+// least (rc + skin) / R wide and the stencil reaches R cells each way: R = 2
+// (125 half-size cells) scans 15.6 (rc+skin)^3 of candidates instead of 27
+// (rc+skin)^3, which pays off for dense systems. The group's
 // lanes stride over each cell's candidates; hits are compacted with a
 // group-wide ballot so every lane keeps the same running count. Counts
 // continue past the capacity so overflow is detected exactly.
-template <int TPA>
+template <int TPA, int R>
 __global__ void nl_build_kernel(BuildArgs a) {
     const int g = blockIdx.x * blockDim.x + threadIdx.x;
     if (!a.st->rebuild) {
@@ -216,16 +223,22 @@ __global__ void nl_build_kernel(BuildArgs a) {
         const float4 pos_i = a.pos_sorted[k];
         const int tag_i = a.tag ? a.tag[i] : i;
         const int3 c = cell_of(pos_i, a.nx * inv_L, a.nx, a.ny, a.nz);
-        const bool dedup = a.nx < 3 || a.ny < 3 || a.nz < 3;
-        int visited[27];
+        const bool dedup = a.nx < 2 * R + 1 || a.ny < 2 * R + 1 || a.nz < 2 * R + 1;
+        constexpr int kStencil = (2 * R + 1) * (2 * R + 1) * (2 * R + 1);
+        int visited[kStencil];
         int n_visited = 0;
-        for (int dz = -1; dz <= 1; dz++)
-            for (int dy = -1; dy <= 1; dy++)
-                for (int dx = -1; dx <= 1; dx++) {
-                    int dense = (wrap_near(c.z + dz, a.nz) * a.ny + wrap_near(c.y + dy, a.ny)) * a.nx +
+        for (int dz = -R; dz <= R; dz++)
+            for (int dy = -R; dy <= R; dy++)
+                for (int dx = -R; dx <= R; dx++) {
+                    int dense;
+                    if (dedup)
+                        dense = (wrap_cell(c.z + dz, a.nz) * a.ny + wrap_cell(c.y + dy, a.ny)) * a.nx +
+                                wrap_cell(c.x + dx, a.nx);
+                    else
+                        dense = (wrap_near(c.z + dz, a.nz) * a.ny + wrap_near(c.y + dy, a.ny)) * a.nx +
                                 wrap_near(c.x + dx, a.nx);
                     int cell = __ldg(&a.cell_rank[dense]);
-                    if (dedup) {   // < 3 cells per side: neighbor cells repeat under PBC
+                    if (dedup) {   // < 2R+1 cells per side: neighbor cells repeat under PBC
                         bool seen = false;
                         for (int v = 0; v < n_visited; v++) seen |= (visited[v] == cell);
                         if (seen) continue;
@@ -295,6 +308,15 @@ void VerletList::allocate(int n, float rc_in, float skin_in, float box_L, float 
     float density = natoms / (box_L * box_L * box_L);
     int estimated = int(density * (4.0f / 3.0f) * 3.14159265f * rcs * rcs * rcs * 1.5f) + 32;
     max_neighbors = std::max(64, estimated);
+    // Half-size cells once a full cell holds enough particles to keep the
+    // build's thread groups busy (dense all-atom systems); FASTMD_CELL_DIV=1|2
+    // overrides.
+    const float per_cell = density * rcs * rcs * rcs;
+    cell_div = per_cell > kHalfCellThreshold ? 2 : 1;
+    if (const char* env = std::getenv("FASTMD_CELL_DIV")) {
+        int v = std::atoi(env);
+        if (v == 1 || v == 2) cell_div = v;
+    }
 
     CUDA_CHECK(cudaMalloc(&neighbors,     (size_t)max_neighbors * natoms * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&num_neighbors, natoms * sizeof(int)));
@@ -323,13 +345,17 @@ void VerletList::free() {
 }
 
 bool VerletList::grid_ok_for(float box_L) const {
-    return nx > 0 && box_L / nx >= rc + skin && box_L >= 2.0f * rc_min_image;
+    return nx > 0 && box_L * cell_div / nx >= rc + skin && box_L >= 2.0f * rc_min_image;
+}
+
+int VerletList::cells_per_side(float box_L) const {
+    return std::max(1, int(box_L * cell_div / ((rc + skin) * grid_margin)));
 }
 
 void VerletList::set_grid(float box_L) {
     if (!(box_L > 0.0f) || !std::isfinite(box_L))
         throw std::runtime_error("VerletList: invalid box length");
-    nx = ny = nz = std::max(1, int(box_L / ((rc + skin) * grid_margin)));
+    nx = ny = nz = cells_per_side(box_L);
     if (nx > 1024) throw std::runtime_error("VerletList: more than 1024 cells per dimension");
     ncells = nx * ny * nz;
     cell_size = box_L / nx;
@@ -404,7 +430,8 @@ void VerletList::launch_bin(const float4* pos, float4* pos_ref, const float* d_b
                             int* d_max_dr2_bits, cudaStream_t stream) {
     BinArgs a{pos, pos_ref, d_box_L, d_max_dr2_bits, d_state, cell_key, cell_slot, cell_count,
               cell_starts, cell_ends, cell_rank, order, pos_sorted,
-              natoms, natoms_padded, nx, ny, nz, ncells, rc, skin, rc_min_image, max_age};
+              natoms, natoms_padded, nx, ny, nz, ncells, rc, skin, rc_min_image, max_age,
+              cell_div};
     nl_bin_kernel<<<div_ceil(natoms, kBinBlock), kBinBlock, 0, stream>>>(a);
     CUDA_CHECK(cudaGetLastError());
 }
@@ -417,12 +444,17 @@ void VerletList::launch_build(const float4* /*pos*/, const float* d_box_L, const
                 natoms, nx, ny, nz, max_neighbors, (rc + skin) * (rc + skin)};
     const int tpa = build_tpa;
     const int blocks = div_ceil(natoms * tpa, kBlock);
+#define FASTMD_BUILD(T) do {                                                        \
+        if (cell_div == 2) nl_build_kernel<T, 2><<<blocks, kBlock, 0, stream>>>(a); \
+        else nl_build_kernel<T, 1><<<blocks, kBlock, 0, stream>>>(a);               \
+    } while (0)
     switch (tpa) {
-        case 1: nl_build_kernel<1><<<blocks, kBlock, 0, stream>>>(a); break;
-        case 2: nl_build_kernel<2><<<blocks, kBlock, 0, stream>>>(a); break;
-        case 4: nl_build_kernel<4><<<blocks, kBlock, 0, stream>>>(a); break;
-        default: nl_build_kernel<8><<<blocks, kBlock, 0, stream>>>(a); break;
+        case 1: FASTMD_BUILD(1); break;
+        case 2: FASTMD_BUILD(2); break;
+        case 4: FASTMD_BUILD(4); break;
+        default: FASTMD_BUILD(8); break;
     }
+#undef FASTMD_BUILD
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -451,7 +483,7 @@ void VerletList::build(const float4* pos, int n, float box_L, float /*inv_L*/,
         skin = 0.0f;
         rc_min_image = 0.0f;
     }
-    if (!grid_ok_for(box_L) || int(box_L / ((rc + skin) * grid_margin)) != nx) set_grid(box_L);
+    if (!grid_ok_for(box_L) || cells_per_side(box_L) != nx) set_grid(box_L);
     CUDA_CHECK(cudaMemcpyAsync(d_box_scratch_, &box_L, sizeof(float), cudaMemcpyHostToDevice, stream));
     for (int attempt = 0; attempt < 4; attempt++) {
         request_rebuild(stream);

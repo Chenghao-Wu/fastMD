@@ -17,7 +17,7 @@
 //
 // Cells are dense (cz * ny + cy) * nx + cx, stored in Morton order of their
 // coordinates (cell_rank), so particles sorted by cell follow a space-filling
-// curve.
+// curve. Cells are (rc + skin) / cell_div wide; dense systems use cell_div 2.
 struct DeviceNeighborState {
     int   force_rebuild;   // host request: rebuild at the next nl_bin
     int   rebuild;         // set by nl_bin when this step rebuilds
@@ -48,6 +48,7 @@ struct VerletList {
     int   natoms = 0, natoms_padded = 0;
     int   nx = 0, ny = 0, nz = 0, ncells = 0, ncells_alloc = 0;
     float cell_size = 0.0f;         // box_L / nx at the time the grid was set
+    int   cell_div = 1;             // cells per rc + skin (stencil reach): 1 or 2
     float rc = 0.0f, skin = 0.0f;
     float rc_min_image = 0.0f;      // interaction cutoff that must stay <= L/2 (0 = unchecked)
     int   max_age = 0;              // forced rebuild age (0 = off)
@@ -63,6 +64,7 @@ struct VerletList {
     // Choose the cell grid for box length L (host); requests a rebuild.
     void set_grid(float box_L);
     bool grid_ok_for(float box_L) const;
+    int  cells_per_side(float box_L) const;
 
     // Device-side maintenance (enqueue only). d_box_L: current box length on
     // the device; d_max_dr2_bits: max squared displacement since the last
