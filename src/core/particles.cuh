@@ -42,6 +42,9 @@ struct ParticleData {
     // k in [0, natoms_padded); padding entries must map to themselves.
     void apply_permutation(const int* d_new_order, cudaStream_t stream = 0);
 
+    // Device-to-device copy of every array from an allocated twin (same natoms).
+    void copy_from(const ParticleData& src, cudaStream_t stream = 0);
+
     // Gather a per-particle array into tag order on the device.
     void gather_float4_by_tag(float4* d_out, const float4* d_in,
                               cudaStream_t stream = 0) const;

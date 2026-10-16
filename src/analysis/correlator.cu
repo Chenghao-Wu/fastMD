@@ -17,9 +17,50 @@ void MultipleTauCorrelator::allocate() {
     reset();
 }
 
+namespace {
+size_t snapshot_bytes() {
+    return kBuf * sizeof(float) + kBuf * sizeof(double) + CORR_LEVELS * CORR_POINTS * sizeof(int) +
+           2 * CORR_LEVELS * sizeof(int) + CORR_LEVELS * STRESS_COMPONENTS * sizeof(double) +
+           CORR_LEVELS * sizeof(int);
+}
+}  // namespace
+
+// The snapshot copies each buffer into one packed device allocation.
+void MultipleTauCorrelator::save_snapshot(cudaStream_t stream) {
+    if (!d_snapshot) CUDA_CHECK(cudaMalloc(&d_snapshot, snapshot_bytes()));
+    char* p = d_snapshot;
+    auto put = [&](const void* src, size_t bytes) {
+        CUDA_CHECK(cudaMemcpyAsync(p, src, bytes, cudaMemcpyDeviceToDevice, stream));
+        p += bytes;
+    };
+    put(d_stress_buf, kBuf * sizeof(float));
+    put(d_corr, kBuf * sizeof(double));
+    put(d_counts, CORR_LEVELS * CORR_POINTS * sizeof(int));
+    put(d_insert_idx, CORR_LEVELS * sizeof(int));
+    put(d_fill, CORR_LEVELS * sizeof(int));
+    put(d_block_accum, CORR_LEVELS * STRESS_COMPONENTS * sizeof(double));
+    put(d_block_count, CORR_LEVELS * sizeof(int));
+}
+
+void MultipleTauCorrelator::restore_snapshot(cudaStream_t stream) {
+    if (!d_snapshot) return;
+    const char* p = d_snapshot;
+    auto get = [&](void* dst, size_t bytes) {
+        CUDA_CHECK(cudaMemcpyAsync(dst, p, bytes, cudaMemcpyDeviceToDevice, stream));
+        p += bytes;
+    };
+    get(d_stress_buf, kBuf * sizeof(float));
+    get(d_corr, kBuf * sizeof(double));
+    get(d_counts, CORR_LEVELS * CORR_POINTS * sizeof(int));
+    get(d_insert_idx, CORR_LEVELS * sizeof(int));
+    get(d_fill, CORR_LEVELS * sizeof(int));
+    get(d_block_accum, CORR_LEVELS * STRESS_COMPONENTS * sizeof(double));
+    get(d_block_count, CORR_LEVELS * sizeof(int));
+}
+
 void MultipleTauCorrelator::free() {
     for (void* p : {(void*)d_stress_buf, (void*)d_corr, (void*)d_counts, (void*)d_insert_idx,
-                    (void*)d_fill, (void*)d_block_accum, (void*)d_block_count})
+                    (void*)d_fill, (void*)d_block_accum, (void*)d_block_count, (void*)d_snapshot})
         if (p) CUDA_CHECK(cudaFree(p));
     *this = MultipleTauCorrelator{};
 }

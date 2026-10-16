@@ -1,5 +1,6 @@
 #include "particles.cuh"
 #include <algorithm>
+#include <stdexcept>
 
 namespace {
 
@@ -114,6 +115,23 @@ void ParticleData::apply_permutation(const int* d_new_order, cudaStream_t stream
     permute_array(tag,     scratch_, d_new_order, np, 1, stream);
     rank_from_tag_kernel<<<div_ceil(natoms, 256), 256, 0, stream>>>(tag, rank, natoms);
     CUDA_CHECK(cudaGetLastError());
+}
+
+void ParticleData::copy_from(const ParticleData& src, cudaStream_t stream) {
+    if (src.natoms_padded != natoms_padded) throw std::runtime_error("ParticleData size mismatch");
+    const size_t np = natoms_padded;
+    auto cp = [&](void* d, const void* s, size_t bytes) {
+        CUDA_CHECK(cudaMemcpyAsync(d, s, bytes, cudaMemcpyDeviceToDevice, stream));
+    };
+    cp(pos, src.pos, np * sizeof(float4));
+    cp(vel, src.vel, np * sizeof(float4));
+    cp(force, src.force, np * sizeof(float4));
+    cp(pos_ref, src.pos_ref, np * sizeof(float4));
+    cp(image, src.image, np * 3 * sizeof(int));
+    cp(charge, src.charge, np * sizeof(float));
+    cp(mol_id, src.mol_id, np * sizeof(int));
+    cp(tag, src.tag, np * sizeof(int));
+    cp(rank, src.rank, np * sizeof(int));
 }
 
 void ParticleData::gather_float4_by_tag(float4* d_out, const float4* d_in,

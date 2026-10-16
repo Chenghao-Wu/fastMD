@@ -113,10 +113,11 @@ struct SimParams {
     // criterion alone is exact, as with LAMMPS 'neigh_modify check yes').
     int   neigh_max_age = 0;
 
-    // Reorder particles into cell (Morton) order every this many neighbor
-    // rebuilds (0 = never). Improves memory locality of the neighbor build
-    // and pair kernels; all per-particle data and topology move together.
-    int   sort_every = 1;
+    // Reorder particles into cell (Morton) order at the first check point at
+    // least this many steps after the previous sort (0 = never). Improves
+    // memory locality of the neighbor build and pair kernels; all
+    // per-particle data and topology move together.
+    int   sort_every = 1000;
 
     // Threads per particle in the neighbor-list pair kernels (1, 2, 4, 8);
     // 0 = pick the fastest by timing at start-up.
@@ -125,4 +126,10 @@ struct SimParams {
     // Bonded terms: 1 = per-particle gather kernel (no atomics),
     // 0 = per-term kernels with atomic scatter.
     int   bonded_gather = 1;
+
+    // Device-side neighbor maintenance: steps between host checks of the
+    // overflow/grid flags (and checkpoints); initial neighbor capacity per
+    // particle (0 = estimate from density; mainly for testing the rollback).
+    int   check_every = 100;
+    int   neigh_capacity = 0;
 };

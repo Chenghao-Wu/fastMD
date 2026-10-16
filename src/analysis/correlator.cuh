@@ -23,6 +23,7 @@ struct MultipleTauCorrelator {
     int*    d_fill = nullptr;         // [levels] samples held (saturates at points)
     double* d_block_accum = nullptr;  // [levels][6] running block sums
     int*    d_block_count = nullptr;  // [levels]
+    char*   d_snapshot = nullptr;     // packed copy of all of the above
 
     struct Row {
         long long lag_samples;        // lag in sampling intervals
@@ -33,6 +34,10 @@ struct MultipleTauCorrelator {
     void allocate();
     void free();
     void reset();
+
+    // Device-side copy of the full correlator state (for rollback).
+    void save_snapshot(cudaStream_t stream = 0);
+    void restore_snapshot(cudaStream_t stream = 0);
 
     // d_stress_6: device pointer to one sample (xx xy xz yy yz zz)
     void push_sample(const float* d_stress_6, cudaStream_t stream = 0);

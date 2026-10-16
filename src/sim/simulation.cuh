@@ -38,6 +38,8 @@ public:
     // Evaluate forces/energies/virial at the current positions (rebuilding
     // the neighbor list first if particles moved beyond the skin).
     void compute_forces();
+    // Synchronous full neighbor-list rebuild (optionally re-sorting particles).
+    void rebuild_neighbor_list(bool sort = false) { rebuild_neighbors(sort); }
 
     // Write per-atom forces (tag order) to a text file.
     void write_forces(const std::string& path) const;
@@ -46,13 +48,18 @@ public:
     const SimParams& params() const { return params_; }
     float box_length() const { return box_L_; }
     const ParticleData& particles() const { return p_; }
+    int rollbacks() const { return n_rollbacks_; }
+    int neighbor_capacity() const { return verlet_.max_neighbors; }
 
 private:
     void upload_force_field();
     void setup_integrator();
     void setup_analysis();
-    void build_neighbor_list();
-    bool need_rebuild();
+    void rebuild_neighbors(bool sort);   // synchronous, host-driven
+    bool output_due(int step) const;
+    void save_checkpoint();
+    void restore_checkpoint();
+    bool validate();                     // neighbor/grid flags since the checkpoint
     void launch_forces();
     void launch_pair_kernel(int tpa);     // the overwriting nonbonded kernel
     void tune_pair_tpa();
@@ -74,7 +81,6 @@ private:
 
     // box (cubic). box_L_ is the host mirror of the current box length.
     float box_L_ = 0.0f, inv_L_ = 0.0f;
-    float box_L_at_build_ = 0.0f;
 
     // force field (device)
     float2*             d_lj_params_ = nullptr;
@@ -98,8 +104,6 @@ private:
     BondedParams bonded_params_;
 
     VerletList   verlet_;
-    int  steps_since_rebuild_ = 0;
-    int  n_rebuilds_ = 0;
     int  n_sorts_ = 0;
     int  pair_tpa_ = 1;
     int  bonded_tpa_ = 1;
@@ -124,7 +128,19 @@ private:
     float* d_ke_buf_ = nullptr;
     bool velocities_pending_ = false;    // fused NVT: s_post not yet applied
 
+    // checkpoint for rolling back device-side neighbor-list overflow/grid errors
+    ParticleData ckpt_p_;
+    NoseHooverDeviceState* d_ckpt_nh_ = nullptr;
+    void* d_ckpt_status_ = nullptr;
+    int*  d_ckpt_step_ = nullptr;
+    int   ckpt_step_ = 0;
+    bool  ckpt_vel_pending_ = false;
+    int   check_every_ = 100;
+    int   last_sort_step_ = 0;
+    int   n_rollbacks_ = 0;
+
     // analysis / output
+    StressSampler stress_sampler_;
     MultipleTauCorrelator correlator_;
     ThermoBuffers thermo_bufs_;
     RgBuffers rg_bufs_;

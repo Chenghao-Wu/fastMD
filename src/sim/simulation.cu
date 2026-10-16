@@ -64,7 +64,11 @@ Simulation::Simulation(const SimParams& params, TopologyData topo)
 
     upload_force_field();
 
-    verlet_.allocate(params_.natoms, params_.rc + params_.skin, box_L_);
+    // NPT: size cells for 5% box compression before the grid must change
+    verlet_.build_tpa = 4;
+    verlet_.allocate(params_.natoms, params_.rc, params_.skin, box_L_,
+                     params_.ensemble == Ensemble::NPT_NH ? 1.05f : 1.0f, params_.neigh_max_age);
+    check_every_ = params_.check_every;
     CUDA_CHECK(cudaMalloc(&d_status_, sizeof(DeviceStatus)));
     CUDA_CHECK(cudaHostAlloc(&h_status_, sizeof(DeviceStatus), cudaHostAllocDefault));
     *h_status_ = DeviceStatus{0, box_L_, inv_L_, box_L_ * box_L_ * box_L_};
@@ -83,11 +87,22 @@ Simulation::Simulation(const SimParams& params, TopologyData topo)
     setup_integrator();
     setup_analysis();
 
-    build_neighbor_list();
+    ckpt_p_.allocate(params_.natoms);
+    CUDA_CHECK(cudaMalloc(&d_ckpt_status_, sizeof(DeviceStatus)));
+    CUDA_CHECK(cudaMalloc(&d_ckpt_step_, sizeof(int)));
+    if (d_nh_state_) CUDA_CHECK(cudaMalloc(&d_ckpt_nh_, sizeof(NoseHooverDeviceState)));
+
+    rebuild_neighbors(params_.sort_every > 0);
     tune_pair_tpa();
     tune_bonded_tpa();
     launch_forces();
     CUDA_CHECK(cudaStreamSynchronize(stream_));
+    if (params_.neigh_capacity > 0) {
+        // testing knob: the first device-side build uses this capacity (it
+        // overflows if too small and is then undone by the rollback path)
+        verlet_.set_capacity(params_.neigh_capacity);
+        verlet_.request_rebuild(stream_);
+    }
 
     if (params_.ensemble != Ensemble::Langevin) {
         // first pre-force thermostat half-step uses the raw kinetic energy
@@ -179,7 +194,10 @@ void Simulation::setup_integrator() {
 }
 
 void Simulation::setup_analysis() {
-    if (params_.stress_on) correlator_.allocate();
+    if (params_.stress_on) {
+        correlator_.allocate();
+        stress_sampler_.allocate();
+    }
     thermo_bufs_.allocate();
     if (params_.thermo_on) thermo_bufs_.open_file(params_.thermo_file);
     if (params_.rg_on) {
@@ -221,37 +239,49 @@ void Simulation::print_setup() const {
     if (params_.rg_on) printf("  rg_on");
     if (params_.stress_on) printf("  stress_on");
     if (params_.restart_freq >= 0) printf("  restart_on");
-    printf("\n[setup]  neighbor list: capacity=%d  max_count=%d  cells=%d^3  threads/atom: pair=%d bonded=%d\n\n",
-           verlet_.max_neighbors, verlet_.max_count, verlet_.nx, pair_tpa_, bonded_tpa_);
+    printf("\n[setup]  neighbor list: capacity=%d  max_count=%d  cells=%d^3  threads/atom: pair=%d bonded=%d  (device-side rebuilds, checks every %d steps)\n\n",
+           verlet_.max_neighbors, verlet_.max_count, verlet_.nx, pair_tpa_, bonded_tpa_,
+           check_every_);
 }
 
 // ---------------------------------------------------------------------------
 // Neighbor list / spatial sorting
 // ---------------------------------------------------------------------------
 
-// Rebuild the neighbor list; every sort_every-th rebuild first reorders all
-// particle data into cell order (ParticleData moves every per-particle field,
-// DeviceTopology remaps the bonded lists).
-void Simulation::build_neighbor_list() {
+// Synchronous rebuild driven by the host (setup, periodic re-sorting,
+// after a rollback). With sort, particles are first reordered into cell
+// order (ParticleData moves every per-particle field, DeviceTopology remaps
+// the bonded lists). Grows the capacity / regrids until the build is valid.
+void Simulation::rebuild_neighbors(bool sort) {
     if (box_L_ < 2.0f * params_.rc)
         throw std::runtime_error("box length " + std::to_string(box_L_) +
                                  " is smaller than 2*rc: minimum image is invalid");
-    const float rc_skin = params_.rc + params_.skin;
-    verlet_.bin(p_.pos, box_L_, rc_skin, stream_);
-    bool sort_now = params_.sort_every > 0 && (n_rebuilds_ % params_.sort_every == 0);
-    if (sort_now) {
+    if (!verlet_.grid_ok_for(box_L_)) verlet_.set_grid(box_L_);
+    float* d_L = &d_status_->L;
+    int* d_dr2 = &d_status_->max_dr2_bits;
+    if (sort) {
+        verlet_.bin(p_.pos, p_.pos_ref, d_L, d_dr2, stream_);
         p_.apply_permutation(verlet_.order_padded(), stream_);
         t_.remap(p_.rank, stream_);
         n_sorts_++;
+        last_sort_step_ = step_;
     }
-    verlet_.build_from_bins(p_.pos, sort_now, box_L_, inv_L_, p_.tag,
-                            t_.excl_offsets, t_.excl_list, rc_skin, stream_);
-    CUDA_CHECK(cudaMemcpyAsync(p_.pos_ref, p_.pos, p_.natoms_padded * sizeof(float4),
-                               cudaMemcpyDeviceToDevice, stream_));
-    CUDA_CHECK(cudaMemsetAsync(&d_status_->max_dr2_bits, 0, sizeof(int), stream_));
-    box_L_at_build_ = box_L_;
-    steps_since_rebuild_ = 0;
-    n_rebuilds_++;
+    for (int attempt = 0; attempt < 8; attempt++) {
+        verlet_.request_rebuild(stream_);
+        verlet_.step(p_.pos, p_.pos_ref, d_L, d_dr2, p_.tag, t_.excl_offsets, t_.excl_list,
+                     stream_);
+        verlet_.read_state(stream_);
+        if (verlet_.h_state->grid_error) {
+            verlet_.set_grid(box_L_);
+            verlet_.clear_errors(stream_);
+        } else if (verlet_.h_state->overflow) {
+            verlet_.grow(verlet_.h_state->overflow);
+            verlet_.clear_errors(stream_);
+        } else {
+            return;
+        }
+    }
+    throw std::runtime_error("neighbor list could not be built");
 }
 
 void Simulation::read_status() {
@@ -264,21 +294,50 @@ void Simulation::read_status() {
     }
 }
 
-// A pair outside the list (distance > rc + skin at build time) can come
-// within rc once particles move. Positions are tracked relative to the
-// reference configuration scaled affinely with the box (NPT scales pos_ref
-// each step), so with s = L / L_build and maximum displacement d the list
-// stays valid while  s (rc + skin) - 2 d > rc.
-bool Simulation::need_rebuild() {
-    steps_since_rebuild_++;
+// The neighbor list is maintained on the device without per-step host
+// checks; overflow of its capacity or a grid invalidated by box compression
+// is detected here, at check points, and undone by rolling back to the last
+// checkpoint (the Langevin noise depends only on seed, tag and step, so the
+// re-run is the same trajectory up to floating-point summation order).
+bool Simulation::validate() {
+    verlet_.read_state(stream_);
+    const DeviceNeighborState& st = *verlet_.h_state;
+    if (!st.grid_error && !st.overflow) return true;
     read_status();
-    float max_dr2;
-    std::memcpy(&max_dr2, &h_status_->max_dr2_bits, sizeof(float));
-    float s = box_L_ / box_L_at_build_;
-    float half_margin = 0.5f * (s * (params_.rc + params_.skin) - params_.rc);
-    bool triggered = half_margin <= 0.0f || max_dr2 > half_margin * half_margin;
-    bool too_old = params_.neigh_max_age > 0 && steps_since_rebuild_ >= params_.neigh_max_age;
-    return triggered || too_old;
+    if (st.grid_error) verlet_.set_grid(box_L_);
+    if (st.overflow) verlet_.grow(st.overflow);
+    verlet_.clear_errors(stream_);
+    return false;
+}
+
+void Simulation::save_checkpoint() {
+    ckpt_p_.copy_from(p_, stream_);
+    CUDA_CHECK(cudaMemcpyAsync(d_ckpt_status_, d_status_, sizeof(DeviceStatus),
+                               cudaMemcpyDeviceToDevice, stream_));
+    CUDA_CHECK(cudaMemcpyAsync(d_ckpt_step_, d_step_, sizeof(int), cudaMemcpyDeviceToDevice, stream_));
+    if (d_ckpt_nh_)
+        CUDA_CHECK(cudaMemcpyAsync(d_ckpt_nh_, d_nh_state_, sizeof(NoseHooverDeviceState),
+                                   cudaMemcpyDeviceToDevice, stream_));
+    if (params_.stress_on) correlator_.save_snapshot(stream_);
+    ckpt_step_ = step_;
+    ckpt_vel_pending_ = velocities_pending_;
+}
+
+void Simulation::restore_checkpoint() {
+    p_.copy_from(ckpt_p_, stream_);
+    CUDA_CHECK(cudaMemcpyAsync(d_status_, d_ckpt_status_, sizeof(DeviceStatus),
+                               cudaMemcpyDeviceToDevice, stream_));
+    CUDA_CHECK(cudaMemcpyAsync(d_step_, d_ckpt_step_, sizeof(int), cudaMemcpyDeviceToDevice, stream_));
+    if (d_ckpt_nh_)
+        CUDA_CHECK(cudaMemcpyAsync(d_nh_state_, d_ckpt_nh_, sizeof(NoseHooverDeviceState),
+                                   cudaMemcpyDeviceToDevice, stream_));
+    if (params_.stress_on) correlator_.restore_snapshot(stream_);
+    t_.remap(p_.rank, stream_);
+    step_ = ckpt_step_;
+    velocities_pending_ = ckpt_vel_pending_;
+    read_status();
+    rebuild_neighbors(false);
+    n_rollbacks_++;
 }
 
 // ---------------------------------------------------------------------------
@@ -423,7 +482,9 @@ void Simulation::tune_bonded_tpa() {
 }
 
 void Simulation::compute_forces() {
-    if (need_rebuild()) build_neighbor_list();
+    verlet_.step(p_.pos, p_.pos_ref, &d_status_->L, &d_status_->max_dr2_bits, p_.tag,
+                 t_.excl_offsets, t_.excl_list, stream_);
+    if (!validate()) rebuild_neighbors(false);
     launch_forces();
     CUDA_CHECK(cudaStreamSynchronize(stream_));
 }
@@ -507,9 +568,25 @@ void Simulation::integrate_post_force() {
 void Simulation::step() {
     ++step_;
     integrate_pre_force();
-    if (need_rebuild()) build_neighbor_list();
+    // NPT: force kernels take the box as an argument; the barostat changed it
+    if (params_.ensemble == Ensemble::NPT_NH) read_status();
+    verlet_.step(p_.pos, p_.pos_ref, &d_status_->L, &d_status_->max_dr2_bits, p_.tag,
+                 t_.excl_offsets, t_.excl_list, stream_);
     launch_forces();
     integrate_post_force();
+    if (params_.stress_on && step_ % params_.stress_freq == 0) {
+        // device-only sample; a pending fused-NVT velocity scale is applied in the kernel
+        stress_sampler_.sample(p_.vel, p_.pos, d_virial_, params_.natoms, &d_status_->L,
+                               velocities_pending_ ? &d_nh_state_->s_post : nullptr, stream_);
+        correlator_.push_sample(stress_sampler_.d_stress, stream_);
+    }
+}
+
+bool Simulation::output_due(int s) const {
+    return (params_.thermo_on && s % params_.thermo_freq == 0) ||
+           (params_.rg_on && s % params_.rg_freq == 0) ||
+           (params_.dump_freq > 0 && s % params_.dump_freq == 0) ||
+           (params_.restart_freq > 0 && s % params_.restart_freq == 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -546,35 +623,24 @@ void Simulation::write_restart(const std::string& fname, int64_t step) {
 void Simulation::write_outputs() {
     const int s = step_;
     bool need_thermo = params_.thermo_on && (s % params_.thermo_freq == 0);
-    bool need_stress = params_.stress_on && (s % params_.stress_freq == 0);
     bool need_rg = params_.rg_on && s % params_.rg_freq == 0;
     bool need_dump = params_.dump_freq > 0 && s % params_.dump_freq == 0;
     bool need_restart = params_.restart_freq > 0 && s % params_.restart_freq == 0 &&
                         s != params_.nsteps;
-    if (!(need_thermo || need_stress || need_rg || need_dump || need_restart)) return;
+    if (!(need_thermo || need_rg || need_dump || need_restart)) return;
     // the barostat may have changed the box during the post-force half step
     read_status();
 
-    if (need_thermo || need_stress) {
+    if (need_thermo) {
         flush_velocities();
         ThermoOutput thermo;
         compute_thermo(p_.vel, p_.pos, p_.force, d_virial_, params_.natoms, box_L_, &thermo,
-                       thermo_bufs_, s, need_thermo ? thermo_bufs_.fp : nullptr, stream_,
+                       thermo_bufs_, s, thermo_bufs_.fp, stream_,
                        params_.ewald_on ? params_.ewald_self_offset / params_.natoms : 0.0f);
-        if (need_thermo) {
-            float etot = thermo.kinetic_energy + thermo.potential_energy;
-            printf("\nStep %6d  T=%10.4f  KE=%11.2f  PE=%11.2f  Etot=%11.2f  Pxx=%8.2f  maxV=%5.2f  maxF=%5.2f\n",
-                   s, thermo.temperature, thermo.kinetic_energy, thermo.potential_energy, etot,
-                   thermo.stress[0], thermo.max_vel, thermo.max_force);
-        }
-        if (need_stress) {
-            float* d_stress_for_corr;
-            CUDA_CHECK(cudaMalloc(&d_stress_for_corr, 6 * sizeof(float)));
-            CUDA_CHECK(cudaMemcpy(d_stress_for_corr, thermo.stress, 6 * sizeof(float),
-                                  cudaMemcpyHostToDevice));
-            correlator_.push_sample(d_stress_for_corr);
-            CUDA_CHECK(cudaFree(d_stress_for_corr));
-        }
+        float etot = thermo.kinetic_energy + thermo.potential_energy;
+        printf("\nStep %6d  T=%10.4f  KE=%11.2f  PE=%11.2f  Etot=%11.2f  Pxx=%8.2f  maxV=%5.2f  maxF=%5.2f\n",
+               s, thermo.temperature, thermo.kinetic_energy, thermo.potential_energy, etot,
+               thermo.stress[VXX], thermo.max_vel, thermo.max_force);
     }
 
     if (need_rg) {
@@ -638,14 +704,29 @@ void Simulation::run() {
     last_progress_step_ = step_;
 
     const int first = step_;
-    for (int k = 0; k < params_.nsteps; k++) {
+    const int target = step_ + params_.nsteps;
+    save_checkpoint();
+    while (step_ < target) {
         step();
-        write_outputs();
+        bool at_output = output_due(step_) || step_ == target;
+        if (at_output || step_ - ckpt_step_ >= check_every_) {
+            if (!validate()) {
+                restore_checkpoint();
+                continue;
+            }
+            if (params_.sort_every > 0 && step_ - last_sort_step_ >= params_.sort_every) {
+                read_status();
+                rebuild_neighbors(true);
+            }
+            write_outputs();
+            save_checkpoint();
+        }
         print_progress();
     }
     flush_velocities();
     CUDA_CHECK(cudaStreamSynchronize(stream_));
     read_status();
+    verlet_.read_state(stream_);
     auto t_end = std::chrono::steady_clock::now();
     double elapsed = std::chrono::duration<double>(t_end - t_start_).count();
     int nrun = step_ - first;
@@ -653,9 +734,9 @@ void Simulation::run() {
     if (params_.restart_freq >= 0)
         write_restart(build_restart_final_filename(params_.restart_file), step_);
 
-    printf("Wall time: %.3f s  |  Steps/s: %.1f  |  ns/day: %.3f  |  rebuilds: %d  sorts: %d\n",
+    printf("Wall time: %.3f s  |  Steps/s: %.1f  |  ns/day: %.3f  |  rebuilds: %d  sorts: %d  rollbacks: %d\n",
            elapsed, nrun / elapsed, (nrun * params_.dt / 1000.0) / (elapsed / 86400.0),
-           n_rebuilds_, n_sorts_);
+           verlet_.h_state->n_builds, n_sorts_, n_rollbacks_);
     finish();
 }
 
@@ -671,7 +752,14 @@ Simulation::~Simulation() {
     thermo_bufs_.close_file();
     thermo_bufs_.free();
     if (params_.rg_on) rg_bufs_.free();
-    if (params_.stress_on) correlator_.free();
+    if (params_.stress_on) {
+        correlator_.free();
+        stress_sampler_.free();
+    }
+    ckpt_p_.free();
+    free_dev(d_ckpt_nh_);
+    if (d_ckpt_status_) cudaFree(d_ckpt_status_);
+    free_dev(d_ckpt_step_);
     if (d_nh_state_) free_nh_device_state(d_nh_state_);
     if (params_.ensemble == Ensemble::NPT_NH) free_npt_scratch(npt_scratch_);
     free_dev(d_ke_buf_);

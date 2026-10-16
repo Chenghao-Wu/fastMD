@@ -1,11 +1,18 @@
 #include "verlet_list.cuh"
 #include "../core/pbc.cuh"
-#include <cub/cub.cuh>
+#include <algorithm>
 #include <cmath>
+#include <numeric>
+#include <stdexcept>
+#include <string>
+#include <vector>
 
 namespace {
 
-__host__ __device__ inline uint32_t spread3(uint32_t v) {   // 10 bits -> every 3rd bit
+constexpr int kBlock = 256;        // nl_build
+constexpr int kBinBlock = 1024;    // nl_bin: its last block scans/scatters/gathers alone
+
+uint32_t spread3_host(uint32_t v) {
     v = (v | (v << 16)) & 0x030000FF;
     v = (v | (v <<  8)) & 0x0300F00F;
     v = (v | (v <<  4)) & 0x030C30C3;
@@ -13,122 +20,148 @@ __host__ __device__ inline uint32_t spread3(uint32_t v) {   // 10 bits -> every 
     return v;
 }
 
-__host__ __device__ inline uint32_t compact3(uint32_t v) {  // inverse of spread3
-    v &= 0x09249249;
-    v = (v | (v >>  2)) & 0x030C30C3;
-    v = (v | (v >>  4)) & 0x0300F00F;
-    v = (v | (v >>  8)) & 0x030000FF;
-    v = (v | (v >> 16)) & 0x000003FF;
-    return v;
+__device__ __forceinline__ int wrap_cell(int c, int n) {
+    c %= n;
+    return c < 0 ? c + n : c;
 }
 
-__host__ __device__ inline int cell_key(int cx, int cy, int cz) {
-    return (int)((spread3(cz) << 2) | (spread3(cy) << 1) | spread3(cx));
+__device__ __forceinline__ int wrap_near(int c, int n) {   // c in [-1, n]
+    return c < 0 ? c + n : (c >= n ? c - n : c);
 }
 
-}  // namespace
-
-void VerletList::set_grid(float box_L, float rc_skin) {
-    nx = ny = nz = std::max(1, int(box_L / rc_skin));
-    if (nx > 1024) throw std::runtime_error("VerletList: more than 1024 cells per dimension");
-    ncells = nx * ny * nz;
-    dedup_needed = (nx < 3 || ny < 3 || nz < 3);
-    cell_size = box_L / nx;
-    key_bits = 0;
-    while ((1 << key_bits) < nx) key_bits++;
-    nkeys = 1 << (3 * key_bits);
-    if (nkeys > nkeys_alloc) {
-        if (cell_starts) CUDA_CHECK(cudaFree(cell_starts));
-        if (cell_ends) CUDA_CHECK(cudaFree(cell_ends));
-        CUDA_CHECK(cudaMalloc(&cell_starts, nkeys * sizeof(int)));
-        CUDA_CHECK(cudaMalloc(&cell_ends,   nkeys * sizeof(int)));
-        nkeys_alloc = nkeys;
-    }
+// Cell coordinates of a wrapped position for box L with n cells per side.
+__device__ __forceinline__ int3 cell_of(float4 r, float n_over_L, int nx, int ny, int nz) {
+    return make_int3(wrap_cell(__float2int_rd(r.x * n_over_L), nx),
+                     wrap_cell(__float2int_rd(r.y * n_over_L), ny),
+                     wrap_cell(__float2int_rd(r.z * n_over_L), nz));
 }
 
-void VerletList::allocate(int n, float rc_skin, float box_L) {
-    natoms = n;
-    natoms_padded = div_ceil(n, TILE_SIZE) * TILE_SIZE;
-    float density = natoms / (box_L * box_L * box_L);
-    float sphere_vol = (4.0f / 3.0f) * 3.14159265358979323846f * rc_skin * rc_skin * rc_skin;
-    int estimated = int(density * sphere_vol * 1.5f) + 32;
-    max_neighbors = std::max(64, estimated);
-
-    CUDA_CHECK(cudaMalloc(&neighbors,     (size_t)max_neighbors * natoms * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&num_neighbors, natoms * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&cell_ids,      natoms * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&cell_ids_out,  natoms * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&atom_ids,      natoms * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&sorted_atoms,  natoms * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&order_pad,     natoms_padded * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&pos_sorted,    natoms * sizeof(float4)));
-    CUDA_CHECK(cudaMalloc(&d_stats, 2 * sizeof(int)));
-    CUDA_CHECK(cudaHostAlloc(&h_stats, 2 * sizeof(int), cudaHostAllocDefault));
-    set_grid(box_L, rc_skin);
-
-    cub::DeviceRadixSort::SortPairs(nullptr, cub_temp_bytes,
-        (int*)nullptr, (int*)nullptr, (int*)nullptr, (int*)nullptr, natoms);
-    CUDA_CHECK(cudaMalloc(&d_cub_temp, cub_temp_bytes));
+// Rebuild criterion, evaluated identically by every thread from device state:
+// a pair outside the list (distance > rc + skin at the last build) can come
+// within rc once particles move; with box scaling s = L / L_build and maximum
+// displacement d (relative to the affinely scaled reference) the list is
+// valid while s (rc + skin) - 2 d > rc.
+__device__ __forceinline__ bool rebuild_needed(const DeviceNeighborState* st, float L,
+                                               int max_dr2_bits, float rc, float skin,
+                                               int max_age) {
+    if (st->force_rebuild || !(st->L_build > 0.0f)) return true;
+    float s = L / st->L_build;
+    float half_margin = 0.5f * (s * (rc + skin) - rc);
+    float max_dr2 = __int_as_float(max_dr2_bits);
+    if (half_margin <= 0.0f || max_dr2 > half_margin * half_margin) return true;
+    return max_age > 0 && st->age + 1 >= max_age;
 }
 
-void VerletList::free() {
-    for (void* p : {(void*)neighbors, (void*)num_neighbors, (void*)cell_ids,
-                    (void*)cell_ids_out, (void*)atom_ids, (void*)sorted_atoms, (void*)order_pad,
-                    (void*)pos_sorted, (void*)cell_starts, (void*)cell_ends, (void*)d_stats,
-                    d_cub_temp})
-        if (p) CUDA_CHECK(cudaFree(p));
-    if (h_stats) CUDA_CHECK(cudaFreeHost(h_stats));
-    *this = VerletList{};
-}
+struct BinArgs {
+    const float4* pos;
+    float4* pos_ref;
+    const float* box_L;
+    int* max_dr2_bits;
+    DeviceNeighborState* st;
+    int* cell_key;
+    int* cell_slot;
+    int* cell_count;
+    int* cell_starts;
+    int* cell_ends;
+    const int* cell_rank;
+    int* order;
+    float4* pos_sorted;
+    int natoms, natoms_padded, nx, ny, nz, ncells;
+    float rc, skin, rc_min_image;
+    int max_age;
+};
 
-// ---------------------------------------------------------------------------
-// GPU kernels for Verlet list construction
-// ---------------------------------------------------------------------------
-
-__global__ void assign_cells(const float4* __restrict__ pos,
-                             int* __restrict__ cell_ids,
-                             int* __restrict__ atom_ids,
-                             int natoms, float inv_cell_size,
-                             int nx, int ny, int nz)
-{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= natoms) return;
-    float4 r = pos[i];
-    int cx = __float2int_rd(r.x * inv_cell_size);
-    int cy = __float2int_rd(r.y * inv_cell_size);
-    int cz = __float2int_rd(r.z * inv_cell_size);
-    // positions are wrapped into [0, L); the modulo only guards round-off at L
-    cx = ((cx % nx) + nx) % nx;
-    cy = ((cy % ny) + ny) % ny;
-    cz = ((cz % nz) + nz) % nz;
-    cell_ids[i] = cell_key(cx, cy, cz);
-    atom_ids[i] = i;
-}
-
-__global__ void pad_order(const int* __restrict__ sorted_atoms, int* __restrict__ order_pad,
-                          int natoms, int natoms_padded) {
-    int k = blockIdx.x * blockDim.x + threadIdx.x;
-    if (k < natoms) order_pad[k] = sorted_atoms[k];
-    else if (k < natoms_padded) order_pad[k] = k;
-}
-
-__global__ void find_cell_starts(const int* __restrict__ sorted_cell_ids,
-                                 int* __restrict__ cell_starts,
-                                 int* __restrict__ cell_ends,
-                                 int natoms)
-{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= natoms) return;
-
-    if (i == 0) cell_starts[sorted_cell_ids[0]] = 0;
-    if (i == natoms - 1) cell_ends[sorted_cell_ids[natoms - 1]] = natoms;
-    if (i > 0) {
-        int cell = sorted_cell_ids[i];
-        int prev_cell = sorted_cell_ids[i - 1];
-        if (cell != prev_cell) {
-            cell_starts[cell] = i;
-            cell_ends[prev_cell] = i;
+// Exclusive scan of cell counts by one block; returns the max occupancy.
+__device__ int block_scan_cells(const int* __restrict__ count, int* __restrict__ starts,
+                                int* __restrict__ ends, int ncells) {
+    __shared__ int s_warp[32];
+    __shared__ int s_carry;
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    const int nwarps = blockDim.x >> 5;
+    if (threadIdx.x == 0) s_carry = 0;
+    int occ_max = 0;
+    __syncthreads();
+    for (int base = 0; base < ncells; base += blockDim.x) {
+        int c = base + threadIdx.x;
+        int v = c < ncells ? __ldcg(&count[c]) : 0;
+        occ_max = max(occ_max, v);
+        int x = v;   // inclusive warp scan
+        for (int o = 1; o < 32; o <<= 1) {
+            int y = __shfl_up_sync(0xffffffffu, x, o);
+            if (lane >= o) x += y;
         }
+        if (lane == 31) s_warp[warp] = x;
+        __syncthreads();
+        if (warp == 0) {
+            int w = lane < nwarps ? s_warp[lane] : 0;
+            for (int o = 1; o < 32; o <<= 1) {
+                int y = __shfl_up_sync(0xffffffffu, w, o);
+                if (lane >= o) w += y;
+            }
+            if (lane < nwarps) s_warp[lane] = w;   // inclusive totals of warps 0..lane
+        }
+        __syncthreads();
+        int excl = s_carry + (warp > 0 ? s_warp[warp - 1] : 0) + x - v;
+        if (c < ncells) {
+            starts[c] = excl;
+            ends[c] = excl + v;
+        }
+        __syncthreads();
+        if (threadIdx.x == blockDim.x - 1) s_carry = excl + v;
+        __syncthreads();
+    }
+    for (int o = 16; o > 0; o >>= 1) occ_max = max(occ_max, __shfl_down_sync(0xffffffffu, occ_max, o));
+    if (lane == 0) s_warp[warp] = occ_max;
+    __syncthreads();
+    int m = 0;
+    for (int w = 0; w < nwarps; w++) m = max(m, s_warp[w]);
+    return m;
+}
+
+__global__ void nl_bin_kernel(BinArgs a) {
+    const float L = *a.box_L;
+    if (!rebuild_needed(a.st, L, *a.max_dr2_bits, a.rc, a.skin, a.max_age)) return;
+
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const float n_over_L = a.nx / L;
+    if (i < a.natoms) {
+        float4 r = a.pos[i];
+        int3 c = cell_of(r, n_over_L, a.nx, a.ny, a.nz);
+        int key = a.cell_rank[(c.z * a.ny + c.y) * a.nx + c.x];
+        a.cell_key[i] = key;
+        a.cell_slot[i] = atomicAdd(&a.cell_count[key], 1);
+        a.pos_ref[i] = r;
+    }
+    if (i == 0 && (L / a.nx < a.rc + a.skin || L < 2.0f * a.rc_min_image)) a.st->grid_error = 1;
+
+    // The last block to finish scans the counts, scatters and gathers.
+    __shared__ bool last;
+    __threadfence();
+    __syncthreads();
+    if (threadIdx.x == 0) last = (atomicAdd(&a.st->bin_done, 1u) == gridDim.x - 1);
+    __syncthreads();
+    if (!last) return;
+    __threadfence();
+
+    int occ = block_scan_cells(a.cell_count, a.cell_starts, a.cell_ends, a.ncells);
+    __syncthreads();
+    for (int j = threadIdx.x; j < a.natoms; j += blockDim.x)
+        a.order[a.cell_starts[__ldcg(&a.cell_key[j])] + __ldcg(&a.cell_slot[j])] = j;
+    for (int c = threadIdx.x; c < a.ncells; c += blockDim.x) a.cell_count[c] = 0;
+    __syncthreads();
+    for (int k = threadIdx.x; k < a.natoms_padded; k += blockDim.x) {
+        if (k < a.natoms) a.pos_sorted[k] = a.pos[a.order[k]];
+        else a.order[k] = k;
+    }
+    if (threadIdx.x == 0) {
+        a.st->rebuild = 1;
+        a.st->force_rebuild = 0;
+        a.st->L_build = L;
+        a.st->n_builds++;
+        a.st->max_count = 0;
+        a.st->max_cell = occ;
+        a.st->bin_done = 0u;
+        *a.max_dr2_bits = 0;
     }
 }
 
@@ -143,195 +176,292 @@ __device__ __forceinline__ bool is_excluded(int tag_i, int tag_j,
     return false;
 }
 
-// Record j as a neighbor of i if within the list radius and not excluded.
-// count keeps increasing past the capacity so the true maximum is known.
-__device__ __forceinline__ void consider_pair(
-    int i, int j, int tag_i, float4 pos_i, float4 pos_j,
-    const int* __restrict__ tag,
-    const int* __restrict__ excl_offsets, const int* __restrict__ excl_list,
-    int* __restrict__ neighbors, int natoms, int max_neighbors,
-    float rc_skin2, float L, float inv_L, int& count)
-{
-    float dx = min_image(pos_i.x - pos_j.x, L, inv_L);
-    float dy = min_image(pos_i.y - pos_j.y, L, inv_L);
-    float dz = min_image(pos_i.z - pos_j.z, L, inv_L);
-    float r2 = dx * dx + dy * dy + dz * dz;
-    if (r2 >= rc_skin2) return;
-    int tag_j = tag ? __ldg(&tag[j]) : j;
-    if (is_excluded(tag_i, tag_j, excl_offsets, excl_list)) return;
-    if (count < max_neighbors) neighbors[count * natoms + i] = j;
-    count++;
-}
+struct BuildArgs {
+    const float* box_L;
+    DeviceNeighborState* st;
+    const int* tag;
+    const int* excl_offsets;
+    const int* excl_list;
+    const int* order;
+    const float4* pos_sorted;
+    const int* cell_starts;
+    const int* cell_ends;
+    const int* cell_rank;
+    int* neighbors;
+    int* num_neighbors;
+    int natoms, nx, ny, nz, max_neighbors;
+    float rc_skin2;
+};
 
-// Positions gathered into cell order so the candidate loop reads contiguous
-// memory (atoms of one cell are adjacent).
-__global__ void gather_cell_order(const float4* __restrict__ pos,
-                                  const int* __restrict__ sorted_atoms,
-                                  float4* __restrict__ pos_sorted, int natoms) {
-    int k = blockIdx.x * blockDim.x + threadIdx.x;
-    if (k < natoms) pos_sorted[k] = __ldg(&pos[sorted_atoms[k]]);
-}
-
-// One thread per particle, taken in cell order: the threads of a warp mostly
-// share a home cell and therefore scan the same 27 neighbor cells, which
-// keeps the candidate loads coherent and cached. IN_ORDER: particles are
-// stored in cell order (index == sorted position), so no indirection.
-template <bool IN_ORDER>
-__global__ void build_verlet_list(
-    const float4* __restrict__ pos_k,       // positions in cell order
-    const int* __restrict__ tag,
-    const int* __restrict__ sorted_atoms,
-    const int* __restrict__ sorted_cell_ids,
-    const int* __restrict__ cell_starts,
-    const int* __restrict__ cell_ends,
-    const int* __restrict__ exclusion_offsets,
-    const int* __restrict__ exclusion_list,
-    int* __restrict__ neighbors,
-    int* __restrict__ num_neighbors,
-    int natoms, int nx, int ny, int nz,
-    float rc_skin2, float L, float inv_L,
-    int max_neighbors, int dedup_needed,
-    int* __restrict__ stats)
-{
-    int k = blockIdx.x * blockDim.x + threadIdx.x;
+// TPA threads per particle, particles taken in cell order (the groups of a
+// warp share a home cell and scan the same neighbor cells). The group's
+// lanes stride over each cell's candidates; hits are compacted with a
+// group-wide ballot so every lane keeps the same running count. Counts
+// continue past the capacity so overflow is detected exactly.
+template <int TPA>
+__global__ void nl_build_kernel(BuildArgs a) {
+    const int g = blockIdx.x * blockDim.x + threadIdx.x;
+    if (!a.st->rebuild) {
+        if (g == 0) a.st->age++;
+        return;
+    }
+    const int k = g / TPA;
+    const int sub = threadIdx.x & (TPA - 1);
+    const unsigned group_mask = (TPA == 32 ? 0xffffffffu : ((1u << TPA) - 1u))
+                                << ((threadIdx.x & 31) & ~(TPA - 1));
+    const float L = *a.box_L, inv_L = 1.0f / L;
     int count = 0;
-    if (k < natoms) {
-        int i = IN_ORDER ? k : sorted_atoms[k];
-        uint32_t key = (uint32_t)sorted_cell_ids[k];
-        float4 pos_i = pos_k[k];
-        int tag_i = tag ? tag[i] : i;
-        int cx = (int)compact3(key), cy = (int)compact3(key >> 1), cz = (int)compact3(key >> 2);
-
+    if (k < a.natoms) {
+        const int i = a.order[k];
+        const float4 pos_i = a.pos_sorted[k];
+        const int tag_i = a.tag ? a.tag[i] : i;
+        const int3 c = cell_of(pos_i, a.nx * inv_L, a.nx, a.ny, a.nz);
+        const bool dedup = a.nx < 3 || a.ny < 3 || a.nz < 3;
         int visited[27];
         int n_visited = 0;
-        for (int dz = -1; dz <= 1; dz++) {
-            int ncz = cz + dz;
-            if (ncz < 0) ncz += nz; else if (ncz >= nz) ncz -= nz;
-            for (int dy = -1; dy <= 1; dy++) {
-                int ncy = cy + dy;
-                if (ncy < 0) ncy += ny; else if (ncy >= ny) ncy -= ny;
+        for (int dz = -1; dz <= 1; dz++)
+            for (int dy = -1; dy <= 1; dy++)
                 for (int dx = -1; dx <= 1; dx++) {
-                    int ncx = cx + dx;
-                    if (ncx < 0) ncx += nx; else if (ncx >= nx) ncx -= nx;
-                    int ncell = cell_key(ncx, ncy, ncz);
-                    if (dedup_needed) {
-                        // < 3 cells per dimension: neighbor cells repeat under PBC
-                        bool already = false;
-                        for (int v = 0; v < n_visited; v++)
-                            if (visited[v] == ncell) { already = true; break; }
-                        if (already) continue;
-                        visited[n_visited++] = ncell;
+                    int dense = (wrap_near(c.z + dz, a.nz) * a.ny + wrap_near(c.y + dy, a.ny)) * a.nx +
+                                wrap_near(c.x + dx, a.nx);
+                    int cell = __ldg(&a.cell_rank[dense]);
+                    if (dedup) {   // < 3 cells per side: neighbor cells repeat under PBC
+                        bool seen = false;
+                        for (int v = 0; v < n_visited; v++) seen |= (visited[v] == cell);
+                        if (seen) continue;
+                        visited[n_visited++] = cell;
                     }
-                    int ne = cell_ends[ncell];
-                    for (int b = cell_starts[ncell]; b < ne; b++) {
-                        if (b == k) continue;
-                        int j = IN_ORDER ? b : __ldg(&sorted_atoms[b]);
-                        consider_pair(i, j, tag_i, pos_i, pos_k[b], tag,
-                                      exclusion_offsets, exclusion_list, neighbors,
-                                      natoms, max_neighbors, rc_skin2, L, inv_L, count);
+                    const int start = a.cell_starts[cell], end = a.cell_ends[cell];
+                    for (int base = start; base < end; base += TPA) {
+                        const int b = base + sub;
+                        int j = -1;
+                        if (b < end && b != k) {
+                            float4 pos_j = a.pos_sorted[b];
+                            float ddx = min_image(pos_i.x - pos_j.x, L, inv_L);
+                            float ddy = min_image(pos_i.y - pos_j.y, L, inv_L);
+                            float ddz = min_image(pos_i.z - pos_j.z, L, inv_L);
+                            if (ddx * ddx + ddy * ddy + ddz * ddz < a.rc_skin2) {
+                                j = __ldg(&a.order[b]);
+                                int tag_j = a.tag ? __ldg(&a.tag[j]) : j;
+                                if (is_excluded(tag_i, tag_j, a.excl_offsets, a.excl_list)) j = -1;
+                            }
+                        }
+                        if (TPA == 1) {
+                            if (j >= 0) {
+                                if (count < a.max_neighbors) a.neighbors[count * a.natoms + i] = j;
+                                count++;
+                            }
+                        } else {
+                            unsigned hits = __ballot_sync(group_mask, j >= 0) & group_mask;
+                            if (j >= 0) {
+                                int slot = count + __popc(hits & ((1u << (threadIdx.x & 31)) - 1u));
+                                if (slot < a.max_neighbors) a.neighbors[slot * a.natoms + i] = j;
+                            }
+                            count += __popc(hits);
+                        }
                     }
                 }
-            }
-        }
-        num_neighbors[i] = min(count, max_neighbors);
+        if (sub == 0) a.num_neighbors[i] = min(count, a.max_neighbors);
     }
+    for (int o = 16; o > 0; o >>= 1) count = max(count, __shfl_down_sync(0xffffffffu, count, o));
+    if ((threadIdx.x & 31) == 0) atomicMax(&a.st->max_count, count);
 
-    // block maximum of the true neighbor count: warp shuffle, one atomic per warp
-    for (int offset = 16; offset > 0; offset >>= 1)
-        count = max(count, __shfl_down_sync(0xffffffffu, count, offset));
-    if ((threadIdx.x & 31) == 0) atomicMax(&stats[0], count);
+    __shared__ bool last;
+    __threadfence();
+    __syncthreads();
+    if (threadIdx.x == 0) last = (atomicAdd(&a.st->build_done, 1u) == gridDim.x - 1);
+    __syncthreads();
+    if (last && threadIdx.x == 0) {
+        __threadfence();
+        int mc = atomicAdd(&a.st->max_count, 0);
+        if (mc > a.max_neighbors) a.st->overflow = max(a.st->overflow, mc);
+        a.st->rebuild = 0;
+        a.st->age = 0;
+        a.st->build_done = 0u;
+    }
 }
 
-__global__ void max_cell_occupancy(const int* __restrict__ cell_starts,
-                                   const int* __restrict__ cell_ends,
-                                   int ncells, int* __restrict__ stats) {
-    int c = blockIdx.x * blockDim.x + threadIdx.x;
-    int occ = c < ncells ? cell_ends[c] - cell_starts[c] : 0;
-    for (int offset = 16; offset > 0; offset >>= 1)
-        occ = max(occ, __shfl_down_sync(0xffffffffu, occ, offset));
-    if ((threadIdx.x & 31) == 0) atomicMax(&stats[1], occ);
+}  // namespace
+
+void VerletList::allocate(int n, float rc_in, float skin_in, float box_L, float margin, int age) {
+    natoms = n;
+    natoms_padded = div_ceil(n, TILE_SIZE) * TILE_SIZE;
+    rc = rc_in;
+    skin = skin_in;
+    rc_min_image = rc_in;
+    grid_margin = std::max(1.0f, margin);
+    max_age = age;
+    const float rcs = rc + skin;
+    float density = natoms / (box_L * box_L * box_L);
+    int estimated = int(density * (4.0f / 3.0f) * 3.14159265f * rcs * rcs * rcs * 1.5f) + 32;
+    max_neighbors = std::max(64, estimated);
+
+    CUDA_CHECK(cudaMalloc(&neighbors,     (size_t)max_neighbors * natoms * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&num_neighbors, natoms * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&cell_key,      natoms * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&cell_slot,     natoms * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&order,         natoms_padded * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&pos_sorted,    natoms * sizeof(float4)));
+    CUDA_CHECK(cudaMalloc(&d_state, sizeof(DeviceNeighborState)));
+    CUDA_CHECK(cudaHostAlloc(&h_state, sizeof(DeviceNeighborState), cudaHostAllocDefault));
+    CUDA_CHECK(cudaMemset(d_state, 0, sizeof(DeviceNeighborState)));
+    *h_state = DeviceNeighborState{};
+    CUDA_CHECK(cudaMalloc(&d_box_scratch_, sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_dr2_scratch_, sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_ref_scratch_, natoms_padded * sizeof(float4)));
+    set_grid(box_L);
 }
 
-void VerletList::bin(const float4* pos, float box_L, float rc_skin, cudaStream_t stream) {
+void VerletList::free() {
+    for (void* p : {(void*)neighbors, (void*)num_neighbors, (void*)cell_key, (void*)cell_slot,
+                    (void*)cell_count, (void*)cell_starts, (void*)cell_ends, (void*)cell_rank,
+                    (void*)order, (void*)pos_sorted, (void*)d_state, (void*)d_box_scratch_,
+                    (void*)d_dr2_scratch_, (void*)d_ref_scratch_})
+        if (p) CUDA_CHECK(cudaFree(p));
+    if (h_state) CUDA_CHECK(cudaFreeHost(h_state));
+    *this = VerletList{};
+}
+
+bool VerletList::grid_ok_for(float box_L) const {
+    return nx > 0 && box_L / nx >= rc + skin && box_L >= 2.0f * rc_min_image;
+}
+
+void VerletList::set_grid(float box_L) {
     if (!(box_L > 0.0f) || !std::isfinite(box_L))
         throw std::runtime_error("VerletList: invalid box length");
-    set_grid(box_L, rc_skin);
-    int blocks = div_ceil(natoms, 256);
-    assign_cells<<<blocks, 256, 0, stream>>>(pos, cell_ids, atom_ids, natoms,
-                                             1.0f / cell_size, nx, ny, nz);
-    cub::DeviceRadixSort::SortPairs(d_cub_temp, cub_temp_bytes,
-        cell_ids, cell_ids_out, atom_ids, sorted_atoms, natoms, 0, std::max(1, 3 * key_bits), stream);
-    CUDA_CHECK(cudaMemsetAsync(cell_starts, 0, nkeys * sizeof(int), stream));
-    CUDA_CHECK(cudaMemsetAsync(cell_ends,   0, nkeys * sizeof(int), stream));
-    find_cell_starts<<<blocks, 256, 0, stream>>>(cell_ids_out, cell_starts, cell_ends, natoms);
-    pad_order<<<div_ceil(natoms_padded, 256), 256, 0, stream>>>(sorted_atoms, order_pad,
-                                                                natoms, natoms_padded);
-    CUDA_CHECK(cudaGetLastError());
+    nx = ny = nz = std::max(1, int(box_L / ((rc + skin) * grid_margin)));
+    if (nx > 1024) throw std::runtime_error("VerletList: more than 1024 cells per dimension");
+    ncells = nx * ny * nz;
+    cell_size = box_L / nx;
+    if (ncells > ncells_alloc) {
+        for (int** p : {&cell_count, &cell_starts, &cell_ends, &cell_rank})
+            if (*p) CUDA_CHECK(cudaFree(*p));
+        CUDA_CHECK(cudaMalloc(&cell_count,  ncells * sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&cell_starts, ncells * sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&cell_ends,   ncells * sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&cell_rank,   ncells * sizeof(int)));
+        ncells_alloc = ncells;
+    }
+    // rank of every cell along the Morton curve of its coordinates
+    std::vector<std::pair<uint32_t, int>> code(ncells);
+    for (int z = 0; z < nz; z++)
+        for (int y = 0; y < ny; y++)
+            for (int x = 0; x < nx; x++) {
+                int dense = (z * ny + y) * nx + x;
+                code[dense] = {(spread3_host(z) << 2) | (spread3_host(y) << 1) | spread3_host(x), dense};
+            }
+    std::sort(code.begin(), code.end());
+    std::vector<int> rank(ncells);
+    for (int r = 0; r < ncells; r++) rank[code[r].second] = r;
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaMemcpy(cell_rank, rank.data(), ncells * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(cell_count, 0, ncells * sizeof(int)));
+    const int one = 1;
+    CUDA_CHECK(cudaMemcpy(&d_state->force_rebuild, &one, sizeof(int), cudaMemcpyHostToDevice));
 }
 
-void VerletList::launch_list(const float4* pos, bool in_order, float box_L, float inv_L,
-                             const int* tag, const int* exclusion_offsets,
-                             const int* exclusion_list, float rc_skin, cudaStream_t stream) {
-    int blocks = div_ceil(natoms, 256);
-    const float4* pos_k = pos;
-    if (!in_order) {
-        gather_cell_order<<<blocks, 256, 0, stream>>>(pos, sorted_atoms, pos_sorted, natoms);
-        pos_k = pos_sorted;
-    }
-    CUDA_CHECK(cudaMemsetAsync(d_stats, 0, 2 * sizeof(int), stream));
-    auto kernel = in_order ? build_verlet_list<true> : build_verlet_list<false>;
-    kernel<<<blocks, 256, 0, stream>>>(
-        pos_k, tag, sorted_atoms, cell_ids_out, cell_starts, cell_ends,
-        exclusion_offsets, exclusion_list, neighbors, num_neighbors,
-        natoms, nx, ny, nz, rc_skin * rc_skin, box_L, inv_L,
-        max_neighbors, dedup_needed ? 1 : 0, d_stats);
-    max_cell_occupancy<<<div_ceil(nkeys, 256), 256, 0, stream>>>(
-        cell_starts, cell_ends, nkeys, d_stats);
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaMemcpyAsync(h_stats, d_stats, 2 * sizeof(int),
+void VerletList::request_rebuild(cudaStream_t stream) {
+    static const int one = 1;
+    CUDA_CHECK(cudaMemcpyAsync(&d_state->force_rebuild, &one, sizeof(int),
+                               cudaMemcpyHostToDevice, stream));
+}
+
+void VerletList::read_state(cudaStream_t stream) {
+    CUDA_CHECK(cudaMemcpyAsync(h_state, d_state, sizeof(DeviceNeighborState),
                                cudaMemcpyDeviceToHost, stream));
-}
-
-void VerletList::build_from_bins(const float4* pos, bool in_order, float box_L, float inv_L,
-                                 const int* tag, const int* exclusion_offsets,
-                                 const int* exclusion_list, float rc_skin,
-                                 cudaStream_t stream) {
-    launch_list(pos, in_order, box_L, inv_L, tag, exclusion_offsets, exclusion_list,
-                rc_skin, stream);
     CUDA_CHECK(cudaStreamSynchronize(stream));
-    max_count = h_stats[0];
-    max_cell_atoms = h_stats[1];
-
-    if (max_count > max_neighbors) {
-        // Grow with headroom and rebuild: the list must never be truncated.
-        int new_cap = max_count + max_count / 4 + 16;
-        size_t bytes = (size_t)new_cap * natoms * sizeof(int);
-        CUDA_CHECK(cudaFree(neighbors));
-        neighbors = nullptr;
-        if (cudaMalloc(&neighbors, bytes) != cudaSuccess)
-            throw std::runtime_error("VerletList: cannot allocate " + std::to_string(bytes) +
-                                     " bytes for " + std::to_string(new_cap) +
-                                     " neighbors per particle");
-        max_neighbors = new_cap;
-        n_resizes++;
-        launch_list(pos, in_order, box_L, inv_L, tag, exclusion_offsets, exclusion_list,
-                    rc_skin, stream);
-        CUDA_CHECK(cudaStreamSynchronize(stream));
-        max_count = h_stats[0];
-        max_cell_atoms = h_stats[1];
-        if (max_count > max_neighbors)
-            throw std::runtime_error("VerletList: neighbor overflow after resize");
-    }
+    max_count = h_state->max_count;
+    max_cell_atoms = h_state->max_cell;
 }
 
-void VerletList::build(const float4* pos, int n, float box_L, float inv_L,
+void VerletList::clear_errors(cudaStream_t stream) {
+    CUDA_CHECK(cudaMemsetAsync(&d_state->overflow, 0, sizeof(int), stream));
+    CUDA_CHECK(cudaMemsetAsync(&d_state->grid_error, 0, sizeof(int), stream));
+}
+
+void VerletList::grow(int needed) {
+    int new_cap = needed + needed / 4 + 16;
+    if (new_cap <= max_neighbors) return;
+    size_t bytes = (size_t)new_cap * natoms * sizeof(int);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaFree(neighbors));
+    neighbors = nullptr;
+    if (cudaMalloc(&neighbors, bytes) != cudaSuccess)
+        throw std::runtime_error("VerletList: cannot allocate " + std::to_string(bytes) +
+                                 " bytes for " + std::to_string(new_cap) + " neighbors per particle");
+    max_neighbors = new_cap;
+    n_resizes++;
+}
+
+void VerletList::set_capacity(int cap) {
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaFree(neighbors));
+    max_neighbors = std::max(1, cap);
+    CUDA_CHECK(cudaMalloc(&neighbors, (size_t)max_neighbors * natoms * sizeof(int)));
+}
+
+void VerletList::launch_bin(const float4* pos, float4* pos_ref, const float* d_box_L,
+                            int* d_max_dr2_bits, cudaStream_t stream) {
+    BinArgs a{pos, pos_ref, d_box_L, d_max_dr2_bits, d_state, cell_key, cell_slot, cell_count,
+              cell_starts, cell_ends, cell_rank, order, pos_sorted,
+              natoms, natoms_padded, nx, ny, nz, ncells, rc, skin, rc_min_image, max_age};
+    nl_bin_kernel<<<div_ceil(natoms, kBinBlock), kBinBlock, 0, stream>>>(a);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void VerletList::launch_build(const float4* /*pos*/, const float* d_box_L, const int* tag,
+                              const int* exclusion_offsets, const int* exclusion_list,
+                              cudaStream_t stream) {
+    BuildArgs a{d_box_L, d_state, tag, exclusion_offsets, exclusion_list, order, pos_sorted,
+                cell_starts, cell_ends, cell_rank, neighbors, num_neighbors,
+                natoms, nx, ny, nz, max_neighbors, (rc + skin) * (rc + skin)};
+    const int tpa = build_tpa;
+    const int blocks = div_ceil(natoms * tpa, kBlock);
+    switch (tpa) {
+        case 1: nl_build_kernel<1><<<blocks, kBlock, 0, stream>>>(a); break;
+        case 2: nl_build_kernel<2><<<blocks, kBlock, 0, stream>>>(a); break;
+        case 4: nl_build_kernel<4><<<blocks, kBlock, 0, stream>>>(a); break;
+        default: nl_build_kernel<8><<<blocks, kBlock, 0, stream>>>(a); break;
+    }
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void VerletList::step(const float4* pos, float4* pos_ref, const float* d_box_L,
+                      int* d_max_dr2_bits, const int* tag, const int* exclusion_offsets,
+                      const int* exclusion_list, cudaStream_t stream) {
+    launch_bin(pos, pos_ref, d_box_L, d_max_dr2_bits, stream);
+    launch_build(pos, d_box_L, tag, exclusion_offsets, exclusion_list, stream);
+}
+
+void VerletList::bin(const float4* pos, float4* pos_ref, const float* d_box_L,
+                     int* d_max_dr2_bits, cudaStream_t stream) {
+    request_rebuild(stream);
+    launch_bin(pos, pos_ref, d_box_L, d_max_dr2_bits, stream);
+}
+
+void VerletList::build(const float4* pos, int n, float box_L, float /*inv_L*/,
                        const int* tag,
                        const int* exclusion_offsets, const int* exclusion_list,
                        float rc_skin, cudaStream_t stream)
 {
     if (n != natoms)
         throw std::runtime_error("VerletList::build: particle count changed");
-    bin(pos, box_L, rc_skin, stream);
-    build_from_bins(pos, false, box_L, inv_L, tag, exclusion_offsets, exclusion_list,
-                    rc_skin, stream);
+    if (std::fabs(rc + skin - rc_skin) > 1e-6f * rc_skin) {   // callers pass rc + skin
+        rc = rc_skin;
+        skin = 0.0f;
+        rc_min_image = 0.0f;
+    }
+    if (!grid_ok_for(box_L) || int(box_L / ((rc + skin) * grid_margin)) != nx) set_grid(box_L);
+    CUDA_CHECK(cudaMemcpyAsync(d_box_scratch_, &box_L, sizeof(float), cudaMemcpyHostToDevice, stream));
+    for (int attempt = 0; attempt < 4; attempt++) {
+        request_rebuild(stream);
+        launch_bin(pos, d_ref_scratch_, d_box_scratch_, d_dr2_scratch_, stream);
+        launch_build(pos, d_box_scratch_, tag, exclusion_offsets, exclusion_list, stream);
+        read_state(stream);
+        if (h_state->grid_error) throw std::runtime_error("VerletList: invalid cell grid");
+        if (h_state->overflow == 0) return;
+        grow(h_state->overflow);
+        clear_errors(stream);
+    }
+    throw std::runtime_error("VerletList: neighbor overflow after resize");
 }

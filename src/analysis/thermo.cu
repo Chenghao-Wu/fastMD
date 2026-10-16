@@ -1,6 +1,6 @@
 #include "thermo.cuh"
 #include "../core/system.cuh"
-#include <cub/cub.cuh>
+#include "../core/reduce.cuh"
 #include <cstring>
 
 void ThermoBuffers::allocate() {
@@ -136,6 +136,61 @@ __global__ void sum_pe_kernel(const float4* __restrict__ force,
     if (tid % 32 == 0) {
         atomicAdd(pe_out, val);
     }
+}
+
+__global__ void stress_sample_kernel(const float4* __restrict__ vel,
+                                     const float4* __restrict__ pos,
+                                     const double* __restrict__ virial, int natoms,
+                                     const float* __restrict__ d_L,
+                                     const float* __restrict__ d_vscale,
+                                     double* __restrict__ acc, unsigned int* __restrict__ done,
+                                     float* __restrict__ out) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    double k[6] = {0, 0, 0, 0, 0, 0};
+    if (i < natoms) {
+        float4 v = vel[i];
+        double m = c_masses[unpack_type_id(pos[i].w)];
+        k[0] = m * v.x * v.x; k[1] = m * v.x * v.y; k[2] = m * v.x * v.z;
+        k[3] = m * v.y * v.y; k[4] = m * v.y * v.z; k[5] = m * v.z * v.z;
+    }
+    block_reduce_atomic_add<6, double>(k, acc);
+    __shared__ bool last;
+    __threadfence();
+    __syncthreads();
+    if (threadIdx.x == 0) last = (atomicAdd(done, 1u) == gridDim.x - 1);
+    __syncthreads();
+    if (last && threadIdx.x == 0) {
+        __threadfence();
+        double L = *d_L;
+        double s = d_vscale ? (double)*d_vscale : 1.0;
+        for (int c = 0; c < 6; c++) {
+            double kin = atomicAdd(&acc[c], 0.0);
+            out[c] = (float)((kin * s * s + virial[c]) / (L * L * L));
+            acc[c] = 0.0;
+        }
+        *done = 0u;
+    }
+}
+
+void StressSampler::allocate() {
+    CUDA_CHECK(cudaMalloc(&d_acc, 6 * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_done, sizeof(unsigned int)));
+    CUDA_CHECK(cudaMalloc(&d_stress, 6 * sizeof(float)));
+    CUDA_CHECK(cudaMemset(d_acc, 0, 6 * sizeof(double)));
+    CUDA_CHECK(cudaMemset(d_done, 0, sizeof(unsigned int)));
+}
+
+void StressSampler::free() {
+    for (void* p : {(void*)d_acc, (void*)d_done, (void*)d_stress})
+        if (p) CUDA_CHECK(cudaFree(p));
+    *this = StressSampler{};
+}
+
+void StressSampler::sample(const float4* vel, const float4* pos, const double* virial, int natoms,
+                           const float* d_L, const float* d_vscale, cudaStream_t stream) {
+    stress_sample_kernel<<<div_ceil(natoms, 256), 256, 0, stream>>>(
+        vel, pos, virial, natoms, d_L, d_vscale, d_acc, d_done, d_stress);
+    CUDA_CHECK(cudaGetLastError());
 }
 
 void compute_thermo(const float4* vel, const float4* pos, const float4* force,

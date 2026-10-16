@@ -27,6 +27,20 @@ struct ThermoBuffers {
     void close_file();
 };
 
+// Pressure tensor sampled entirely on the device (no host transfer), for
+// the stress autocorrelation: P_ab = (sum_i m v_a v_b * s^2 + W_ab) / V,
+// written to d_stress (order xx xy xz yy yz zz). d_vscale (optional) is a
+// pending velocity scale factor s not yet applied to vel; d_L the box length.
+struct StressSampler {
+    double* d_acc = nullptr;          // [6] kinetic tensor accumulator
+    unsigned int* d_done = nullptr;   // last-block ticket
+    float* d_stress = nullptr;        // [6] result
+    void allocate();
+    void free();
+    void sample(const float4* vel, const float4* pos, const double* virial, int natoms,
+                const float* d_L, const float* d_vscale, cudaStream_t stream);
+};
+
 void compute_thermo(const float4* vel, const float4* pos, const float4* force,
                      const double* virial,
                      int natoms, float box_L,

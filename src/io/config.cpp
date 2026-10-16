@@ -281,6 +281,14 @@ SimParams parse_config(const std::string& filename, TopologyData& topo) {
             long n = a.integer("N");
             if (n < 0) a.fail("<N> must be >= 0 (0 = never sort)");
             params.sort_every = (int)n;
+        } else if (key == "check_every") {
+            long n = a.integer("N");
+            if (n < 1) a.fail("<N> must be >= 1");
+            params.check_every = (int)n;
+        } else if (key == "neigh_capacity") {
+            long n = a.integer("N");
+            if (n < 0) a.fail("<N> must be >= 0 (0 = automatic)");
+            params.neigh_capacity = (int)n;
         } else if (key == "neigh_max_age") {
             long n = a.integer("N");
             if (n < 0) a.fail("<N> must be >= 0 (0 = rebuild only when needed)");
