@@ -408,14 +408,16 @@ void build_exclusions_opls(const TopologyData& in_topo, TopologyData& out_topo,
         out_topo.pairs14.push_back(make_int2(pr.first, pr.second));
 
     // full exclusion CSR = 1-2,1-3,1-4
-    out_topo.exclusion_offsets.resize(natoms + 1, 0);
+    std::vector<std::vector<int>> adj14(natoms);
+    for (auto& pr : p14set) {
+        adj14[pr.first].push_back(pr.second);
+        adj14[pr.second].push_back(pr.first);
+    }
+    out_topo.exclusion_offsets.assign(natoms + 1, 0);
     out_topo.exclusion_list.clear();
     for (int i = 0; i < natoms; i++) {
         std::vector<int> all = ex13[i];
-        for (auto& pr : p14set) {
-            if (pr.first == i) all.push_back(pr.second);
-            else if (pr.second == i) all.push_back(pr.first);
-        }
+        all.insert(all.end(), adj14[i].begin(), adj14[i].end());
         std::sort(all.begin(), all.end());
         all.erase(std::unique(all.begin(), all.end()), all.end());
         out_topo.exclusion_offsets[i] = static_cast<int>(out_topo.exclusion_list.size());
@@ -425,7 +427,7 @@ void build_exclusions_opls(const TopologyData& in_topo, TopologyData& out_topo,
     out_topo.exclusion_offsets[natoms] = static_cast<int>(out_topo.exclusion_list.size());
 
     // 1-2/1-3-only CSR (Ewald real-space correction)
-    out_topo.excl13_offsets.resize(natoms + 1, 0);
+    out_topo.excl13_offsets.assign(natoms + 1, 0);
     out_topo.excl13_list.clear();
     for (int i = 0; i < natoms; i++) {
         out_topo.excl13_offsets[i] = static_cast<int>(out_topo.excl13_list.size());
