@@ -1,5 +1,7 @@
 # fastMD
 
+[![CUDA build and CPU tests](https://github.com/Chenghao-Wu/fastMD/actions/workflows/ci.yml/badge.svg)](https://github.com/Chenghao-Wu/fastMD/actions/workflows/ci.yml)
+
 GPU molecular dynamics in CUDA for bead-spring polymers and OPLS-AA liquids.
 
 Multiscale models can speed up a simulation by changing the model. fastMD
@@ -53,7 +55,6 @@ git clone https://github.com/Chenghao-Wu/fastMD.git
 cd fastMD
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=86
 cmake --build build -j
-./build/fastmd run.conf
 ```
 
 CMake options:
@@ -65,7 +66,10 @@ CMake options:
 | `FASTMD_BUILD_PYTHON` | `OFF` (`ON` for wheels) | Python extension `fastmd._core` (needs pybind11) |
 
 Tests: `ctest --test-dir build -L cpu` (no GPU needed) and
-`ctest --test-dir build -L gpu`.
+`ctest --test-dir build -L gpu` (CUDA GPU required). Public CI builds the CUDA
+code and runs CPU tests; **GPU integration tests require a CUDA-equipped
+runner**. See [CONTRIBUTING.md](CONTRIBUTING.md) for reproducing issues and
+reporting numerical or sampling regressions.
 
 A minimal config (Kremer–Grest melt):
 
@@ -96,6 +100,14 @@ python tools/make_kg_chains.py --nchains 400 --chain-length 50 --kbend 1.5 --asp
 python tools/equilibrate_melt.py raw.data --kbend 1.5 --rc 2.5 --equil-steps 1000000 --workdir bulk
 # film without cutting chains: unwrap along z, compress between moving walls, anneal, release
 python tools/build_film.py bulk/equil_final.data --kbend 1.5 --workdir film
+```
+
+To run the minimal configuration above, save it as `run.conf` and create
+the `melt.data` input from the bundled builder:
+
+```bash
+python tools/make_kg_melt.py --nchains 40 --chain-length 25 --no-angles -o melt.data
+./build/fastmd run.conf
 ```
 
 `tools/make_kg_melt.py` writes an overlap-free lattice melt (used by the
