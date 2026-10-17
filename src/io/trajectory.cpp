@@ -42,10 +42,23 @@ void TrajectoryWriter::open(const std::string& path, const std::vector<int>& typ
     mol.resize(natoms_, 0);
     const char magic[8] = {'F', 'M', 'D', 'T', 'R', 'J', '0', '2'};
     const int32_t head[4] = {2, natoms_, 1, 0};
-    fwrite(magic, 1, 8, fp_);
-    fwrite(head, sizeof(int32_t), 4, fp_);
-    fwrite(types.data(), sizeof(int32_t), natoms_, fp_);
-    fwrite(mol.data(), sizeof(int32_t), natoms_, fp_);
+    // Check writes and the flush: buffered fwrite may succeed even when the
+    // filesystem has run out of space. A truncated header must not be accepted.
+    try {
+        auto write = [&](const void* data, size_t size, size_t count) {
+            if (fwrite(data, size, count, fp_) != count)
+                throw std::runtime_error("trajectory: failed to write header to " + path);
+        };
+        write(magic, 1, 8);
+        write(head, sizeof(int32_t), 4);
+        write(types.data(), sizeof(int32_t), natoms_);
+        write(mol.data(), sizeof(int32_t), natoms_);
+        if (fflush(fp_) != 0)
+            throw std::runtime_error("trajectory: failed to flush header to " + path);
+    } catch (...) {
+        close();
+        throw;
+    }
     frames_ = 0;
 }
 
@@ -55,11 +68,16 @@ void TrajectoryWriter::write_frame_raw(long long step, const double box[6],
     if ((int)xyz.size() != 3 * natoms_ || (int)images.size() != 3 * natoms_)
         throw std::invalid_argument("trajectory: frame size does not match natoms");
     const int64_t s = step;
-    fwrite(&s, sizeof(int64_t), 1, fp_);
-    fwrite(box, sizeof(double), 6, fp_);
-    fwrite(xyz.data(), sizeof(float), xyz.size(), fp_);
-    fwrite(images.data(), sizeof(int32_t), images.size(), fp_);
-    fflush(fp_);
+    auto write = [&](const void* data, size_t size, size_t count) {
+        if (fwrite(data, size, count, fp_) != count)
+            throw std::runtime_error("trajectory: failed to write frame (I/O error or full filesystem)");
+    };
+    write(&s, sizeof(int64_t), 1);
+    write(box, sizeof(double), 6);
+    write(xyz.data(), sizeof(float), xyz.size());
+    write(images.data(), sizeof(int32_t), images.size());
+    if (fflush(fp_) != 0)
+        throw std::runtime_error("trajectory: failed to flush frame (I/O error or full filesystem)");
     frames_++;
 }
 
