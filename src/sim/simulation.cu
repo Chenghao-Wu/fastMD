@@ -14,6 +14,7 @@
 #include "../force/table.cuh"
 #include "../force/bond_table.cuh"
 #include "../force/angle_table.cuh"
+#include "../force/dihedral_table.cuh"
 #include "../io/lammps_data.hpp"
 #include <algorithm>
 #include <cmath>
@@ -57,8 +58,10 @@ Simulation::Simulation(const SimParams& params, TopologyData topo)
 
     // OPLS exclusion scheme (1-2,1-3 fully excluded; 1-4 excluded from the
     // neighbor list and re-added scaled by the pair14 kernel) applies
-    // whenever the system has dihedrals or uses Ewald.
-    opls_mode_ = params_.ewald_on || !topo_.dihedrals.empty();
+    // whenever the system has OPLS dihedrals or uses Ewald. Tabulated
+    // (coarse-grained) dihedrals keep the bond-only exclusions, so 1-4 pairs
+    // interact through the pair potential.
+    opls_mode_ = params_.ewald_on || (!topo_.dihedrals.empty() && !topo_.dihedral_params.empty());
     if (opls_mode_) build_exclusions_opls(topo_, topo_, params_.special_dihedral != 0);
     else if (!topo_.bonds.empty()) build_exclusions(topo_, topo_);
 
@@ -166,6 +169,11 @@ void Simulation::upload_force_field() {
         d_angle_table_params_ = upload_vec(topo_.angle_table_params);
         d_angle_table_data_ = upload_vec(topo_.angle_table_data);
     }
+    if (!topo_.dihedral_table_data.empty()) {
+        d_dihedral_table_idx_ = upload_vec(topo_.dihedral_table_idx);
+        d_dihedral_table_params_ = upload_vec(topo_.dihedral_table_params);
+        d_dihedral_table_data_ = upload_vec(topo_.dihedral_table_data);
+    }
 
     BondedParams& bp = bonded_params_;
     bp.bond_type = t_.bond_type;
@@ -182,7 +190,10 @@ void Simulation::upload_force_field() {
     bp.angle_style = d_angle_table_data_ ? 2 : d_angle_params_ ? (topo_.angle_cosine ? 3 : 1) : 0;
     bp.dihedral_type = t_.dihedral_type;
     bp.opls = d_dihedral_params_;
-    bp.dihedral_style = d_dihedral_params_ ? 1 : 0;
+    bp.dihedral_table_idx = d_dihedral_table_idx_;
+    bp.dihedral_table_params = d_dihedral_table_params_;
+    bp.dihedral_table_data = d_dihedral_table_data_;
+    bp.dihedral_style = d_dihedral_params_ ? 1 : d_dihedral_table_data_ ? 2 : 0;
 
     if (params_.ewald_on) {
         if (topo_.charges.empty())
@@ -537,6 +548,10 @@ void Simulation::launch_forces(bool ev, bool atom_virial) {
         launch_dihedral_opls_kernel(p_.pos, p_.force, d_virial_, t_.dihedrals,
                                     t_.dihedral_type, d_dihedral_params_,
                                     t_.ndihedrals, box, st);
+    } else if (t_.ndihedrals > 0 && d_dihedral_table_data_) {
+        launch_dihedral_table_kernel(p_.pos, p_.force, d_virial_, t_.dihedrals, t_.dihedral_type,
+                                     d_dihedral_table_idx_, d_dihedral_table_params_,
+                                     d_dihedral_table_data_, t_.ndihedrals, box, st);
     }
     CUDA_CHECK(cudaGetLastError());
 }
@@ -797,7 +812,7 @@ void Simulation::write_restart(const std::string& fname, int64_t step) {
     int nangle_types = std::max<int>((int)topo_.angle_params.size(), (int)topo_.angle_table_idx.size());
     for (int b : topo_.bond_types) nbond_types = std::max(nbond_types, b + 1);
     for (const auto& a : topo_.angles) nangle_types = std::max(nangle_types, a.w + 1);
-    int ndih_types = (int)topo_.dihedral_params.size();
+    int ndih_types = std::max<int>((int)topo_.dihedral_params.size(), (int)topo_.dihedral_table_idx.size());
     for (int d : topo_.dihedral_types) ndih_types = std::max(ndih_types, d + 1);
     write_lammps_data(fname, f, topo_, params_.ntypes, nbond_types, nangle_types, ndih_types,
                       box_, step);
@@ -1303,6 +1318,9 @@ Simulation::~Simulation() {
     free_dev(d_angle_table_idx_);
     free_dev(d_angle_table_params_);
     free_dev(d_angle_table_data_);
+    free_dev(d_dihedral_table_idx_);
+    free_dev(d_dihedral_table_params_);
+    free_dev(d_dihedral_table_data_);
     if (params_.ewald_on && params_.kspace == 1) pme_.free();
     free_dev(d_ewald_kvecs_);
     free_dev(d_ewald_sfac_);

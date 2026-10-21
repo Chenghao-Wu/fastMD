@@ -19,7 +19,7 @@ TableFileData parse_table_file(const std::string& filename,
                                const std::string& keyword,
                                TableKind kind,
                                TableForceConvention conv) {
-    const bool angle = (kind == TableKind::Angle);
+    const bool angle = (kind == TableKind::Angle || kind == TableKind::Dihedral);   // angular abscissa
     if (angle != (conv == TableForceConvention::DegreesPerDegree ||
                   conv == TableForceConvention::Radians))
         throw std::runtime_error("table convention does not match the table kind");
@@ -116,7 +116,16 @@ TableFileData parse_table_file(const std::string& filename,
             f[k] /= deg2rad;   // -dE/dtheta per degree -> per radian
         }
     }
-    if (angle) {
+    if (kind == TableKind::Dihedral) {
+        // one full period [-180, 180] degrees; the kernel interpolates phi = atan2(...) in (-pi, pi]
+        if (std::fabs(x[0] + M_PI) > 1e-5 || std::fabs(x[n - 1] - M_PI) > 1e-5)
+            throw std::runtime_error(where + ": dihedral table must span exactly [-180, 180] degrees");
+        double emax = 0;
+        for (int k = 0; k < n; k++) emax = std::max(emax, std::fabs(e[k]));
+        if (std::fabs(e[0] - e[n - 1]) > 1e-6 * (1.0 + emax) || std::fabs(f[0] - f[n - 1]) > 1e-6 * (1.0 + emax))
+            throw std::runtime_error(where + ": dihedral table is not periodic (rows at -180 and 180 "
+                                     "degrees differ in energy or force)");
+    } else if (angle) {
         if (x[0] < -1e-6 || x[n - 1] > M_PI + 1e-6)
             throw std::runtime_error(where + ": angle table must lie within [0, 180] degrees");
     } else if (x[0] <= 0.0) {
@@ -155,6 +164,7 @@ TableFileData parse_table_file(const std::string& filename,
     tp.dr = (float)((x[n - 1] - x[0]) / (n - 1));
     tp.inv_dr = 1.0f / tp.dr;
     tp.data_offset = 0;
+    tp.flags = 0;
     result.params.push_back(tp);
     return result;
 }

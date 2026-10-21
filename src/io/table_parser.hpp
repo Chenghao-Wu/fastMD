@@ -7,6 +7,8 @@
 // (x_k, f_k, E_k, 0) on a uniform grid x_k = rmin + k * dr, where
 //   pair / bond tables:  x = r,          f = F(r) / r   (F = -dE/dr)
 //   angle tables:        x = theta [rad], f = -dE/dtheta [energy / rad]
+//   dihedral tables:     x = phi [rad] on the full period [-pi, pi] (IUPAC: trans = pi),
+//                        f = -dE/dphi [energy / rad]; first and last rows must coincide
 struct TableParams {
     float rmin;
     float rmax;
@@ -14,21 +16,25 @@ struct TableParams {
     float inv_dr;
     int   npoints;
     int   data_offset;
+    int   flags;         // TABLE_* bits below (0 from the parser; set by the config)
 };
+
+// Dihedral tables: combined bending-torsion, E = sin^3(theta1) sin^3(theta2) U(phi) (bonded_terms.cuh)
+constexpr int TABLE_DIHEDRAL_CBT = 1;
 
 struct TableFileData {
     std::vector<TableParams> params;
     std::vector<float4>      data;
 };
 
-enum class TableKind { Pair, Bond, Angle };
+enum class TableKind { Pair, Bond, Angle, Dihedral };
 
 // How column 4 (and, for angles, column 2) of a table file are to be read.
 enum class TableForceConvention {
     Force,             // LAMMPS pair/bond tables: column 4 is F = -dE/dr (default)
     ForceOverR,        // legacy fastMD pair/bond tables: column 4 is F/r
-    DegreesPerDegree,  // LAMMPS angle tables: theta in degrees, -dE/dtheta per degree (default)
-    Radians,           // legacy fastMD angle tables: theta in radians, -dE/dtheta per radian
+    DegreesPerDegree,  // angle / dihedral tables: angle in degrees, -dE/dangle per degree (default)
+    Radians,           // angle / dihedral tables in radians, -dE/dangle per radian
 };
 
 // Parse a convention keyword: "force" | "force_over_r" (pair/bond) or

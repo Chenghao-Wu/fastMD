@@ -203,6 +203,7 @@ minus 1.
 | `angle_cosine` | `t K` | Cosine bending potential E = K (1 + cos θ) (LAMMPS `angle_style cosine`; the Kremer–Grest stiffness potential). |
 | `angle_table` | `t file keyword [degrees\|radians]` | Tabulated angle (LAMMPS `angle_style table`: θ in degrees, force per degree; `radians` for legacy tables). |
 | `dihedral_opls` | `t V1 V2 V3 V4` | OPLS dihedral (LAMMPS `dihedral_style opls`). |
+| `dihedral_table` | `t file keyword [degrees\|radians] [cbt]` | Tabulated dihedral on one full period φ ∈ [−180°, 180°] (IUPAC: cis 0°, trans 180°; first and last rows must coincide), force per degree by default. φ = atan2(sin, cos) with Blondel–Karplus gradients. `cbt`: combined bending–torsion E = sin³θ₁ sin³θ₂ U(φ) (Bulacu et al., *J. Chem. Theory Comput.* 9, 3282 (2013)), which stays finite when a bond angle straightens; θ₁, θ₂ are the angles 1-2-3 and 2-3-4. One dihedral style per run. Unlike `dihedral_opls`, tabulated dihedrals do not switch on the OPLS exclusions: only bonded (1-2) pairs are excluded, so 1-4 pairs interact through the pair potential (exclude 1-3 pairs with a zero-energy bond type if needed), as coarse-grained models usually require. |
 
 | `wall` | `face style eps sigma cutoff pos_start [pos_stop]` | Planar wall on `xlo`…`zhi`: `lj93` (energy-shifted LJ 9-3) or `harmonic` (ε (r − rc)²). The plane position is measured from the lower box edge and ramps from `pos_start` to `pos_stop` over the run (confined compression). Up to six walls; not with `npt_nh`. |
 

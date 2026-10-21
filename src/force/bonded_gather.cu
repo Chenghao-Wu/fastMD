@@ -90,10 +90,19 @@ __global__ void bonded_gather_kernel(const float4* __restrict__ pos, float4* __r
                 if (bp.dihedral_style == 0) continue;
                 int4 d4 = __ldg(&dihedrals[term]);
                 float4 r2 = __ldg(&pos[d4.y]), r3 = __ldg(&pos[d4.z]);
-                DihedralTerm dt = opls_dihedral_term(min_image_dr_t<TILT>(__ldg(&pos[d4.x]), r2, box),
-                                                     min_image_dr_t<TILT>(r3, r2, box),
-                                                     min_image_dr_t<TILT>(__ldg(&pos[d4.w]), r3, box),
-                                                     bp.opls[__ldg(&bp.dihedral_type[term])]);
+                float3 vb1 = min_image_dr_t<TILT>(__ldg(&pos[d4.x]), r2, box);
+                float3 vb2 = min_image_dr_t<TILT>(r3, r2, box);
+                float3 vb3 = min_image_dr_t<TILT>(__ldg(&pos[d4.w]), r3, box);
+                int dtype = __ldg(&bp.dihedral_type[term]);
+                DihedralTerm dt;
+                if (bp.dihedral_style == 1) {
+                    dt = opls_dihedral_term(vb1, vb2, vb3, bp.opls[dtype]);
+                } else {
+                    int tidx = bp.dihedral_table_idx[dtype];
+                    if (tidx < 0) continue;
+                    TableParams tp = bp.dihedral_table_params[tidx];
+                    dt = table_dihedral_term(vb1, vb2, vb3, tp, bp.dihedral_table_data + tp.data_offset);
+                }
                 float3 fr = role == 0 ? dt.f1 : role == 1 ? dt.f2 : role == 2 ? dt.f3 : dt.f4;
                 f.x += fr.x; f.y += fr.y; f.z += fr.z;
                 e += 0.25f * dt.e;

@@ -164,6 +164,9 @@ private:
     int*         d_angle_table_idx_ = nullptr;
     TableParams* d_angle_table_params_ = nullptr;
     float4*      d_angle_table_data_ = nullptr;
+    int*         d_dihedral_table_idx_ = nullptr;      // dihedral_table
+    TableParams* d_dihedral_table_params_ = nullptr;
+    float4*      d_dihedral_table_data_ = nullptr;
     PME    pme_;
     int3*  d_ewald_kvecs_ = nullptr;
     float* d_ewald_sfac_ = nullptr;
