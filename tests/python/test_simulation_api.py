@@ -282,6 +282,38 @@ class SimulationAPITest(unittest.TestCase):
         with self.assertRaises(ValueError):
             nofilm.set_friction_profile(z, np.ones_like(z))          # needs `film z`
 
+    def test_friction_updates_preserve_active_samplers(self):
+        """Changing friction must not destroy layer-stress or dynamic-correlation GPU buffers.
+
+        This is a regression for a lifetime bug: set_friction_profile used to
+        release both samplers, even while they remained enabled in the config.
+        """
+        layer_path = os.path.join(self.tmp, "friction_layers.dat")
+        dyn_path = os.path.join(self.tmp, "friction_dyn.dat")
+        sim = fastmd.Simulation.from_text(
+            self.config() + "film z\n"
+            + f"layer_stress 5 3.0 10 {layer_path}\n"
+            + f"dyn_corr {dyn_path} 10 4 modes 1\n"
+        )
+        sim.run(20)
+        before = sim.dyn_corr()["n_bead"].sum()
+        self.assertGreater(before, 0)
+        self.assertTrue(np.isfinite(sim.layer_stress()).all())
+
+        z = np.linspace(-20, 20, 9)
+        sim.set_friction_profile(z, np.ones_like(z))
+        sim.run(20)
+        sim.set_friction_profile_analytic(0.5, 2.0, 5.0)
+        sim.run(20)
+        sim.clear_friction_profile()
+        sim.run(20)
+
+        self.assertEqual(sim.step, 80)
+        self.assertTrue(np.isfinite(sim.layer_stress()).all())
+        d = sim.dyn_corr()
+        self.assertGreater(d["n_bead"].sum(), before)
+        self.assertTrue(np.isfinite(sim.positions).all())
+
     def test_layer_stress(self):
         sim = fastmd.Simulation.from_text(self.config() + "film z\nlayer_stress 5 3.0 10 /dev/null\n")
         sim.run(100)

@@ -1178,14 +1178,10 @@ void Simulation::set_friction_profile(const FrictionProfile& spec, const std::ve
             throw std::invalid_argument("analytic friction profile needs ell > 0 and h > 0");
     }
     CUDA_CHECK(cudaStreamSynchronize(stream_));
+    // Only the friction table belongs to the friction profile. In particular,
+    // do not free the active layer-stress or dynamic-correlation samplers:
+    // their GPU buffers are still used by future steps and by CUDA graphs.
     free_dev(d_friction_table_);
-    free_dev(d_atom_vir_);
-    free_dev(d_layer_accum_);
-    free_dev(d_layer_ticket_);
-    free_dev(d_layer_out_);
-    free_dev(d_layer_shear_);
-    if (layer_corr_.allocated()) layer_corr_.free();
-    if (dyn_.allocated()) dyn_.free();
     FrictionProfile p = spec;
     p.axis = params_.film_axis < 0 ? 2 : params_.film_axis;
     p.d_table = nullptr;
@@ -1263,6 +1259,8 @@ void Simulation::finish() {
 
 Simulation::~Simulation() {
     cudaDeviceSynchronize();
+    // Captured graphs may reference allocations below; release graphs first.
+    invalidate_graphs();
     if (params_.dump_freq > 0) dumper_.close();
     thermo_bufs_.close_file();
     thermo_bufs_.free();
@@ -1271,6 +1269,15 @@ Simulation::~Simulation() {
         correlator_.free();
         stress_sampler_.free();
     }
+    // These samplers and buffers are allocated by setup_analysis() and must
+    // be released even when using the long-lived Python Simulation API.
+    if (layer_corr_.allocated()) layer_corr_.free();
+    if (dyn_.allocated()) dyn_.free();
+    free_dev(d_atom_vir_);
+    free_dev(d_layer_accum_);
+    free_dev(d_layer_ticket_);
+    free_dev(d_layer_out_);
+    free_dev(d_layer_shear_);
     ckpt_p_.free();
     free_dev(d_ckpt_nh_);
     if (d_ckpt_status_) cudaFree(d_ckpt_status_);
@@ -1306,6 +1313,5 @@ Simulation::~Simulation() {
     free_dev(d_out4_);
     t_.free();
     p_.free();
-    invalidate_graphs();
     if (stream_) cudaStreamDestroy(stream_);
 }

@@ -3,6 +3,7 @@
 #include <cstring>
 #include <fstream>
 #include <vector>
+#include <stdexcept>
 
 namespace {
 struct P { float x, y, z, w; };
@@ -57,3 +58,13 @@ TEST(Trajectory, FileLayout) {
     std::memcpy(&iz2, b.data() + head + frame + 56 + 36 + 8 * 4, 4);
     EXPECT_EQ(iz2, 3);
 }
+
+#ifdef __linux__
+TEST(Trajectory, ReportsFilesystemWriteFailure) {
+    // /dev/full accepts fopen but fails when the buffered header is flushed.
+    // A silent partial trajectory is worse than a clear sampling error.
+    TrajectoryWriter w;
+    EXPECT_THROW(w.open("/dev/full", {0, 1}, {1, 1}), std::runtime_error);
+    EXPECT_FALSE(w.is_open());
+}
+#endif
