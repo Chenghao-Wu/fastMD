@@ -8,6 +8,7 @@
 #include "force/angle.cuh"
 #include "force/angle_table.cuh"
 #include "force/dihedral_opls.cuh"
+#include "force/dihedral_table.cuh"
 #include <cmath>
 #include <numeric>
 #include <random>
@@ -70,8 +71,9 @@ struct Result { std::vector<float4> f; double vir[6]; };
 // Run either the scatter kernels or the gather kernel. order[k] = tag of
 // the particle stored at index k (a permutation); results are returned in
 // tag order.
+// dih_style: 1 OPLS, 2 dihedral_table, 3 dihedral_table with cbt
 Result run(const Chains& c, int bond_style, int angle_style, bool gather,
-           const std::vector<int>& order, int tpa = 1) {
+           const std::vector<int>& order, int tpa = 1, int dih_style = 1) {
     const int n = (int)c.pos.size();
     const int np = div_ceil(n, 32) * 32;
     std::vector<int> rank(np), tag(np);
@@ -97,6 +99,18 @@ Result run(const Chains& c, int bond_style, int angle_style, bool gather,
     TableParams tpb{0.3f, 2.5f, (float)(2.2 / 800), (float)(800 / 2.2), 801, 0};
     TableParams tpang{0.0f, (float)M_PI, (float)(M_PI / 720), (float)(720 / M_PI), 721, 0};
     std::vector<int> tidx = {0, 0};
+    const int nd_pts = 3601;                      // dihedral table: the first OPLS set over [-pi, pi]
+    std::vector<float4> dtab(nd_pts);
+    for (int k = 0; k < nd_pts; k++) {
+        double x = -M_PI + 2 * M_PI * k / (nd_pts - 1);
+        double e = 0.65 * (1 + std::cos(x)) + 0.025 * (1 - std::cos(2 * x)) + 0.3 * (1 + std::cos(3 * x));
+        double f = 0.65 * std::sin(x) - 0.05 * std::sin(2 * x) + 0.9 * std::sin(3 * x);   // -dE/dphi
+        dtab[k] = make_float4((float)x, (float)f, (float)e, 0.0f);
+    }
+    dtab[nd_pts - 1].y = dtab[0].y;
+    dtab[nd_pts - 1].z = dtab[0].z;
+    TableParams tpd{(float)-M_PI, (float)M_PI, (float)(2 * M_PI / (nd_pts - 1)), (float)((nd_pts - 1) / (2 * M_PI)),
+                    nd_pts, 0, dih_style == 3 ? TABLE_DIHEDRAL_CBT : 0};
 
     float4* d_pos = to_device(pos);
     std::vector<float4> zero(np, make_float4(0, 0, 0, 0));
@@ -112,6 +126,8 @@ Result run(const Chains& c, int bond_style, int angle_style, bool gather,
     auto* d_tpb = to_device(std::vector<TableParams>{tpb});
     auto* d_tpa = to_device(std::vector<TableParams>{tpang});
     int* d_tidx = to_device(tidx);
+    auto* d_dtab = to_device(dtab);
+    auto* d_tpd = to_device(std::vector<TableParams>{tpd});
     const float L = c.L, iL = 1.0f / c.L;
 
     if (gather) {
@@ -123,9 +139,10 @@ Result run(const Chains& c, int bond_style, int angle_style, bool gather,
         bp.angle_style = angle_style;
         bp.angle = d_ang;
         bp.angle_table_idx = d_tidx; bp.angle_table_params = d_tpa; bp.angle_table_data = d_atab;
-        bp.dihedral_style = 1;
+        bp.dihedral_style = dih_style == 1 ? 1 : 2;
         bp.dihedral_type = topo.dihedral_type;
         bp.opls = d_opls;
+        bp.dihedral_table_idx = d_tidx; bp.dihedral_table_params = d_tpd; bp.dihedral_table_data = d_dtab;
         launch_bonded_gather_kernel(d_pos, d_force, d_vir, d_tag, topo.term_offsets, topo.terms,
                                     topo.bonds, topo.angles, topo.dihedrals, bp, n, cubic_box(L), 0, tpa);
     } else {
@@ -142,8 +159,12 @@ Result run(const Chains& c, int bond_style, int angle_style, bool gather,
         else
             launch_angle_table_kernel(d_pos, d_force, d_vir, topo.angles, d_tidx, d_tpa, d_atab,
                                       topo.nangles, cubic_box(L));
-        launch_dihedral_opls_kernel(d_pos, d_force, d_vir, topo.dihedrals, topo.dihedral_type,
-                                    d_opls, topo.ndihedrals, cubic_box(L));
+        if (dih_style == 1)
+            launch_dihedral_opls_kernel(d_pos, d_force, d_vir, topo.dihedrals, topo.dihedral_type,
+                                        d_opls, topo.ndihedrals, cubic_box(L));
+        else
+            launch_dihedral_table_kernel(d_pos, d_force, d_vir, topo.dihedrals, topo.dihedral_type, d_tidx, d_tpd,
+                                         d_dtab, topo.ndihedrals, cubic_box(L));
     }
     CUDA_CHECK(cudaDeviceSynchronize());
     auto f = to_host(d_force, n);
@@ -155,7 +176,7 @@ Result run(const Chains& c, int bond_style, int angle_style, bool gather,
     topo.free();
     for (void* p : {(void*)d_rank, (void*)d_tag, (void*)d_pos, (void*)d_force, (void*)d_vir,
                     (void*)d_fene, (void*)d_harm, (void*)d_ang, (void*)d_opls, (void*)d_btab,
-                    (void*)d_atab, (void*)d_tpb, (void*)d_tpa, (void*)d_tidx})
+                    (void*)d_atab, (void*)d_tpb, (void*)d_tpa, (void*)d_tidx, (void*)d_dtab, (void*)d_tpd})
         CUDA_CHECK(cudaFree(p));
     return r;
 }
@@ -190,6 +211,20 @@ TEST(BondedGather, MatchesScatterKernelsForAllStyles) {
                 expect_same(ref, run(c, bs, as, true, identity, tpa),
                             (what + " tpa " + std::to_string(tpa)).c_str());
         }
+}
+
+// Tabulated dihedrals, plain and combined bending-torsion: gather equals scatter for every TPA.
+TEST(BondedGather, MatchesScatterKernelsForDihedralTables) {
+    Chains c = make_chains(42);
+    std::vector<int> identity(c.pos.size());
+    std::iota(identity.begin(), identity.end(), 0);
+    for (int ds : {2, 3}) {
+        Result ref = run(c, 3, 2, false, identity, 1, ds);
+        for (int tpa : {1, 2, 4, 8})
+            expect_same(ref, run(c, 3, 2, true, identity, tpa, ds),
+                        (std::string(ds == 2 ? "dihedral_table" : "dihedral_table cbt") + " tpa " +
+                         std::to_string(tpa)).c_str());
+    }
 }
 
 // Particles stored in a shuffled order (as after spatial sorting): the
