@@ -276,9 +276,16 @@ void launch_nh_flush_post_scale(float4* vel, NoseHooverDeviceState* d_state, int
 
 
 // --- NPT chain + barostat GPU kernel ---
-// Combined barostat Suzuki-Yoshida half-step + NH chain propagation.
-// Pre-force (use_carry=true): reads chain_KE_carry, updates eps/v_eps/V/L/inv_L.
-// Post-force (use_carry=false): reads raw KE from d_ke_buf, second barostat half-step.
+// Symmetric MTK splitting (the LAMMPS fix_nh order; Tuckerman et al., J. Phys. A 39, 5629 (2006)), one thread:
+// pre-force  (use_carry=true):  thermostat half step; barostat half kick with the pressure of the current
+//   configuration (kinetic energy after the thermostat scaling); box drift over the full step with the same strain
+//   rate the positions are scaled with in the fused pre-force kernel, so box and coordinates stay consistent;
+// post-force (use_carry=false): the velocities have been kicked and barostat-scaled with the same strain rate;
+//   barostat half kick with the new pressure; thermostat half step.
+// (Previously the barostat took one full kick per step at the end of the step and the box was advanced after the
+// force evaluation with the mean of the old and new strain rates, while the positions had been scaled with the
+// old one; that lag fed the virial of stiff bonds back into the box at O(dt) and made liquids of small stiff
+// molecules unstable at short Pdamp.)
 
 __global__ void nh_npt_chain_baro_kernel(
     NoseHooverDeviceState* __restrict__ d_state,
@@ -291,113 +298,37 @@ __global__ void nh_npt_chain_baro_kernel(
     float* d_V, Box* d_box,
     float* d_baro_scale, float* d_exp_vW, float* d_v_eps_W, float* d_v_eps_W_dt)
 {
-    if (use_carry) nh_update_targets(d_state);
-    float total_KE = use_carry ? d_state->chain_KE_carry : (*d_ke_buf * 0.5f);
-    float virial_trace_raw = *d_virial_trace;
-    float N_f = 3.0f * static_cast<float>(natoms);
-    float N_f_inv = 1.0f / N_f;
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;   // the state is shared: one thread updates it
+    const float N_f = 3.0f * static_cast<float>(natoms);
     float V = V0 * expf(3.0f * d_state->eps);
-    float KE = total_KE;
 
-    // Barostat variables are only advanced in post-force (use_carry=false).
-    // Pre-force re-uses eps/v_eps from the previous post-force update,
-    // matching the LAMMPS operator splitting: barostat advance happens
-    // after force evaluation, not before.
-    if (!use_carry) {
-        // P_inst = (2*KE + virial_trace) / (3*V) — LAMMPS convention
-        float P_inst = (2.0f * total_KE + virial_trace_raw) / (3.0f * V);
-
-        float sy_w[3];
-        sy_w[0] = 1.0f / (2.0f - cbrtf(2.0f));
-        sy_w[1] = -cbrtf(2.0f) / (2.0f - cbrtf(2.0f));
-        sy_w[2] = 1.0f / (2.0f - cbrtf(2.0f));
-
-        for (int sy = 0; sy < 3; sy++) {
-            float w = sy_w[sy] * dt;
-            float dv_eps = 3.0f * V * (P_inst - d_state->P_target) * w;
-            float v_eps_half = d_state->v_eps + 0.5f * dv_eps;
-            d_state->eps += v_eps_half * w / W;
-            dv_eps = 3.0f * V0 * expf(3.0f * d_state->eps)
-                     * (P_inst - d_state->P_target) * w;
-            d_state->v_eps += dv_eps;
-        }
-
+    if (use_carry) {
+        // thermostat half step on the measured kinetic energy at the end of the previous step (equal to the
+        // carried value except at the first step, where the carry is still zero)
+        d_state->chain_KE_carry = *d_ke_buf * 0.5f;
+        float s = nh_chain_update(d_state, 0.0f, true, M, Q1, Q_rest, half_dt, natoms);
+        float KE = d_state->chain_KE_carry * s * s;
+        // barostat half kick (virial of the current configuration, from the last force evaluation)
+        float P_inst = (2.0f * KE + *d_virial_trace) / (3.0f * V);
+        d_state->v_eps += 3.0f * V * (P_inst - d_state->P_target) * half_dt;
+        // box drift: eps += v_eps / W * dt, the strain the positions get in the fused pre-force kernel
+        float v_eps_W = d_state->v_eps / W;
+        d_state->eps += v_eps_W * dt;
         V = V0 * expf(3.0f * d_state->eps);
-    }
-    *d_V = V;
-    *d_box = scaled_box(box0, cbrtf(V / V0));   // isotropic: every edge scales by exp(eps)
-
-    // Barostat velocity scale (applied in pre-force fused kernel)
-    float v_eps_W = d_state->v_eps / W;
-    *d_v_eps_W = v_eps_W;
-    *d_baro_scale = expf(-(1.0f + 3.0f * N_f_inv) * v_eps_W * half_dt);
-    float baro_scale = *d_baro_scale;
-    KE *= baro_scale * baro_scale;
-
-    // Position update barostat parameters
-    *d_exp_vW = expf(v_eps_W * dt);
-    *d_v_eps_W_dt = v_eps_W * dt;
-
-    // --- NH chain (same as NVT, but uses barostat-scaled KE) ---
-    float kT_target = d_state->T_target;
-    float dt2 = half_dt;
-    float dt4 = half_dt * 0.5f;
-    float dt8 = half_dt * 0.25f;
-
-    float v_xi_dotdot[10] = {};
-    float T_current = (2.0f * KE) / N_f;
-
-    if (Q1 > 0.0f) {
-        v_xi_dotdot[0] = (N_f * T_current - N_f * kT_target) / Q1;
-    }
-
-    int nc_tchain = 1;
-    float ncfac = 1.0f / static_cast<float>(nc_tchain);
-    float scale = 1.0f;
-
-    for (int iloop = 0; iloop < nc_tchain; iloop++) {
-        for (int ich = M - 1; ich > 0; ich--) {
-            float expfac = (ich + 1 < M)
-                ? nh_expf(-ncfac * dt8 * d_state->v_xi[ich + 1]) : 1.0f;
-            d_state->v_xi[ich] *= expfac;
-            d_state->v_xi[ich] += v_xi_dotdot[ich] * ncfac * dt4;
-            d_state->v_xi[ich] *= expfac;
-        }
-        float expfac0 = (M > 1)
-            ? nh_expf(-ncfac * dt8 * d_state->v_xi[1]) : 1.0f;
-        d_state->v_xi[0] *= expfac0;
-        d_state->v_xi[0] += v_xi_dotdot[0] * ncfac * dt4;
-        d_state->v_xi[0] *= expfac0;
-
-        float factor_eta = nh_expf(-ncfac * dt2 * d_state->v_xi[0]);
-        scale = factor_eta;
-        T_current *= factor_eta * factor_eta;
-
-        if (Q1 > 0.0f) {
-            v_xi_dotdot[0] = (N_f * T_current - N_f * kT_target) / Q1;
-        }
-        for (int ich = 0; ich < M; ich++) {
-            d_state->xi[ich] += ncfac * dt2 * d_state->v_xi[ich];
-        }
-        d_state->v_xi[0] *= expfac0;
-        d_state->v_xi[0] += v_xi_dotdot[0] * ncfac * dt4;
-        d_state->v_xi[0] *= expfac0;
-        for (int ich = 1; ich < M; ich++) {
-            float expfac = (ich + 1 < M)
-                ? nh_expf(-ncfac * dt8 * d_state->v_xi[ich + 1]) : 1.0f;
-            d_state->v_xi[ich] *= expfac;
-            float Q_prev = (ich == 1) ? Q1 : Q_rest;
-            v_xi_dotdot[ich] = (Q_prev * d_state->v_xi[ich - 1] * d_state->v_xi[ich - 1]
-                                - kT_target) / Q_rest;
-            d_state->v_xi[ich] += v_xi_dotdot[ich] * ncfac * dt4;
-            d_state->v_xi[ich] *= expfac;
-        }
-    }
-
-    d_state->nh_scale = scale;
-    if (!use_carry) {
-        d_state->chain_KE_carry = KE * scale * scale;
-        d_state->step++;
+        *d_V = V;
+        *d_box = scaled_box(box0, expf(d_state->eps));   // isotropic: every edge scales by exp(eps)
+        *d_v_eps_W = v_eps_W;
+        *d_baro_scale = expf(-(1.0f + 3.0f / N_f) * v_eps_W * half_dt);
+        *d_exp_vW = expf(v_eps_W * dt);
+        *d_v_eps_W_dt = v_eps_W * dt;
+        d_state->nh_scale = s;    // applied together with the barostat scale in the fused kernel
+    } else {
+        // kinetic energy after the force kick and the barostat scaling of this step
+        float KE = *d_ke_buf * 0.5f;
+        float P_inst = (2.0f * KE + *d_virial_trace) / (3.0f * V);
+        d_state->v_eps += 3.0f * V * (P_inst - d_state->P_target) * half_dt;
+        // thermostat half step: stores nh_scale, carries KE * scale^2 and ends the step
+        nh_chain_update(d_state, KE, false, M, Q1, Q_rest, half_dt, natoms);
     }
 }
 

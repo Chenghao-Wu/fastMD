@@ -151,12 +151,12 @@ void launch_nh_npt_ke_and_virial_trace(
     float* d_ke_out, float* d_virial_trace_out,
     int natoms, cudaStream_t stream = 0);
 
-// Combined NPT barostat SY half-step + NH chain propagation on GPU.
-// Reads KE from d_ke_buf and virial trace from d_virial_trace.
-// Updates d_state->eps, v_eps, xi, v_xi, nh_scale, chain_KE_carry.
-// Writes volume-dependent parameters to NPT scratch for subsequent kernels.
-// If use_carry: pre-force call (reads chain_KE_carry, updates eps/v_eps).
-// If !use_carry: post-force call (reads raw KE, second barostat half-step).
+// NPT barostat half kick + NH chain half step on GPU (symmetric MTK splitting, LAMMPS fix_nh order).
+// Reads KE from d_ke_buf and the virial trace from d_virial_trace; one thread updates the state.
+// If use_carry: pre-force call (thermostat half step, barostat half kick, box drift over the full step;
+//   writes the box and the strain-rate factors for the fused pre-force kernel).
+// If !use_carry: post-force call (KE after the kick and the barostat velocity scaling; barostat half kick,
+//   thermostat half step).
 __global__ void nh_npt_chain_baro_kernel(
     NoseHooverDeviceState* __restrict__ d_state,
     const float* __restrict__ d_ke_buf,
