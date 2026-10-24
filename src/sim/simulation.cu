@@ -680,7 +680,11 @@ void Simulation::integrate_post_force() {
     if (!is_nose_hoover(params_.ensemble)) {
         launch_integrator_post_force(p_.vel, p_.force, p_.pos, n, hdt, stream_, d_step_);
     } else if (nose_hoover_.is_npt) {
+        // kick, barostat scaling with this step's strain rate (as before the force evaluation), then the
+        // pressure for the second barostat half kick and the thermostat half step (LAMMPS fix_nh order)
         launch_nh_v_verlet_half(p_.vel, p_.force, p_.pos, n, hdt, stream_);
+        launch_nh_barostat_vel_half(p_.vel, npt_scratch_.d_v_eps_W, 1.0f / (3.0f * n), n, hdt,
+                                    stream_);
         launch_nh_npt_ke_and_virial_trace(p_.vel, d_virial_, p_.pos, d_ke_buf_,
                                           npt_scratch_.d_virial_trace, n, stream_);
         nh_npt_chain_baro_kernel<<<1, 32, 0, stream_>>>(
@@ -690,8 +694,6 @@ void Simulation::integrate_post_force() {
             npt_scratch_.d_V, npt_scratch_.d_box,
             npt_scratch_.d_baro_scale, npt_scratch_.d_exp_vW,
             npt_scratch_.d_v_eps_W, npt_scratch_.d_v_eps_W_dt);
-        launch_nh_barostat_vel_half(p_.vel, npt_scratch_.d_v_eps_W, 1.0f / (3.0f * n), n, hdt,
-                                    stream_);
         launch_nh_global_scale_vel(p_.vel, d_nh_state_, n, stream_);
     } else {
         launch_nh_nvt_post_force_chain(p_.vel, p_.force, p_.pos, d_nh_state_, n, hdt,
