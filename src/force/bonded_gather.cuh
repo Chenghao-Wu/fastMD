@@ -33,9 +33,12 @@ struct BondedParams {
     const TableParams* angle_table_params = nullptr;
     const float4* angle_table_data = nullptr;
 
-    int dihedral_style = 0;    // 0 none, 1 OPLS
+    int dihedral_style = 0;    // 0 none, 1 OPLS, 2 table
     const int* dihedral_type = nullptr;
     const OPLSDihedralParams* opls = nullptr;
+    const int* dihedral_table_idx = nullptr;
+    const TableParams* dihedral_table_params = nullptr;
+    const float4* dihedral_table_data = nullptr;
 };
 
 // Accumulates into force[] (call after the overwriting nonbonded kernel).

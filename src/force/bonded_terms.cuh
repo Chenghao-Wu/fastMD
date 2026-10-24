@@ -225,3 +225,88 @@ __device__ __forceinline__ DihedralTerm opls_dihedral_term(float3 vb1, float3 vb
     t.vir[5] = vb1.z * t.f1.z + vb2.z * t.f3.z + (vb3.z + vb2.z) * t.f4.z;
     return t;
 }
+
+// Tabulated dihedral (dihedral_table). Same arguments as the OPLS term: vb1 = r1 - r2, vb2 = r3 - r2,
+// vb3 = r4 - r3. phi = atan2(sin, cos) in (-pi, pi] with the IUPAC convention (cis 0, trans pi), forces
+// from the Blondel-Karplus gradients (J. Comput. Chem. 17, 1132 (1996)): no 1/sin(phi) singularity.
+// Table column y holds -dU/dphi per radian on [-pi, pi] (table_parser.hpp).
+// With TABLE_DIHEDRAL_CBT (combined bending-torsion, Bulacu et al., J. Chem. Theory Comput. 9, 3282 (2013))
+// E = sin^3(theta1) sin^3(theta2) U(phi), theta1 the angle 1-2-3 and theta2 the angle 2-3-4: the torsion
+// gradient's 1/sin(theta) is cancelled by the prefactor, so forces stay finite (and vanish) as a bond angle
+// straightens. The prefactor's own derivatives add bending forces on both angles.
+__device__ __forceinline__ DihedralTerm table_dihedral_term(float3 vb1, float3 vb2, float3 vb3,
+                                                            const TableParams& tp,
+                                                            const float4* __restrict__ tbl) {
+    // Blondel-Karplus notation: F = r1 - r2, G = r2 - r3, H = r4 - r3
+    const float3 F = vb1, G = make_float3(-vb2.x, -vb2.y, -vb2.z), H = vb3;
+    const float3 A = make_float3(F.y * G.z - F.z * G.y, F.z * G.x - F.x * G.z, F.x * G.y - F.y * G.x);
+    const float3 B = make_float3(H.y * G.z - H.z * G.y, H.z * G.x - H.x * G.z, H.x * G.y - H.y * G.x);
+    const float a2_raw = A.x * A.x + A.y * A.y + A.z * A.z, b2_raw = B.x * B.x + B.y * B.y + B.z * B.z;
+    const float a2 = fmaxf(a2_raw, 1e-20f), b2 = fmaxf(b2_raw, 1e-20f);
+    const float g2 = G.x * G.x + G.y * G.y + G.z * G.z;
+    const float gn = fmaxf(sqrtf(g2), 1e-20f);
+    const float3 BxA = make_float3(B.y * A.z - B.z * A.y, B.z * A.x - B.x * A.z, B.x * A.y - B.y * A.x);
+    const float cos_part = A.x * B.x + A.y * B.y + A.z * B.z;                      // |A||B| cos(phi)
+    const float sin_part = (BxA.x * G.x + BxA.y * G.y + BxA.z * G.z) / gn;       // |A||B| sin(phi)
+    float phi = atan2f(sin_part, cos_part);
+
+    const float ph = fminf(fmaxf(phi, tp.rmin), tp.rmax);
+    int idx = (int)((ph - tp.rmin) * tp.inv_dr);
+    idx = max(0, min(idx, tp.npoints - 2));
+    const float u = (ph - (tp.rmin + idx * tp.dr)) * tp.inv_dr;
+    const float4 p0 = tbl[idx], p1 = tbl[idx + 1];
+    const float f_phi = p0.y + u * (p1.y - p0.y);       // -dU/dphi
+    const float e_phi = p0.z + u * (p1.z - p0.z);       // U(phi)
+
+    // force on atom a = f_phi * w * dphi/dr_a, w = 1 (plain) or sin^3 theta1 sin^3 theta2 (CBT), through
+    // ga = w |G| / |A|^2, gb = w |G| / |B|^2, fg = w F.G / (|A|^2 |G|), hg = w H.G / (|B|^2 |G|)
+    const float fgd = F.x * G.x + F.y * G.y + F.z * G.z, hgd = H.x * G.x + H.y * G.y + H.z * G.z;
+    const bool cbt = tp.flags & TABLE_DIHEDRAL_CBT;
+    float w = 1.0f, ga, gb, fg, hg;
+    float s1 = 0.0f, s2 = 0.0f, ff2 = 0.0f, hh2 = 0.0f, fgn2 = 1.0f, hgn2 = 1.0f;
+    if (!cbt) {
+        ga = gn / a2; gb = gn / b2;
+        fg = fgd / (a2 * gn); hg = hgd / (b2 * gn);
+    } else {
+        // |A| = |F||G| sin(theta1), |B| = |H||G| sin(theta2): w / |A|^2 = s1 s2^3 / (|F|^2 |G|^2), no division by |A|^2
+        ff2 = fmaxf(F.x * F.x + F.y * F.y + F.z * F.z, 1e-20f);
+        hh2 = fmaxf(H.x * H.x + H.y * H.y + H.z * H.z, 1e-20f);
+        fgn2 = ff2 * fmaxf(g2, 1e-20f);
+        hgn2 = hh2 * fmaxf(g2, 1e-20f);
+        s1 = sqrtf(fminf(a2_raw / fgn2, 1.0f));
+        s2 = sqrtf(fminf(b2_raw / hgn2, 1.0f));
+        const float s13 = s1 * s1 * s1, s23 = s2 * s2 * s2;
+        w = s13 * s23;
+        ga = s1 * s23 * gn / fgn2; gb = s13 * s2 * gn / hgn2;
+        fg = s1 * s23 * fgd / (fgn2 * gn); hg = s13 * s2 * hgd / (hgn2 * gn);
+    }
+    DihedralTerm t;
+    t.f1 = make_float3(-f_phi * ga * A.x, -f_phi * ga * A.y, -f_phi * ga * A.z);
+    t.f4 = make_float3(f_phi * gb * B.x, f_phi * gb * B.y, f_phi * gb * B.z);
+    t.f2 = make_float3(f_phi * ((ga + fg) * A.x - hg * B.x), f_phi * ((ga + fg) * A.y - hg * B.y),
+                       f_phi * ((ga + fg) * A.z - hg * B.z));
+    if (cbt) {
+        // bending: dE/dtheta1 = 3 s1^2 cos(theta1) s2^3 U, projected with prefactor (dE/dtheta) / sin(theta)
+        // (angle_project); theta1 at atom 2 (arms r1 - r2, r3 - r2), theta2 at atom 3 (arms r2 - r3, r4 - r3)
+        const float c1 = -fgd * rsqrtf(fgn2), c2 = hgd * rsqrtf(hgn2);
+        AngleTerm t1, t2;
+        angle_project(F, vb2, ff2, fmaxf(g2, 1e-20f), rsqrtf(ff2), 1.0f / gn, c1,
+                      3.0f * s1 * c1 * s2 * s2 * s2 * e_phi, t1);
+        angle_project(G, H, fmaxf(g2, 1e-20f), hh2, 1.0f / gn, rsqrtf(hh2), c2,
+                      3.0f * s2 * c2 * s1 * s1 * s1 * e_phi, t2);
+        t.f1 = make_float3(t.f1.x + t1.fi.x, t.f1.y + t1.fi.y, t.f1.z + t1.fi.z);
+        t.f2 = make_float3(t.f2.x - t1.fi.x - t1.fk.x + t2.fi.x, t.f2.y - t1.fi.y - t1.fk.y + t2.fi.y,
+                           t.f2.z - t1.fi.z - t1.fk.z + t2.fi.z);
+        t.f4 = make_float3(t.f4.x + t2.fk.x, t.f4.y + t2.fk.y, t.f4.z + t2.fk.z);
+    }
+    t.f3 = make_float3(-t.f1.x - t.f2.x - t.f4.x, -t.f1.y - t.f2.y - t.f4.y, -t.f1.z - t.f2.z - t.f4.z);
+    t.e = w * e_phi;
+    // same virial convention as the OPLS term: v = vb1 f1 + vb2 f3 + (vb3 + vb2) f4
+    t.vir[0] = vb1.x * t.f1.x + vb2.x * t.f3.x + (vb3.x + vb2.x) * t.f4.x;
+    t.vir[1] = vb1.x * t.f1.y + vb2.x * t.f3.y + (vb3.x + vb2.x) * t.f4.y;
+    t.vir[2] = vb1.x * t.f1.z + vb2.x * t.f3.z + (vb3.x + vb2.x) * t.f4.z;
+    t.vir[3] = vb1.y * t.f1.y + vb2.y * t.f3.y + (vb3.y + vb2.y) * t.f4.y;
+    t.vir[4] = vb1.y * t.f1.z + vb2.y * t.f3.z + (vb3.y + vb2.y) * t.f4.z;
+    t.vir[5] = vb1.z * t.f1.z + vb2.z * t.f3.z + (vb3.z + vb2.z) * t.f4.z;
+    return t;
+}

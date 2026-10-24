@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "io/config.hpp"
 #include "io/lammps_data.hpp"
+#include <cmath>
 #include <fstream>
 
 namespace {
@@ -133,4 +134,42 @@ TEST(Config, ValidateSystemChecksCoverage) {
     } catch (const std::runtime_error& e) {
         EXPECT_NE(std::string(e.what()).find("bond type 2"), std::string::npos) << e.what();
     }
+}
+
+namespace {
+std::string dihedral_table_file() {
+    std::ofstream("test_dihedral_table.txt") << "DIH\nN 3\n\n1 -180 1.0 0.0\n2 0 3.0 0.0\n3 180 1.0 0.0\n";
+    return "test_dihedral_table.txt";
+}
+}  // namespace
+
+// dihedral_table <t> <file> <keyword> [degrees|radians] [cbt]
+TEST(Config, ParsesDihedralTableAndCbtFlag) {
+    TopologyData topo;
+    parse_config(write_cfg("dihtab", std::string(kBase) + "lj 0 0 1 1\ndihedral_table 0 " + dihedral_table_file() +
+                                         " DIH degrees cbt\ndihedral_table 1 " + dihedral_table_file() + " DIH\n"),
+                 topo);
+    ASSERT_EQ(topo.dihedral_table_idx.size(), 2u);
+    ASSERT_EQ(topo.dihedral_table_params.size(), 2u);
+    EXPECT_EQ(topo.dihedral_table_params[topo.dihedral_table_idx[0]].flags, TABLE_DIHEDRAL_CBT);
+    EXPECT_EQ(topo.dihedral_table_params[topo.dihedral_table_idx[1]].flags, 0);
+    EXPECT_NEAR(topo.dihedral_table_params[0].rmin, -M_PI, 1e-6);
+    TopologyData t2;
+    parse_config(write_cfg("dihtab_cbt_only", std::string(kBase) + "lj 0 0 1 1\ndihedral_table 0 " +
+                                                  dihedral_table_file() + " DIH cbt\n"), t2);
+    EXPECT_EQ(t2.dihedral_table_params[0].flags, TABLE_DIHEDRAL_CBT);
+}
+
+TEST(Config, RejectsBadDihedralTableLines) {
+    const std::string f = dihedral_table_file();
+    expect_reject("dih_two_styles", std::string(kBase) + "lj 0 0 1 1\ndihedral_opls 0 1 0 0 0\ndihedral_table 0 " + f +
+                                        " DIH\n", "one dihedral style");
+    expect_reject("dih_bad_option", std::string(kBase) + "lj 0 0 1 1\ndihedral_table 0 " + f + " DIH degrees foo\n",
+                  "unexpected argument");
+    expect_reject("dih_cbt_twice", std::string(kBase) + "lj 0 0 1 1\ndihedral_table 0 " + f + " DIH cbt cbt\n",
+                  "unexpected argument");
+    expect_reject("dih_twice", std::string(kBase) + "lj 0 0 1 1\ndihedral_table 0 " + f + " DIH\ndihedral_table 0 " +
+                                   f + " DIH\n", "given twice");
+    expect_reject("bond_cbt", std::string(kBase) + "lj 0 0 1 1\nbond_table 0 " + table_file() + " LJ_TABLE force cbt\n",
+                  "unexpected argument");
 }

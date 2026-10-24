@@ -63,6 +63,9 @@ struct TopologyData {
     std::vector<int>         angle_table_idx;
     std::vector<TableParams> angle_table_params;
     std::vector<float4>      angle_table_data;
+    std::vector<int>         dihedral_table_idx;
+    std::vector<TableParams> dihedral_table_params;
+    std::vector<float4>      dihedral_table_data;
 };
 
 void finalize_params(SimParams& params);

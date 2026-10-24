@@ -93,3 +93,30 @@ TEST(TableParser, RejectsNonUniformSpacingAndBadInput) {
     EXPECT_THROW(parse_table_file(f4, "T", TableKind::Pair, TableForceConvention::Force), std::runtime_error);
     EXPECT_THROW(parse_table_convention("degrees", false), std::runtime_error);
 }
+
+// Dihedral tables: one full period [-180, 180] degrees, force per degree -> per radian, periodic end rows.
+TEST(TableParser, DihedralTableFullPeriodAndPeriodicity) {
+    const double d2r = M_PI / 180.0;
+    auto table = [&](double lo, double hi, double e_last_shift) {
+        std::ostringstream os;
+        os << "DIH\nN 5\n\n";
+        for (int i = 0; i < 5; i++) {
+            double deg = lo + (hi - lo) * i / 4, p = deg * d2r;
+            double e = 2.0 * std::cos(p) + (i == 4 ? e_last_shift : 0.0);
+            os << i + 1 << " " << deg << " " << e << " " << 2.0 * std::sin(p) * d2r << "\n";   // -dE/dphi per degree
+        }
+        return os.str();
+    };
+    auto t = parse_table_file(write_tmp("dih", table(-180, 180, 0.0)), "DIH", TableKind::Dihedral,
+                              TableForceConvention::DegreesPerDegree);
+    EXPECT_NEAR(t.params[0].rmin, -M_PI, 1e-6);
+    EXPECT_NEAR(t.params[0].rmax, M_PI, 1e-6);
+    EXPECT_NEAR(t.data[3].y, 2.0 * std::sin(M_PI / 2), 1e-5);      // per radian at +90 degrees
+    EXPECT_EQ(t.params[0].flags, 0);
+    EXPECT_THROW(parse_table_file(write_tmp("dih_half", table(0, 180, 0.0)), "DIH", TableKind::Dihedral,
+                                  TableForceConvention::DegreesPerDegree), std::runtime_error);
+    EXPECT_THROW(parse_table_file(write_tmp("dih_nonper", table(-180, 180, 0.5)), "DIH", TableKind::Dihedral,
+                                  TableForceConvention::DegreesPerDegree), std::runtime_error);
+    EXPECT_THROW(parse_table_file(write_tmp("dih_conv", table(-180, 180, 0.0)), "DIH", TableKind::Dihedral,
+                                  TableForceConvention::Force), std::runtime_error);
+}

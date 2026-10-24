@@ -88,6 +88,7 @@ add_library(core STATIC
     src/force/pme.cu
     src/force/bond_harmonic.cu
     src/force/dihedral_opls.cu
+    src/force/dihedral_table.cu
     src/force/table.cu
     src/force/fene.cu
     src/force/angle.cu

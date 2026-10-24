@@ -101,7 +101,7 @@ SimParams parse_config(std::istream& in, const std::string& filename, TopologyDa
     struct LJ { int line, ti, tj; float eps, sig; };
     struct LJType { int line, t; float eps, sig; };
     struct Table { int line, ti, tj; std::string file, keyword; TableForceConvention conv; };
-    struct BondedTable { int line, t; std::string file, keyword; TableForceConvention conv; };
+    struct BondedTable { int line, t; std::string file, keyword; TableForceConvention conv; bool cbt; };
     struct Fene { int line, t; FENEParams p; };
     struct Angle { int line, t; float k, theta0_deg; };
     struct HBond { int line, t; float k, r0; };
@@ -109,7 +109,7 @@ SimParams parse_config(std::istream& in, const std::string& filename, TopologyDa
     std::vector<LJ> lj_entries;
     std::vector<LJType> lj_type_entries;
     std::vector<Table> table_entries;
-    std::vector<BondedTable> bond_table_entries, angle_table_entries;
+    std::vector<BondedTable> bond_table_entries, angle_table_entries, dihedral_table_entries;
     std::vector<Fene> fene_entries;
     std::vector<Angle> angle_entries, cosine_entries;
     std::vector<HBond> hbond_entries;
@@ -129,7 +129,7 @@ SimParams parse_config(std::istream& in, const std::string& filename, TopologyDa
 
         static const std::set<std::string> repeatable = {
             "lj", "lj_type", "table", "bond_type", "angle_type", "angle_cosine", "bond_harmonic", "wall",
-            "dihedral_opls", "bond_table", "angle_table"};
+            "dihedral_opls", "bond_table", "angle_table", "dihedral_table"};
         if (!repeatable.count(key) && !seen.insert(key).second)
             a.fail("specified more than once");
 
@@ -441,14 +441,21 @@ SimParams parse_config(std::istream& in, const std::string& filename, TopologyDa
             Angle e{a.line(), (int)a.integer("t"), 0, 0};
             e.k = (float)a.real("K");
             cosine_entries.push_back(e);
-        } else if (key == "bond_table" || key == "angle_table") {
-            bool angle = key == "angle_table";
+        } else if (key == "bond_table" || key == "angle_table" || key == "dihedral_table") {
+            bool angle = key != "bond_table";       // angle and dihedral tables: angular abscissa
             BondedTable e{a.line(), (int)a.integer("t"), "", "",
-                          angle ? TableForceConvention::DegreesPerDegree : TableForceConvention::Force};
+                          angle ? TableForceConvention::DegreesPerDegree : TableForceConvention::Force, false};
             e.file = a.str("file");
             e.keyword = a.str("keyword");
-            if (a.more()) e.conv = parse_table_convention(a.str("convention"), angle);
-            (angle ? angle_table_entries : bond_table_entries).push_back(e);
+            bool conv_set = false;          // [convention] [cbt] (cbt: dihedral tables only)
+            while (a.more()) {
+                std::string w = a.str("option");
+                if (key == "dihedral_table" && w == "cbt" && !e.cbt) e.cbt = true;
+                else if (!conv_set && !e.cbt) { e.conv = parse_table_convention(w, angle); conv_set = true; }
+                else a.fail("unexpected argument '" + w + "'");
+            }
+            (key == "dihedral_table" ? dihedral_table_entries
+             : angle ? angle_table_entries : bond_table_entries).push_back(e);
         } else if (key == "bonded_mode") {
             std::string v = a.str("gather|scatter");
             if (v != "gather" && v != "scatter") a.fail("expected 'gather' or 'scatter'");
@@ -666,6 +673,8 @@ SimParams parse_config(std::istream& in, const std::string& filename, TopologyDa
     topo.angle_params_set = angle_set;
     topo.dihedral_params_set = dih_set;
 
+    if (!dih_entries.empty() && !dihedral_table_entries.empty())
+        throw std::runtime_error(filename + ": use only one dihedral style (dihedral_opls or dihedral_table)");
     int nbond_styles = !fene_entries.empty() + !hbond_entries.empty() + !bond_table_entries.empty();
     if (nbond_styles > 1)
         throw std::runtime_error(filename + ": use only one bond style (bond_type FENE, "
@@ -681,6 +690,7 @@ SimParams parse_config(std::istream& in, const std::string& filename, TopologyDa
             TableFileData tfd = parse_table_file(e.file, e.keyword, kind, e.conv);
             TableParams tp = tfd.params[0];
             tp.data_offset = (int)data_vec.size();
+            tp.flags = e.cbt ? TABLE_DIHEDRAL_CBT : 0;
             int idx = (int)params_vec.size();
             params_vec.push_back(tp);
             data_vec.insert(data_vec.end(), tfd.data.begin(), tfd.data.end());
@@ -692,6 +702,8 @@ SimParams parse_config(std::istream& in, const std::string& filename, TopologyDa
                        topo.bond_table_params, topo.bond_table_data, "bond_table");
     load_bonded_tables(angle_table_entries, TableKind::Angle, topo.angle_table_idx,
                        topo.angle_table_params, topo.angle_table_data, "angle_table");
+    load_bonded_tables(dihedral_table_entries, TableKind::Dihedral, topo.dihedral_table_idx,
+                       topo.dihedral_table_params, topo.dihedral_table_data, "dihedral_table");
 
     // --- coordinates without a data file (xyz, single type) -----------------
     if (!coords_file.empty()) {
@@ -805,12 +817,16 @@ void validate_system(const SimParams& params, const TopologyData& topo) {
         }
     }
     if (!topo.dihedrals.empty()) {
-        if (topo.dihedral_params.empty())
-            throw std::runtime_error("the data file has dihedrals but no dihedral_opls parameters");
-        for (int dt : topo.dihedral_types)
-            if (!covered(topo.dihedral_params_set, dt))
+        bool table = !topo.dihedral_table_idx.empty();
+        if (topo.dihedral_params.empty() && !table)
+            throw std::runtime_error("the data file has dihedrals but no dihedral_opls or dihedral_table parameters");
+        for (int dt : topo.dihedral_types) {
+            bool ok = table ? (dt < (int)topo.dihedral_table_idx.size() && topo.dihedral_table_idx[dt] >= 0)
+                            : covered(topo.dihedral_params_set, dt);
+            if (!ok)
                 throw std::runtime_error("no parameters for dihedral type " + std::to_string(dt + 1) +
                                          " (config index " + std::to_string(dt) + ")");
+        }
     }
     if (params.ewald_on && topo.charges.empty())
         throw std::runtime_error("coulomb ewald requires per-atom charges (Atoms # full or charge)");
