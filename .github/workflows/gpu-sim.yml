@@ -1,0 +1,110 @@
+name: GPU Simulator
+
+# Optional, non-required check. The hosted runners have no GPU, so this runs the
+# `gpu`-labelled ctest tests (and the Python API test) on a simulated NVIDIA
+# H100 (https://github.com/pantheongpu/pantheonsim). A simulator cannot
+# reproduce hardware-specific behavior or timing, so it complements real-GPU
+# testing and does not replace it.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "python/**"
+      - "tools/**"
+      - "CMakeLists.txt"
+      - ".github/workflows/gpu-sim.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gpu-tests:
+    name: ${{ matrix.name }} (CUDA 13.0 and simulated H100)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: unit tests
+            group: unit
+          - name: test_simulation
+            group: simulation
+          - name: Python API
+            group: python
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+
+      - name: Set up the simulated GPU and CUDA toolkit
+        uses: pantheongpu/setup-pantheonsim@ca87fe3143b29166822b923d6050945c5179408c # v0.1.5
+        with:
+          gpu: nvidia/h100
+          cuda-toolkit: "13.0"
+          # The core library links the toolkit's cuFFT and cuRAND.
+          library-path: 'false'
+
+      - name: Install Python build dependencies
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install pybind11 numpy
+
+      # 90-virtual embeds PTX only, which the simulator runs; it also needs a
+      # shared CUDA runtime.
+      - name: Configure
+        run: |
+          py="$RUNNER_TEMP/venv/bin/python"
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-13.0/bin/nvcc \
+            -DCUDAToolkit_ROOT=/usr/local/cuda-13.0 \
+            -DCMAKE_CUDA_ARCHITECTURES=90-virtual \
+            -DCMAKE_CUDA_RUNTIME_LIBRARY=Shared \
+            -DFASTMD_BUILD_TESTS=ON -DFASTMD_BUILD_PYTHON=ON \
+            -DPython_EXECUTABLE="$py" \
+            -Dpybind11_DIR="$("$py" -m pybind11 --cmakedir)"
+
+      - name: Build
+        run: vgpu run --preload cmake --build build -j3
+
+      # Every `gpu` test except test_simulation and the Python API test (own
+      # jobs, they are slow) and two binaries run below with named exclusions.
+      - name: ctest
+        if: matrix.group == 'unit'
+        run: >
+          vgpu run --preload ctest --test-dir build --output-on-failure --no-tests=error
+          -L gpu -E '^(test_simulation|test_python_api|test_verlet|test_dihedral_opls)$'
+
+      # Known simulator gaps, excluded by name (see the pull request text):
+      # - VerletList.GrowsOnOverflowAndStaysComplete and
+      #   Simulation.LayerStressSumRules reach a `bar.sync` that not every lane
+      #   of a warp arrives at (the simulator does not yet reconverge the
+      #   warp after a divergent `vote.sync.ballot`).
+      # - DihedralOPLS.ForceIsNegativeEnergyGradient compares a float finite
+      #   difference with a near-zero force and fails on a one-ulp energy
+      #   difference on the simulator; it passes on an RTX 3060.
+      - name: test_verlet and test_dihedral_opls
+        if: matrix.group == 'unit'
+        working-directory: build/tests
+        run: |
+          vgpu run ./test_verlet --gtest_filter=-VerletList.GrowsOnOverflowAndStaysComplete
+          vgpu run ./test_dihedral_opls --gtest_filter=-DihedralOPLS.ForceIsNegativeEnergyGradient
+
+      - name: test_simulation
+        if: matrix.group == 'simulation'
+        working-directory: build/tests
+        run: vgpu run ./test_simulation --gtest_filter=-Simulation.LayerStressSumRules
+
+      - name: test_python_api
+        if: matrix.group == 'python'
+        run: vgpu run --preload ctest --test-dir build --output-on-failure --no-tests=error -R '^test_python_api$'
